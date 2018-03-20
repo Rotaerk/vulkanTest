@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+set -eu
+
+invokedPath=$0
+
+main() {
+  usageText="Usage: $invokedPath <ref-file-path> [<ref-specific args>]
+
+<ref-file-path>
+Path of the reference file for which to run a command.  If the file does not exist, the option to create it will be provided.
+
+<ref-specific args>
+Dependent upon the specified reference file.  Omit to see more information.
+"
+
+  [ "${1---help}" == "--help" ] && usage
+
+  refFilePath="$1"
+  shift
+
+  if [ -f "$refFilePath" ]; then
+    local refScheme="$(readRef scheme)"
+
+    case "$refScheme" in
+      github) githubRef "$@";;
+      *) error "The '$refFilePath' ref has an unrecognized scheme: $refScheme.";;
+    esac
+  elif [ -d "$refFilePath" ]; then
+    error "The '$refFilePath' path specifies a directory, not a ref file."
+  else
+    newRef "$@"
+  fi
+}
+
+newRef() {
+  usageText="New reference usage: $invokedPath '$refFilePath' new <scheme> [<scheme-specific args>]
+
+<scheme>
+The scheme of the new reference. Supported values: github.
+
+<scheme-specific args>
+Dependent upon the specified scheme.  Omit to see more information.
+"
+
+  [ "${1---help}" == "--help" ] && usage
+
+  [ "$1" == "new" ] || errorUsage "Command not recognized: $1"
+  shift
+
+  (( $# )) || errorUsage 'No scheme specified.'
+
+  local refScheme=$1
+  shift
+
+  case "$refScheme" in
+    github) newGithubRef "$@";;
+    *) errorUsage "The '$refScheme' scheme is not recognized.";;
+  esac
+}
+
+newGithubRef() {
+  usageText="New GitHub reference usage: $invokedPath '$refFilePath' new github <owner> <repo> <branch>
+
+<owner>
+The name of the GitHub profile that owns the repository to reference.
+
+<repo>
+The name of the repository to reference.
+
+<branch>
+The name of a branch or a commit to reference.  If a branch (including HEAD) is specified, the commit it currently points to is referenced.
+"
+
+  [ "${1---help}" == "--help" ] && usage
+
+  (( $# == 3 )) || errorUsage 'Invalid arguments.'
+
+  local owner="$1"
+  local repo="$2"
+  local branch="$3"
+  local rev="$(getGithubCommitId "$owner" "$repo" "$branch")"
+
+  writeGithubRef "$owner" "$repo" "$rev"
+
+  echo "Created a new GitHub reference at '$refFilePath', referring to $(buildGithubUrl "$owner" "$repo") commit $rev."
+}
+
+githubRef() {
+  usageText="GitHub reference usage: $invokedPath '$refFilePath' <command> [<command-specific args>]
+
+<command>
+The command to run for the reference. Supported values: get, set, clone, update.
+
+<command-specific args>
+Dependent upon the specified command.  Omit to see more information.
+"
+  [ "${1---help}" == "--help" ] && usage
+
+  local command="$1"
+  shift
+
+  case "$command" in
+    get) githubRefGet "$@";;
+    set) githubRefSet "$@";;
+    clone) githubRefClone "$@";;
+    update) githubRefUpdate "$@";;
+    *) errorUsage "The '$command' command is not recognized.";;
+  esac
+}
+
+githubRefGet() {
+  usageText="GitHub reference get usage: $invokedPath '$refFilePath' get <field>
+
+<field>
+The name of the field to get the value of. Supported values: scheme, owner, repo, rev, sha256.
+"
+  [ "${1---help}" == "--help" ] && usage
+
+  local field="$1"
+
+  case "$field" in
+    scheme|owner|repo|rev|sha256) echo "$(readRef "$field")";;
+    *) errorUsage "The '$field' field is not recognized.";;
+  esac
+}
+
+githubRefSet() {
+  usageText="GitHub reference set usage: $invokedPath '$refFilePath' set <field> <value> ...
+
+<field>
+The name of a field to set the value of. Supported values: owner, repo, branch.
+
+<value>
+The value to assign to the specified field.
+
+Note: Multiple field-value pairs may be listed to set more than one at a time.
+"
+  [ "${1---help}" == "--help" ] && usage
+
+  local curOwner="$(readRef owner)"
+  local curRepo="$(readRef repo)"
+  local curRev="$(readRef rev)"
+  local owner="$curOwner"
+  local repo="$curRepo"
+
+  while (( "$#" )); do
+    (( $# >= 2 )) || errorUsage 'Invalid arguments.'
+
+    local field="$1"
+    local newValue="$2"
+
+    case "$field" in
+      owner) local owner="$newValue";;
+      repo) local repo="$newValue";;
+      branch) local branch="$newValue";;
+      *) errorUsage "The '$field' field is not recognized.";;
+    esac
+
+    shift 2
+  done
+
+  if [ -z ${branch+x} ]; then
+    local rev="$curRev"
+  else
+    local rev="$(getGithubCommitId "$owner" "$repo" "$branch")"
+  fi;
+
+  if [ "$owner" != "$curOwner" ] || [ "$repo" != "$curRepo" ] || [ "$rev" != "$curRev" ]; then
+    writeGithubRef "$owner" "$repo" "$rev"
+    echo "Updated '$refFilePath', to refer to $(buildGithubUrl "$owner" "$repo") commit $rev."
+  else
+    echo "Nothing changed."
+  fi
+}
+
+githubRefClone() {
+  usageText="GitHub reference clone usage: $invokedPath '$refFilePath' clone (-r | <directory>)
+
+-r
+Indicates that the referenced GitHub repository should be cloned to '$refFilePath.git'.
+
+<directory>
+Indicates that the referenced GitHub repository should be cloned to \"<directory>\".
+"
+  [ "${1---help}" == "--help" ] && usage
+
+  case "$1" in
+    -r) local cloneDir="$refFilePath.git";;
+    *) local cloneDir="$1";;
+  esac
+
+  cloneGithubRefRepoTo "$cloneDir"
+
+  echo "Cloned the GitHub repository referenced by '$refFilePath' to '$cloneDir'."
+}
+
+githubRefUpdate() {
+  usageText="GitHub reference update usage: $invokedPath '$refFilePath' update [(--list | -l) | (--auto | -a) | <branch>]
+
+--list | -l
+Indicates that the descendants of the referenced revision should be listed.
+
+--auto | -a
+Indicates that if there is only one descendant of the referenced revision, it should update to the latest revision of that.  Otherwise, lists the descendants.
+
+<branch>
+Indicates the branch to update to the latest revision of.
+"
+  [ "${1---help}" == "--help" ] && usage
+
+  local repoPath="$refFilePath.git"
+
+  case "$1" in
+    --list|-l)
+      dirIsGitRepo "$repoPath" || cloneGithubRefRepoTo "$repoPath"
+      getGitRevDescendantsPlusHead "$repoPath" "$(readRef rev)"
+      ;;
+    --auto|-a)
+      dirIsGitRepo "$repoPath" || cloneGithubRefRepoTo "$repoPath"
+      local descendantsPlusHead="$(getGitRevDescendantsPlusHead "$repoPath" "$(readRef rev)")"
+      local descendants="$(echo "$descendantsPlusHead" | grep -v 'HEAD ->')"
+      local numDescendants="$(echo "$descendants" | wc -l)"
+
+      case "$numDescendants" in
+        1) githubRefSet branch "$descendants";;
+        0) echo "Found no descendants of referenced revision.";;
+        *) 
+          echo "Found more than one descendant of referenced revision:"
+          echo "$descendantsPlusHead"
+          ;;
+      esac
+      ;;
+    *) githubRefSet branch "$1";;
+  esac
+}
+
+buildGithubUrl() {
+  local owner="$1"
+  local repo="$2"
+  echo "https://github.com/$owner/$repo"
+}
+
+getGithubCommitId() {
+  local owner="$1"
+  local repo="$2"
+  local branch="$3"
+  local commitIds=( $(git ls-remote "$(buildGithubUrl "$owner" "$repo")" "$branch" | sed -n 's/^\(\S*\).*$/\1/p') )
+
+  case ${#commitIds[*]} in
+    0) echo "$branch";;
+    1) echo "${commitIds[0]}";;
+    *) error "Unexpected: More than one branch found in GitHub repository matching the name '$branch'.";;
+  esac
+}
+
+cloneGithubRefRepoTo() {
+  local cloneDir="$1"
+
+  dirHasFiles "$cloneDir" && error "The target directory for the git clone, '$cloneDir', already contains files. Aborting."
+
+  local owner="$(readRef owner)"
+  local repo="$(readRef repo)"
+
+  git clone "$(buildGithubUrl "$owner" "$repo")" "$cloneDir"
+}
+
+getGitRevDescendantsPlusHead() {
+  local repoDir="$1"
+  local rev="$2"
+
+  dirIsGitRepo "$repoDir" || error "The target directory, '$repoDir', is not a valid git repository. Aborting."
+
+  gitCmd() { git -C "$repoDir" "$@"; }
+
+  gitCmd fetch
+
+  gitCmd branch -r --contains "$rev" | sed -n 's_origin/__gp' | sed -n 's_^\s*\(.*\)_\1_p'
+}
+
+writeGithubRef() {
+  local owner="$1"
+  local repo="$2"
+  local rev="$3"
+
+  local sha256="$(nix-prefetch-url --type sha256 --unpack "$(buildGithubUrl "$owner" "$repo")/archive/$rev.tar.gz")"
+
+  [ -z $sha256 ] && error "Failed to obtain a hash for commit $rev from GitHub."
+
+  ensureParentDirExists "$refFilePath"
+
+  cat <<EOF > $refFilePath
+{
+  scheme = "github";
+  owner = "$owner";
+  repo = "$repo";
+  rev = "$rev";
+  sha256 = "$sha256";
+}
+EOF
+}
+
+usage () {
+  echo "$usageText"
+  exit 0
+}
+
+error () {
+  echo >&2 "$1"
+  exit 1
+}
+
+errorUsage () {
+  echo >&2 "$1"$'\n'"$usageText"
+  exit 1
+}
+
+ensureParentDirExists() {
+  ensureDirExists "$(dirname "$1")"
+}
+
+ensureDirExists() {
+  [ -d "$1" ] || mkdir -p "$1"
+}
+
+dirHasFiles() {
+  local existingFiles=$(shopt -s nullglob dotglob; echo "$1"/*)
+
+  if (( ${#existingFiles} )); then
+    return 0
+  else
+    return 1
+  fi
+}
+
+dirIsEmpty() {
+  return $(! dirHasFiles "$1")
+}
+
+dirIsGitRepo() {
+  return $([ -d "$1/.git" ])
+}
+
+unwrapString() {
+  x="${3#$1}"
+  echo "${x%$2}"
+}
+
+readRef() {
+  unwrapString \" \" $(nix-instantiate --eval -E 'with (import '"$(readlink -e "$refFilePath")"'); '"$1")
+}
+
+main "$@"
