@@ -12,6 +12,10 @@ let
           enableLibraryProfiling = true;
           enableExecutableProfiling = true;
         });
+
+        vulkan-api = haskellLib.overrideCabal super.vulkan-api (drv: {
+          librarySystemDepends = [ pkgs.vulkan-loader ];
+        });
       };
     };
 in
