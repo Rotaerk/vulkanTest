@@ -6,7 +6,7 @@ let
 
   refs = import ./refs.nix;
   pkgs = (refs { inherit refsWithLocalSource; }).sourceImports.nixpkgs {};
-  inherit (refs { inherit refsWithLocalSource pkgs; }) sources sourceImports sourceOverrides;
+  inherit (refs { inherit refsWithLocalSource pkgs; }) sources sourceImports sourceOverrides relSourceOverrides;
   inherit (pkgs.haskell.lib) overrideCabal;
 
   haskellPackages =
@@ -24,7 +24,7 @@ let
           else
             super.HUnit;
 
-        vulkan-api = overrideCabal super.vulkan-api (drv: {
+        vulkan-api = overrideCabal (relSourceOverrides.vulkan-api "vulkan-api" "1.1.0.0" super.vulkan-api) (drv: {
           librarySystemDepends = [ pkgs.vulkan-loader ];
         });
 
