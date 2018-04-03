@@ -38,4 +38,5 @@ in
     (haskellPackages.callCabal2nix "${project}" ./. {})
     (drv: {
       src = builtins.filterSource (path: type: baseNameOf path != ".git") drv.src;
+      librarySystemDepends = [ pkgs.vulkan-loader ];
     })

@@ -1,2 +1,2 @@
-{}:
-(import ./default.nix {}).env
+{ refsWithLocalSource ? [] }:
+(import ./default.nix { inherit refsWithLocalSource; }).env
