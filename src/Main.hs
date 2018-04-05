@@ -10,40 +10,65 @@ import Prelude hiding (init)
 import Control.Exception
 import Control.Monad
 import Control.Monad.Loops
+import Data.Bits
 import Data.Function
 import Data.Functor
 import Foreign.C.String
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Array
+import Foreign.Ptr
 import Foreign.Storable
 import Graphics.UI.GLFW (WindowHint(..), ClientAPI(..))
 import qualified Graphics.UI.GLFW as GLFW
 import Graphics.Vulkan
 import Graphics.Vulkan.Core_1_0
+import Graphics.Vulkan.Ext.VK_EXT_debug_report
 import Graphics.Vulkan.Marshal.Create
 
 main :: IO ()
 main =
   (
-    initWindow width height >>= \case
-      Just window -> do
-        vkInstance <- do
-          (count, extensionsArray) <- GLFW.getRequiredInstanceExtensions
-          extensions <- peekArray (fromIntegral count) extensionsArray
-          initVulkan validationLayers extensions
-        putStrLn "Instance created, entering main loop."
-        mainLoop window
-        putStrLn "Main loop ended, cleaning up."
-        cleanup window vkInstance
-      Nothing ->
-        putStrLn "Failed to initialize the GLFW window."
+    withGLFW $
+    withVulkanGLFWWindow width height "Vulkan" $ \window -> do
+      putStrLn "Window created."
+
+      glfwExtensions <- getGLFWRequiredInstanceExtensions
+
+      unless (null validationLayers) $ do
+        ensureValidationLayersSupported validationLayers
+        putStrLn "All required validation layers supported."
+
+      withVkInstance applicationInfo validationLayers (extensions ++ glfwExtensions) $ \vkInstance -> do
+        putStrLn "Instance created."
+
+        maybeWithDebugCallback vkInstance $ do
+          putStrLn "Entering main loop."
+          mainLoop window
+          putStrLn "Main loop ended, cleaning up."
   )
   `catch` (
     \(e :: VulkanException) ->
       putStrLn $ displayException e
   )
+  `catch` (
+    \(e :: ApplicationException) ->
+      putStrLn $ displayException e
+  )
   where
     (width, height) = (800, 600)
+
+    extensions :: [CString]
+    extensions =
+      [
+      ]
+#ifndef NDEBUG
+      ++
+      [
+        VK_EXT_DEBUG_REPORT_EXTENSION_NAME
+      ]
+#endif
+
+    validationLayers :: [String]
     validationLayers =
       [
 #ifndef NDEBUG
@@ -51,71 +76,119 @@ main =
 #endif
       ]
 
-data VulkanException =
-  VulkanException {
-    vkeCode :: Maybe VkResult,
-    vkeMessage :: String
-  }
-  deriving (Eq, Show, Read)
+    applicationInfo :: VkApplicationInfo
+    applicationInfo =
+      createVk @VkApplicationInfo $
+      set @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO &*
+      setStrRef @"pApplicationName" "Hello Triangle" &*
+      set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
+      setStrRef @"pEngineName" "No Engine" &*
+      set @"engineVersion" (_VK_MAKE_VERSION 1 0 0) &*
+      set @"apiVersion" VK_API_VERSION_1_0 &*
+      set @"pNext" VK_NULL
+
+    maybeWithDebugCallback :: VkInstance -> IO a -> IO a
+#ifndef NDEBUG
+    maybeWithDebugCallback vkInstance action =
+      withFunPtr (newVkDebugReportCallbackEXT debugCallback) $ \debugCallbackPtr ->
+        withVkDebugReportCallbackEXT vkInstance debugReportFlags debugCallbackPtr $ \vkDebugReportCallback -> do
+          putStrLn "Debug callback setup."
+          action
+      where
+        debugReportFlags :: VkDebugReportFlagsEXT
+        debugReportFlags = (VK_DEBUG_REPORT_ERROR_BIT_EXT .|. VK_DEBUG_REPORT_WARNING_BIT_EXT)
+
+        debugCallback :: HS_vkDebugReportCallbackEXT
+        debugCallback flags objectType object location messageCode layerPrefixPtr messagePtr userDataPtr = do
+          message <- peekCString messagePtr
+          putStrLn $ "Validation Layer: " ++ message
+          return VK_FALSE
+#else
+    maybeWithDebugCallback = id
+#endif
+
+data VulkanException = VulkanException VkResult String deriving (Eq, Show, Read)
 
 instance Exception VulkanException where
-  displayException (VulkanException maybeCode message) =
-    "Vulkan error" ++
-    maybe "" (\code -> " (" ++ show code ++ ")") maybeCode ++
-    ": " ++ message
+  displayException (VulkanException code message) =
+    "Vulkan error (" ++ show code ++ "): " ++ message
 
 onVkFailureThrow :: String -> IO VkResult -> IO ()
 onVkFailureThrow message vkAction = do
   result <- vkAction
-  when (result /= VK_SUCCESS) $ throwIO $ VulkanException (Just result) message
+  when (result /= VK_SUCCESS) $ throwIO $ VulkanException result message
 
-throwVkMsg :: String -> IO a
-throwVkMsg message = throwIO $ VulkanException Nothing message
+data ApplicationException = ApplicationException String deriving (Eq, Show, Read)
 
-initWindow :: Int -> Int -> IO (Maybe GLFW.Window)
-initWindow width height = do
-  GLFW.init
-  GLFW.windowHint $ WindowHint'ClientAPI ClientAPI'NoAPI
-  GLFW.windowHint $ WindowHint'Resizable False
-  GLFW.createWindow width height "Vulkan" Nothing Nothing
+instance Exception ApplicationException where
+  displayException (ApplicationException message) =
+    "Application error: " ++ message
 
-initVulkan :: [String] -> [CString] -> IO VkInstance
-initVulkan validationLayers extensions = do
-  createInstance
+throwAppEx :: String -> IO a
+throwAppEx message = throwIO $ ApplicationException message
 
+withGLFW :: IO a -> IO a
+withGLFW = bracket_ GLFW.init GLFW.terminate
+
+withVulkanGLFWWindow :: Int -> Int -> String -> (GLFW.Window -> IO a) -> IO a
+withVulkanGLFWWindow width height title = bracket create GLFW.destroyWindow
   where
-    createInstance :: IO VkInstance
-    createInstance =
-      getUnsupportedValidationLayerNames validationLayers >>= \case
-        [] -> do
-          putStrLn "All expected validation layers are available."
-          withPtr instanceCreateInfo $ \instanceCreateInfoPtr ->
-            alloca $ \vkInstancePtr -> do
-              onVkFailureThrow "vkCreateInstance failed." $
-                vkCreateInstance instanceCreateInfoPtr VK_NULL vkInstancePtr
-              peek vkInstancePtr
-        unsupportedLayers -> throwVkMsg $ "Expected validations are not available: " ++ show unsupportedLayers
+    create = do
+      GLFW.windowHint $ WindowHint'ClientAPI ClientAPI'NoAPI
+      GLFW.windowHint $ WindowHint'Resizable False
+      GLFW.createWindow width height title Nothing Nothing >>= \case
+        Just window -> return window
+        Nothing -> throwAppEx "Failed to initialize the GLFW window."
 
-      where
-        instanceCreateInfo :: VkInstanceCreateInfo
-        instanceCreateInfo =
-          createVk @VkInstanceCreateInfo $
-          set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
-          setVkRef @"pApplicationInfo" (
-            createVk @VkApplicationInfo $
-            set @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO &*
-            setStrRef @"pApplicationName" "Hello Triangle" &*
-            set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
-            setStrRef @"pEngineName" "No Engine" &*
-            set @"engineVersion" (_VK_MAKE_VERSION 1 0 0) &*
-            set @"apiVersion" VK_API_VERSION_1_0 &*
-            set @"pNext" VK_NULL
-          ) &*
-          set @"enabledExtensionCount" (fromIntegral $ length extensions) &*
-          setListRef @"ppEnabledExtensionNames" extensions &*
-          set @"enabledLayerCount" (fromIntegral $ length validationLayers) &*
-          setStrListRef @"ppEnabledLayerNames" validationLayers &*
-          set @"pNext" VK_NULL
+getGLFWRequiredInstanceExtensions :: IO [CString]
+getGLFWRequiredInstanceExtensions = do
+  (count, glfwExtensionsArray) <- GLFW.getRequiredInstanceExtensions
+  peekArray (fromIntegral count) glfwExtensionsArray
+
+withVkInstance :: VkApplicationInfo -> [String] -> [CString] -> (VkInstance -> IO a) -> IO a
+withVkInstance applicationInfo validationLayers extensions = bracket create destroy
+  where
+    createInfo =
+      createVk @VkInstanceCreateInfo $
+      set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
+      setVkRef @"pApplicationInfo" applicationInfo &*
+      set @"enabledExtensionCount" (fromIntegral $ length extensions) &*
+      setListRef @"ppEnabledExtensionNames" extensions &*
+      set @"enabledLayerCount" (fromIntegral $ length validationLayers) &*
+      setStrListRef @"ppEnabledLayerNames" validationLayers &*
+      set @"pNext" VK_NULL
+    create =
+      withPtr createInfo $ \createInfoPtr ->
+        alloca $ \vkInstancePtr -> do
+          onVkFailureThrow "vkCreateInstance failed." $
+            vkCreateInstance createInfoPtr VK_NULL vkInstancePtr
+          peek vkInstancePtr
+    destroy vkInstance = vkDestroyInstance vkInstance VK_NULL
+
+withFunPtr :: IO (FunPtr f) -> (FunPtr f -> IO a) -> IO a
+withFunPtr createFunPtr = bracket createFunPtr freeHaskellFunPtr
+
+withVkDebugReportCallbackEXT :: VkInstance -> VkDebugReportFlagsEXT -> PFN_vkDebugReportCallbackEXT -> (VkDebugReportCallbackEXT -> IO a) -> IO a
+withVkDebugReportCallbackEXT vkInstance debugReportFlags debugCallbackPtr = bracket create destroy
+  where
+    createInfo =
+      createVk @VkDebugReportCallbackCreateInfoEXT $
+      set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
+      set @"flags" debugReportFlags &*
+      set @"pfnCallback" debugCallbackPtr &*
+      set @"pNext" VK_NULL
+    create =
+      withPtr createInfo $ \createInfoPtr ->
+        alloca $ \vkDebugReportCallbackEXTPtr -> do
+          onVkFailureThrow "vkCreateDebugReportCallbackEXT failed." $
+            vkCreateDebugReportCallbackEXT vkInstance createInfoPtr VK_NULL vkDebugReportCallbackEXTPtr
+          peek vkDebugReportCallbackEXTPtr
+    destroy vkDebugReportCallbackEXT = vkDestroyDebugReportCallbackEXT vkInstance vkDebugReportCallbackEXT VK_NULL
+
+ensureValidationLayersSupported :: [String] -> IO ()
+ensureValidationLayersSupported validationLayers = do
+  unsupportedLayers <- getUnsupportedValidationLayerNames validationLayers
+  unless (null unsupportedLayers) $ throwAppEx ("Expected validation layers are not available: " ++ show unsupportedLayers)
 
 getUnsupportedValidationLayerNames :: [String] -> IO [String]
 getUnsupportedValidationLayerNames [] = return []
@@ -144,9 +217,3 @@ getAvailableValidationLayers =
 
 mainLoop :: GLFW.Window -> IO ()
 mainLoop window = whileM_ (not <$> GLFW.windowShouldClose window) GLFW.pollEvents
-
-cleanup :: GLFW.Window -> VkInstance -> IO ()
-cleanup window vkInstance = do
-  vkDestroyInstance vkInstance VK_NULL
-  GLFW.destroyWindow window
-  GLFW.terminate
