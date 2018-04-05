@@ -181,9 +181,46 @@ withVkDebugReportCallbackEXT vkInstance debugReportFlags debugCallbackPtr = brac
       withPtr createInfo $ \createInfoPtr ->
         alloca $ \vkDebugReportCallbackEXTPtr -> do
           onVkFailureThrow "vkCreateDebugReportCallbackEXT failed." $
-            vkCreateDebugReportCallbackEXT vkInstance createInfoPtr VK_NULL vkDebugReportCallbackEXTPtr
+            createDebugReportCallbackEXT vkInstance createInfoPtr VK_NULL vkDebugReportCallbackEXTPtr
           peek vkDebugReportCallbackEXTPtr
-    destroy vkDebugReportCallbackEXT = vkDestroyDebugReportCallbackEXT vkInstance vkDebugReportCallbackEXT VK_NULL
+    destroy vkDebugReportCallbackEXT = destroyDebugReportCallbackEXT vkInstance vkDebugReportCallbackEXT VK_NULL
+
+type HS_vkCreateDebugReportCallbackEXT =
+  VkInstance ->
+  Ptr VkDebugReportCallbackCreateInfoEXT ->
+  Ptr VkAllocationCallbacks ->
+  Ptr VkDebugReportCallbackEXT ->
+  IO VkResult
+type PFN_vkCreateDebugReportCallbackEXT = FunPtr HS_vkCreateDebugReportCallbackEXT
+
+foreign import ccall "dynamic" mkCreateDebugReportCallbackEXT :: PFN_vkCreateDebugReportCallbackEXT -> HS_vkCreateDebugReportCallbackEXT
+
+createDebugReportCallbackEXT :: HS_vkCreateDebugReportCallbackEXT
+createDebugReportCallbackEXT vkInstance createInfoPtr allocatorPtr callbackPtr =
+  withCString "vkCreateDebugReportCallbackEXT" $ \procNamePtr -> do
+    procPtr <- castFunPtr <$> vkGetInstanceProcAddr vkInstance procNamePtr
+    if procPtr /= nullFunPtr then do
+      mkCreateDebugReportCallbackEXT procPtr vkInstance createInfoPtr allocatorPtr callbackPtr
+    else
+      return VK_ERROR_EXTENSION_NOT_PRESENT
+
+type HS_vkDestroyDebugReportCallbackEXT =
+  VkInstance ->
+  VkDebugReportCallbackEXT ->
+  Ptr VkAllocationCallbacks ->
+  IO ()
+type PFN_vkDestroyDebugReportCallbackEXT = FunPtr HS_vkDestroyDebugReportCallbackEXT
+
+foreign import ccall "dynamic" mkDestroyDebugReportCallbackEXT :: PFN_vkDestroyDebugReportCallbackEXT -> HS_vkDestroyDebugReportCallbackEXT
+
+destroyDebugReportCallbackEXT :: HS_vkDestroyDebugReportCallbackEXT
+destroyDebugReportCallbackEXT vkInstance callback allocatorPtr =
+  withCString "vkDestroyDebugReportCallbackEXT" $ \procNamePtr -> do
+    procPtr <- castFunPtr <$> vkGetInstanceProcAddr vkInstance procNamePtr
+    if procPtr /= nullFunPtr then do
+      mkDestroyDebugReportCallbackEXT procPtr vkInstance callback allocatorPtr
+    else
+      return ()
 
 ensureValidationLayersSupported :: [String] -> IO ()
 ensureValidationLayersSupported validationLayers = do
