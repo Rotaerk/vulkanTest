@@ -2,6 +2,6 @@
   scheme = "github";
   owner = "achirkin";
   repo = "vulkan";
-  rev = "ca8e33120c908844193656807c893ef328e28482";
-  sha256 = "14ba1jixn4vrapzkr9n2gjzjlaifqp0ccc77xjkmyajck8mz4yg6";
+  rev = "33550eb69dd341411ec49d2bae28c105e9ba12f0";
+  sha256 = "1igas45pk08mw5rzbqyn9ia1mmxlwf0wv8clrqzqgvm9yqspy4gf";
 }
