@@ -43,6 +43,8 @@ main =
         putStrLn "Instance created."
 
         maybeWithDebugCallback vkInstance $ do
+          device <- getFirstSuitableDevice isDeviceSuitable vkInstance
+          putStrLn "Found a suitable device."
           putStrLn "Entering main loop."
           mainLoop window
           putStrLn "Main loop ended, cleaning up."
@@ -108,6 +110,16 @@ main =
     maybeWithDebugCallback = id
 #endif
 
+    isDeviceSuitable :: VkPhysicalDevice -> IO Bool
+    isDeviceSuitable device =
+      any isQueueFamilySuitable <$> listPhysicalDeviceQueueFamilyProperties device
+
+      where
+        isQueueFamilySuitable :: VkQueueFamilyProperties -> Bool
+        isQueueFamilySuitable qf =
+          getField @"queueCount" qf > 0 &&
+          getField @"queueFlags" qf .&. VK_QUEUE_GRAPHICS_BIT /= zeroBits
+
 data VulkanException = VulkanException VkResult String deriving (Eq, Show, Read)
 
 instance Exception VulkanException where
@@ -137,14 +149,19 @@ withVulkanGLFWWindow width height title = bracket create GLFW.destroyWindow
     create = do
       GLFW.windowHint $ WindowHint'ClientAPI ClientAPI'NoAPI
       GLFW.windowHint $ WindowHint'Resizable False
-      GLFW.createWindow width height title Nothing Nothing >>= \case
-        Just window -> return window
-        Nothing -> throwAppEx "Failed to initialize the GLFW window."
+      GLFW.createWindow width height title Nothing Nothing >>=
+        maybe (throwAppEx "Failed to initialize the GLFW window.") return
 
 getGLFWRequiredInstanceExtensions :: IO [CString]
 getGLFWRequiredInstanceExtensions = do
   (count, glfwExtensionsArray) <- GLFW.getRequiredInstanceExtensions
   peekArray (fromIntegral count) glfwExtensionsArray
+
+getFirstSuitableDevice :: (VkPhysicalDevice -> IO Bool) -> VkInstance -> IO VkPhysicalDevice
+getFirstSuitableDevice isDeviceSuitable vkInstance =
+  listPhysicalDevices vkInstance >>=
+  firstM isDeviceSuitable >>=
+  maybe (throwAppEx "Failed to find a suitable device.") return
 
 withVkInstance :: VkApplicationInfo -> [String] -> [CString] -> (VkInstance -> IO a) -> IO a
 withVkInstance applicationInfo validationLayers extensions = bracket create destroy
@@ -197,7 +214,7 @@ ensureValidationLayersSupported validationLayers = do
 getUnsupportedValidationLayerNames :: [String] -> IO [String]
 getUnsupportedValidationLayerNames [] = return []
 getUnsupportedValidationLayerNames expectedLayerNames =
-  getAvailableValidationLayers
+  listInstanceLayerProperties
   <&> fmap (getStringField @"layerName")
   <&> \case
     [] -> expectedLayerNames
@@ -207,17 +224,33 @@ getUnsupportedValidationLayerNames expectedLayerNames =
     infixl 1 <&>
     elemOf = flip elem
 
-getAvailableValidationLayers :: IO [VkLayerProperties]
-getAvailableValidationLayers =
-  alloca $ \layerCountPtr -> do
-    vkEnumerateInstanceLayerProperties layerCountPtr VK_NULL
-    layerCount <- fromIntegral <$> peek layerCountPtr
-    if layerCount > 0 then
-      allocaArray layerCount $ \layersPtr -> do
-        vkEnumerateInstanceLayerProperties layerCountPtr layersPtr
-        peekArray layerCount layersPtr
+getVkList :: Storable a => (Ptr Word32 -> Ptr a -> IO ()) -> IO [a]
+getVkList getArray =
+  alloca $ \countPtr -> do
+    getArray countPtr VK_NULL
+    count <- fromIntegral <$> peek countPtr
+    if count > 0 then
+      allocaArray count $ \arrayPtr -> do
+        getArray countPtr arrayPtr
+        peekArray count arrayPtr
     else
       return []
+
+listInstanceLayerProperties :: IO [VkLayerProperties]
+listInstanceLayerProperties =
+  getVkList $ \layerCountPtr layersPtr ->
+    onVkFailureThrow "vkEnumerateInstanceLayerProperties failed." $
+    vkEnumerateInstanceLayerProperties layerCountPtr layersPtr
+
+listPhysicalDevices :: VkInstance -> IO [VkPhysicalDevice]
+listPhysicalDevices vkInstance =
+  getVkList $ \deviceCountPtr devicesPtr ->
+    onVkFailureThrow "vkEnumeratePhysicalDevices failed." $
+    vkEnumeratePhysicalDevices vkInstance deviceCountPtr devicesPtr
+
+listPhysicalDeviceQueueFamilyProperties :: VkPhysicalDevice -> IO [VkQueueFamilyProperties]
+listPhysicalDeviceQueueFamilyProperties device =
+  getVkList $ vkGetPhysicalDeviceQueueFamilyProperties device
 
 mainLoop :: GLFW.Window -> IO ()
 mainLoop window = whileM_ (not <$> GLFW.windowShouldClose window) GLFW.pollEvents
