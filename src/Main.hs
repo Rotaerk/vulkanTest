@@ -36,7 +36,7 @@ main =
     withVulkanGLFWWindow width height "Vulkan" $ \window -> do
       putStrLn "Window created."
 
-      glfwExtensions <- getGLFWRequiredInstanceExtensions
+      glfwExtensions <- GLFW.getRequiredInstanceExtensions
 
       unless (null validationLayers) $ do
         ensureValidationLayersSupported validationLayers
@@ -160,11 +160,6 @@ withVulkanGLFWWindow width height title = bracket create GLFW.destroyWindow
       GLFW.windowHint $ WindowHint'Resizable False
       GLFW.createWindow width height title Nothing Nothing >>=
         maybe (throwAppEx "Failed to initialize the GLFW window.") return
-
-getGLFWRequiredInstanceExtensions :: IO [CString]
-getGLFWRequiredInstanceExtensions = do
-  (count, glfwExtensionsArray) <- GLFW.getRequiredInstanceExtensions
-  peekArray (fromIntegral count) glfwExtensionsArray
 
 withVkInstance :: VkApplicationInfo -> [String] -> [CString] -> (VkInstance -> IO a) -> IO a
 withVkInstance applicationInfo validationLayers extensions = bracket create destroy

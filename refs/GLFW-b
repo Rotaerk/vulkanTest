@@ -1,7 +1,7 @@
 {
   scheme = "github";
-  owner = "achirkin";
+  owner = "bsl";
   repo = "GLFW-b";
-  rev = "c57109dfede0a6ca08a7088f371fe29fff315415";
-  sha256 = "0yyv0866l0gkspdhhgj4880wp85wjgnrfsqhlpsx933glaq2h2ap";
+  rev = "311a3a3b1ba0e4525ad1e1292ef1b363645cbafe";
+  sha256 = "0830grnhwvl5g43wsdinyzn923v0811shcnhansbiallr5r86xmp";
 }
