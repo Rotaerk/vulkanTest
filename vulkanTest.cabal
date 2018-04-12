@@ -21,5 +21,6 @@ executable vulkanTest
     vulkan-api,
     GLFW-b,
     monad-loops,
+    extra,
     base
   default-language: Haskell2010

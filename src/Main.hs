@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 
 module Main where
@@ -9,8 +10,10 @@ module Main where
 import Prelude hiding (init)
 import Control.Exception
 import Control.Monad
-import Control.Monad.Loops
+import Control.Monad.Extra (firstJustM)
+import Control.Monad.Loops (whileM_)
 import Data.Bits
+import Data.Foldable
 import Data.Function
 import Data.Functor
 import Foreign.C.String
@@ -43,7 +46,7 @@ main =
         putStrLn "Instance created."
 
         maybeWithDebugCallback vkInstance $ do
-          device <- getFirstSuitableDevice isDeviceSuitable vkInstance
+          (device, queueFamily) <- getFirstSuitableDeviceAndQueueFamily vkInstance
           putStrLn "Found a suitable device."
           putStrLn "Entering main loop."
           mainLoop window
@@ -110,9 +113,15 @@ main =
     maybeWithDebugCallback = id
 #endif
 
-    isDeviceSuitable :: VkPhysicalDevice -> IO Bool
-    isDeviceSuitable device =
-      any isQueueFamilySuitable <$> listPhysicalDeviceQueueFamilyProperties device
+    getFirstSuitableDeviceAndQueueFamily :: VkInstance -> IO (VkPhysicalDevice, VkQueueFamilyProperties)
+    getFirstSuitableDeviceAndQueueFamily vkInstance =
+      listPhysicalDevices vkInstance >>=
+      firstJustM (\device ->
+        ((device,) <$>) <$>
+        find isQueueFamilySuitable <$>
+        listPhysicalDeviceQueueFamilyProperties device
+      ) >>=
+      maybe (throwAppEx "Failed to find a suitable device.") return
 
       where
         isQueueFamilySuitable :: VkQueueFamilyProperties -> Bool
@@ -156,12 +165,6 @@ getGLFWRequiredInstanceExtensions :: IO [CString]
 getGLFWRequiredInstanceExtensions = do
   (count, glfwExtensionsArray) <- GLFW.getRequiredInstanceExtensions
   peekArray (fromIntegral count) glfwExtensionsArray
-
-getFirstSuitableDevice :: (VkPhysicalDevice -> IO Bool) -> VkInstance -> IO VkPhysicalDevice
-getFirstSuitableDevice isDeviceSuitable vkInstance =
-  listPhysicalDevices vkInstance >>=
-  firstM isDeviceSuitable >>=
-  maybe (throwAppEx "Failed to find a suitable device.") return
 
 withVkInstance :: VkApplicationInfo -> [String] -> [CString] -> (VkInstance -> IO a) -> IO a
 withVkInstance applicationInfo validationLayers extensions = bracket create destroy

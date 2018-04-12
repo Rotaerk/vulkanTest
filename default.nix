@@ -26,6 +26,7 @@ let
 
         vulkan-api = overrideCabal (relSourceOverrides.vulkan-api "vulkan-api" "1.1.0.0" super.vulkan-api) (drv: {
           librarySystemDepends = [ pkgs.vulkan-loader ];
+          configureFlags = [ "-fuseNativeFFI-1-0" ];
         });
 
         bindings-GLFW = sourceOverrides.bindings-GLFW "3.2.1.0" super.bindings-GLFW;
@@ -38,5 +39,5 @@ in
     (haskellPackages.callCabal2nix "${project}" ./. {})
     (drv: {
       src = builtins.filterSource (path: type: baseNameOf path != ".git") drv.src;
-      librarySystemDepends = [ pkgs.vulkan-loader ];
+      librarySystemDepends = [ pkgs.vulkan-loader pkgs.cabal-install ];
     })
