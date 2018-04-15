@@ -16,6 +16,7 @@ import Data.Bits
 import Data.Foldable
 import Data.Function
 import Data.Functor
+import Data.List
 import Foreign.C.String
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Array
@@ -46,11 +47,17 @@ main =
         putStrLn "Instance created."
 
         maybeWithDebugCallback vkInstance $ do
-          (device, queueFamily) <- getFirstSuitableDeviceAndQueueFamily vkInstance
-          putStrLn "Found a suitable device."
-          putStrLn "Entering main loop."
-          mainLoop window
-          putStrLn "Main loop ended, cleaning up."
+          (physicalDevice, qfi) <- getFirstSuitablePhysicalDeviceAndQueueFamilyIndices vkInstance
+          putStrLn "Found a suitable physical device."
+          withVkDevice physicalDevice [qfiGraphicsFamilyIndex qfi] $ \vkDevice -> do
+            putStrLn "Vulkan device created."
+
+            graphicsQueue <- getDeviceQueue vkDevice (qfiGraphicsFamilyIndex qfi) 0
+            putStrLn "Obtained the graphics queue."
+
+            putStrLn "Entering main loop."
+            mainLoop window
+            putStrLn "Main loop ended, cleaning up."
   )
   `catch` (
     \(e :: VulkanException) ->
@@ -113,21 +120,30 @@ main =
     maybeWithDebugCallback = id
 #endif
 
-    getFirstSuitableDeviceAndQueueFamily :: VkInstance -> IO (VkPhysicalDevice, VkQueueFamilyProperties)
-    getFirstSuitableDeviceAndQueueFamily vkInstance =
+    getFirstSuitablePhysicalDeviceAndQueueFamilyIndices :: VkInstance -> IO (VkPhysicalDevice, QueueFamilyIndices)
+    getFirstSuitablePhysicalDeviceAndQueueFamilyIndices vkInstance =
       listPhysicalDevices vkInstance >>=
       firstJustM (\device ->
-        ((device,) <$>) <$>
-        find isQueueFamilySuitable <$>
+        ((device,) <$>) . findQueueFamilyIndices <$>
         listPhysicalDeviceQueueFamilyProperties device
       ) >>=
-      maybe (throwAppEx "Failed to find a suitable device.") return
+      maybe (throwAppEx "Failed to find a suitable physical device.") return
 
+    findQueueFamilyIndices :: [VkQueueFamilyProperties] -> Maybe QueueFamilyIndices
+    findQueueFamilyIndices queueFamilies = do
+      graphicsFamilyIndex <- findFamilyIndexWhere $ (zeroBits /=) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags"
+      return $ QueueFamilyIndices graphicsFamilyIndex
       where
-        isQueueFamilySuitable :: VkQueueFamilyProperties -> Bool
-        isQueueFamilySuitable qf =
-          getField @"queueCount" qf > 0 &&
-          getField @"queueFlags" qf .&. VK_QUEUE_GRAPHICS_BIT /= zeroBits
+        indexedFamiliesWithQueues :: [(Word32, VkQueueFamilyProperties)]
+        indexedFamiliesWithQueues = filter ((0 <) . getField @"queueCount" . snd) . zip [0 ..] $ queueFamilies
+
+        findFamilyIndexWhere :: (VkQueueFamilyProperties -> Bool) -> Maybe Word32
+        findFamilyIndexWhere cond = fst <$> find (cond . snd) indexedFamiliesWithQueues
+
+data QueueFamilyIndices =
+  QueueFamilyIndices {
+    qfiGraphicsFamilyIndex :: Word32
+  } deriving (Eq, Show, Read)
 
 data VulkanException = VulkanException VkResult String deriving (Eq, Show, Read)
 
@@ -164,6 +180,13 @@ withVulkanGLFWWindow width height title = bracket create GLFW.destroyWindow
 withVkInstance :: VkApplicationInfo -> [String] -> [CString] -> (VkInstance -> IO a) -> IO a
 withVkInstance applicationInfo validationLayers extensions = bracket create destroy
   where
+    create =
+      withPtr createInfo $ \createInfoPtr ->
+        alloca $ \vkInstancePtr -> do
+          onVkFailureThrow "vkCreateInstance failed." $
+            vkCreateInstance createInfoPtr VK_NULL vkInstancePtr
+          peek vkInstancePtr
+    destroy vkInstance = vkDestroyInstance vkInstance VK_NULL
     createInfo =
       createVk @VkInstanceCreateInfo $
       set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
@@ -173,13 +196,46 @@ withVkInstance applicationInfo validationLayers extensions = bracket create dest
       set @"enabledLayerCount" (fromIntegral $ length validationLayers) &*
       setStrListRef @"ppEnabledLayerNames" validationLayers &*
       set @"pNext" VK_NULL
+
+withVkDevice :: VkPhysicalDevice -> [Word32] -> (VkDevice -> IO a) -> IO a
+withVkDevice physicalDevice queueFamilyIndices = bracket create destroy
+  where
     create =
       withPtr createInfo $ \createInfoPtr ->
-        alloca $ \vkInstancePtr -> do
-          onVkFailureThrow "vkCreateInstance failed." $
-            vkCreateInstance createInfoPtr VK_NULL vkInstancePtr
-          peek vkInstancePtr
-    destroy vkInstance = vkDestroyInstance vkInstance VK_NULL
+        alloca $ \vkDevicePtr -> do
+          onVkFailureThrow "vkCreateDevice failed." $
+            vkCreateDevice physicalDevice createInfoPtr VK_NULL vkDevicePtr
+          peek vkDevicePtr
+    destroy vkDevice = vkDestroyDevice vkDevice VK_NULL
+    createInfo =
+      createVk @VkDeviceCreateInfo $
+      set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"flags" 0 &*
+      set @"queueCreateInfoCount" (fromIntegral $ length queueFamilyIndices) &*
+      setListRef @"pQueueCreateInfos" (
+        queueFamilyIndices <&> \qfi ->
+          createVk @VkDeviceQueueCreateInfo $
+          set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
+          set @"pNext" VK_NULL &*
+          set @"flags" 0 &*
+          set @"queueFamilyIndex" qfi &*
+          set @"queueCount" 1 &*
+          setListRef @"pQueuePriorities" [1.0]
+      ) &*
+      set @"enabledLayerCount" 0 &*
+      set @"ppEnabledLayerNames" VK_NULL &*
+      set @"enabledExtensionCount" 0 &*
+      set @"ppEnabledExtensionNames" VK_NULL &*
+      setVkRef @"pEnabledFeatures" (
+        createVk @VkPhysicalDeviceFeatures $ handleRemFields @_ @'[]
+      )
+
+getDeviceQueue :: VkDevice -> Word32 -> Word32 -> IO VkQueue
+getDeviceQueue vkDevice queueFamilyIndex queueIndex =
+  alloca $ \deviceQueuePtr -> do
+    vkGetDeviceQueue vkDevice queueFamilyIndex 0 deviceQueuePtr
+    peek deviceQueuePtr
 
 withFunPtr :: IO (FunPtr f) -> (FunPtr f -> IO a) -> IO a
 withFunPtr createFunPtr = bracket createFunPtr freeHaskellFunPtr
@@ -187,12 +243,6 @@ withFunPtr createFunPtr = bracket createFunPtr freeHaskellFunPtr
 withVkDebugReportCallbackEXT :: VkInstance -> VkDebugReportFlagsEXT -> PFN_vkDebugReportCallbackEXT -> (VkDebugReportCallbackEXT -> IO a) -> IO a
 withVkDebugReportCallbackEXT vkInstance debugReportFlags debugCallbackPtr = bracket create destroy
   where
-    createInfo =
-      createVk @VkDebugReportCallbackCreateInfoEXT $
-      set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
-      set @"flags" debugReportFlags &*
-      set @"pfnCallback" debugCallbackPtr &*
-      set @"pNext" VK_NULL
     create = do
       createDebugReportCallbackEXT <- vkGetInstanceProc @VkCreateDebugReportCallbackEXT vkInstance
       withPtr createInfo $ \createInfoPtr ->
@@ -203,6 +253,12 @@ withVkDebugReportCallbackEXT vkInstance debugReportFlags debugCallbackPtr = brac
     destroy vkDebugReportCallbackEXT = do
       destroyDebugReportCallbackEXT <- vkGetInstanceProc @VkDestroyDebugReportCallbackEXT vkInstance
       destroyDebugReportCallbackEXT vkInstance vkDebugReportCallbackEXT VK_NULL
+    createInfo =
+      createVk @VkDebugReportCallbackCreateInfoEXT $
+      set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
+      set @"flags" debugReportFlags &*
+      set @"pfnCallback" debugCallbackPtr &*
+      set @"pNext" VK_NULL
 
 ensureValidationLayersSupported :: [String] -> IO ()
 ensureValidationLayersSupported validationLayers = do
@@ -217,10 +273,6 @@ getUnsupportedValidationLayerNames expectedLayerNames =
   <&> \case
     [] -> expectedLayerNames
     availableLayerNames -> filter (not . elemOf availableLayerNames) expectedLayerNames
-  where
-    (<&>) = flip (<$>)
-    infixl 1 <&>
-    elemOf = flip elem
 
 getVkList :: Storable a => (Ptr Word32 -> Ptr a -> IO ()) -> IO [a]
 getVkList getArray =
@@ -252,3 +304,10 @@ listPhysicalDeviceQueueFamilyProperties device =
 
 mainLoop :: GLFW.Window -> IO ()
 mainLoop window = whileM_ (not <$> GLFW.windowShouldClose window) GLFW.pollEvents
+
+(<&>) :: Functor f => f a -> (a -> b) -> f b
+(<&>) = flip (<$>)
+infixl 1 <&>
+
+elemOf :: (Foldable t, Eq a) => t a -> a -> Bool
+elemOf = flip elem
