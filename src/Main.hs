@@ -10,13 +10,16 @@ module Main where
 import Prelude hiding (init)
 import Control.Exception
 import Control.Monad
-import Control.Monad.Extra (firstJustM)
+import Control.Monad.Extra (firstJustM, findM)
+import Control.Monad.IO.Class
 import Control.Monad.Loops (whileM_)
+import Control.Monad.Trans.Maybe
 import Data.Bits
 import Data.Foldable
 import Data.Function
 import Data.Functor
 import Data.List
+import qualified Data.Set as Set
 import Foreign.C.String
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Array
@@ -27,6 +30,7 @@ import qualified Graphics.UI.GLFW as GLFW
 import Graphics.Vulkan
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Ext.VK_EXT_debug_report
+import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Proc
 
@@ -47,17 +51,24 @@ main =
         putStrLn "Instance created."
 
         maybeWithDebugCallback vkInstance $ do
-          (physicalDevice, qfi) <- getFirstSuitablePhysicalDeviceAndQueueFamilyIndices vkInstance
-          putStrLn "Found a suitable physical device."
-          withVkDevice physicalDevice [qfiGraphicsFamilyIndex qfi] $ \vkDevice -> do
-            putStrLn "Vulkan device created."
+          withGLFWWindowSurface vkInstance window $ \surface -> do
+            putStrLn "Obtained the window surface."
 
-            graphicsQueue <- getDeviceQueue vkDevice (qfiGraphicsFamilyIndex qfi) 0
-            putStrLn "Obtained the graphics queue."
+            (physicalDevice, qfi) <- getFirstSuitablePhysicalDeviceAndQueueFamilyIndices vkInstance surface
+            putStrLn "Found a suitable physical device."
 
-            putStrLn "Entering main loop."
-            mainLoop window
-            putStrLn "Main loop ended, cleaning up."
+            withVkDevice physicalDevice (qfiDistinct qfi) $ \vkDevice -> do
+              putStrLn "Vulkan device created."
+
+              graphicsQueue <- getDeviceQueue vkDevice (qfiGraphics qfi) 0
+              putStrLn "Obtained the graphics queue."
+
+              presentQueue <- getDeviceQueue vkDevice (qfiPresent qfi) 0
+              putStrLn "Obtained the present queue."
+
+              putStrLn "Entering main loop."
+              mainLoop window
+              putStrLn "Main loop ended, cleaning up."
   )
   `catch` (
     \(e :: VulkanException) ->
@@ -120,30 +131,41 @@ main =
     maybeWithDebugCallback = id
 #endif
 
-    getFirstSuitablePhysicalDeviceAndQueueFamilyIndices :: VkInstance -> IO (VkPhysicalDevice, QueueFamilyIndices)
-    getFirstSuitablePhysicalDeviceAndQueueFamilyIndices vkInstance =
+    getFirstSuitablePhysicalDeviceAndQueueFamilyIndices :: VkInstance -> VkSurfaceKHR -> IO (VkPhysicalDevice, QueueFamilyIndices)
+    getFirstSuitablePhysicalDeviceAndQueueFamilyIndices vkInstance surface =
       listPhysicalDevices vkInstance >>=
-      firstJustM (\device ->
-        ((device,) <$>) . findQueueFamilyIndices <$>
-        listPhysicalDeviceQueueFamilyProperties device
+      firstJustM (\physicalDevice -> runMaybeT $ do
+        indexedFamiliesHavingQueues <- liftIO $
+          filter ((0 <) . getField @"queueCount" . snd) . zip [0 ..] <$>
+          listPhysicalDeviceQueueFamilyProperties physicalDevice
+
+        let findFamilyIndexWhere condIO = MaybeT $ fmap fst <$> findM condIO indexedFamiliesHavingQueues
+
+        graphicsFamilyIndex <- findFamilyIndexWhere $ return . (zeroBits /=) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags" . snd
+
+        presentFamilyIndex <- do
+          getPhysicalDeviceSurfaceSupportKHR <- liftIO $ vkGetInstanceProc @VkGetPhysicalDeviceSurfaceSupportKHR vkInstance
+          findFamilyIndexWhere $ \(qfi, _) ->
+            alloca $ \isSupportedPtr -> do
+              onVkFailureThrow "vkGetPhysicalDeviceSurfaceSupportKHR failed." $
+                getPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface isSupportedPtr
+              peek isSupportedPtr <&> (== VK_TRUE)
+
+        return (physicalDevice, QueueFamilyIndices graphicsFamilyIndex presentFamilyIndex)
       ) >>=
       maybe (throwAppEx "Failed to find a suitable physical device.") return
 
-    findQueueFamilyIndices :: [VkQueueFamilyProperties] -> Maybe QueueFamilyIndices
-    findQueueFamilyIndices queueFamilies = do
-      graphicsFamilyIndex <- findFamilyIndexWhere $ (zeroBits /=) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags"
-      return $ QueueFamilyIndices graphicsFamilyIndex
-      where
-        indexedFamiliesWithQueues :: [(Word32, VkQueueFamilyProperties)]
-        indexedFamiliesWithQueues = filter ((0 <) . getField @"queueCount" . snd) . zip [0 ..] $ queueFamilies
-
-        findFamilyIndexWhere :: (VkQueueFamilyProperties -> Bool) -> Maybe Word32
-        findFamilyIndexWhere cond = fst <$> find (cond . snd) indexedFamiliesWithQueues
-
 data QueueFamilyIndices =
   QueueFamilyIndices {
-    qfiGraphicsFamilyIndex :: Word32
+    qfiGraphics :: Word32,
+    qfiPresent :: Word32
   } deriving (Eq, Show, Read)
+
+qfiAll :: QueueFamilyIndices -> [Word32]
+qfiAll qfi = [qfiGraphics, qfiPresent] <&> ($ qfi)
+
+qfiDistinct :: QueueFamilyIndices -> [Word32]
+qfiDistinct = distinct . qfiAll
 
 data VulkanException = VulkanException VkResult String deriving (Eq, Show, Read)
 
@@ -176,6 +198,16 @@ withVulkanGLFWWindow width height title = bracket create GLFW.destroyWindow
       GLFW.windowHint $ WindowHint'Resizable False
       GLFW.createWindow width height title Nothing Nothing >>=
         maybe (throwAppEx "Failed to initialize the GLFW window.") return
+
+withGLFWWindowSurface :: VkInstance -> GLFW.Window -> (VkSurfaceKHR -> IO a) -> IO a
+withGLFWWindowSurface vkInstance window = bracket create destroy
+  where
+    create =
+      alloca $ \surfacePtr -> do
+        onVkFailureThrow "GLFW.createWindowSurface failed." $
+          GLFW.createWindowSurface vkInstance window nullPtr surfacePtr
+        peek surfacePtr
+    destroy surface = vkDestroySurfaceKHR vkInstance surface VK_NULL
 
 withVkInstance :: VkApplicationInfo -> [String] -> [CString] -> (VkInstance -> IO a) -> IO a
 withVkInstance applicationInfo validationLayers extensions = bracket create destroy
@@ -311,3 +343,6 @@ infixl 1 <&>
 
 elemOf :: (Foldable t, Eq a) => t a -> a -> Bool
 elemOf = flip elem
+
+distinct :: Ord a => [a] -> [a]
+distinct = Set.toList . Set.fromList

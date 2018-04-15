@@ -20,7 +20,11 @@ executable vulkanTest
   build-depends:
     vulkan-api,
     GLFW-b,
-    monad-loops,
+
+    containers,
     extra,
+    monad-loops,
+    transformers,
+
     base
   default-language: Haskell2010
