@@ -8,6 +8,7 @@
 module Main where
 
 import Prelude hiding (init)
+import Control.Applicative
 import Control.Exception
 import Control.Monad
 import Control.Monad.Extra (firstJustM, findM)
@@ -19,6 +20,7 @@ import Data.Foldable
 import Data.Function
 import Data.Functor
 import Data.List
+import Data.Maybe
 import qualified Data.Set as Set
 import Foreign.C.String
 import Foreign.Marshal.Alloc
@@ -31,9 +33,12 @@ import Graphics.Vulkan
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Ext.VK_EXT_debug_report
 import Graphics.Vulkan.Ext.VK_KHR_surface
+import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Proc
 
+-- TODO: Why does the debug callback fail to occur?  I set a bad setting in configureVkSwapchain, which would trigger it.
+-- If I have debug callbacks disabled, it cleanly exits with an error, but if I enable them, it freezes.
 main :: IO ()
 main =
   (
@@ -47,28 +52,34 @@ main =
         ensureValidationLayersSupported validationLayers
         putStrLn "All required validation layers supported."
 
-      withVkInstance applicationInfo validationLayers (extensions ++ glfwExtensions) $ \vkInstance -> do
+      withVkInstance (configureVkInstance applicationInfo validationLayers (extensions ++ glfwExtensions)) $ \vulkanInstance -> do
         putStrLn "Instance created."
 
-        maybeWithDebugCallback vkInstance $ do
-          withGLFWWindowSurface vkInstance window $ \surface -> do
+        maybeWithDebugCallback vulkanInstance $ do
+          withGLFWWindowSurface vulkanInstance window $ \surface -> do
             putStrLn "Obtained the window surface."
 
-            (physicalDevice, qfi) <- getFirstSuitablePhysicalDeviceAndQueueFamilyIndices vkInstance surface
+            (physicalDevice, qfi, scsd) <-
+              getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface =<< mapM peekCString deviceExtensions
             putStrLn "Found a suitable physical device."
 
-            withVkDevice physicalDevice (qfiDistinct qfi) $ \vkDevice -> do
+            let distinctQfi = qfiDistinct qfi
+
+            withVkDevice physicalDevice (configureVkDevice distinctQfi deviceExtensions) $ \device -> do
               putStrLn "Vulkan device created."
 
-              graphicsQueue <- getDeviceQueue vkDevice (qfiGraphics qfi) 0
+              graphicsQueue <- getDeviceQueue device (qfiGraphics qfi) 0
               putStrLn "Obtained the graphics queue."
 
-              presentQueue <- getDeviceQueue vkDevice (qfiPresent qfi) 0
+              presentQueue <- getDeviceQueue device (qfiPresent qfi) 0
               putStrLn "Obtained the present queue."
 
-              putStrLn "Entering main loop."
-              mainLoop window
-              putStrLn "Main loop ended, cleaning up."
+              withVkSwapchain device (configureVkSwapchain surface (fromIntegral width) (fromIntegral height) distinctQfi scsd) $ \swapchain -> do
+                putStrLn "Swapchain created."
+
+                putStrLn "Entering main loop."
+                mainLoop window
+                putStrLn "Main loop ended, cleaning up."
   )
   `catch` (
     \(e :: VulkanException) ->
@@ -92,6 +103,12 @@ main =
       ]
 #endif
 
+    deviceExtensions :: [CString]
+    deviceExtensions =
+      [
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+      ]
+
     validationLayers :: [String]
     validationLayers =
       [
@@ -111,61 +128,201 @@ main =
       set @"apiVersion" VK_API_VERSION_1_0 &*
       set @"pNext" VK_NULL
 
-    maybeWithDebugCallback :: VkInstance -> IO a -> IO a
-#ifndef NDEBUG
-    maybeWithDebugCallback vkInstance action =
-      withFunPtr (newVkDebugReportCallbackEXT debugCallback) $ \debugCallbackPtr ->
-        withVkDebugReportCallbackEXT vkInstance debugReportFlags debugCallbackPtr $ \vkDebugReportCallback -> do
-          putStrLn "Debug callback setup."
-          action
-      where
-        debugReportFlags :: VkDebugReportFlagsEXT
-        debugReportFlags = (VK_DEBUG_REPORT_ERROR_BIT_EXT .|. VK_DEBUG_REPORT_WARNING_BIT_EXT)
+getFirstSuitablePhysicalDeviceAndProperties :: VkInstance -> VkSurfaceKHR -> [String] -> IO (VkPhysicalDevice, QueueFamilyIndices, SwapchainSupportDetails)
+getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface deviceExtensions =
+  listPhysicalDevices vulkanInstance >>=
+  firstJustM (\physicalDevice -> runMaybeT $ do
+    qfi <- findQueueFamilyIndices physicalDevice surface
 
-        debugCallback :: HS_vkDebugReportCallbackEXT
-        debugCallback flags objectType object location messageCode layerPrefixPtr messagePtr userDataPtr = do
-          message <- peekCString messagePtr
-          putStrLn $ "Validation Layer: " ++ message
-          return VK_FALSE
+    guardM $ liftIO $ null <$> getUnsupportedDeviceExtensionNames physicalDevice VK_NULL deviceExtensions
+
+    scsd <- liftIO $ getSwapchainSupportDetails physicalDevice surface
+
+    guard $ not . null $ scsdSurfaceFormats scsd
+    guard $ not . null $ scsdPresentModes scsd
+
+    return (physicalDevice, qfi, scsd)
+  ) >>=
+  maybe (throwIOAppEx "Failed to find a suitable physical device.") return
+
+findQueueFamilyIndices :: VkPhysicalDevice -> VkSurfaceKHR -> MaybeT IO QueueFamilyIndices
+findQueueFamilyIndices physicalDevice surface = do
+  indexedFamiliesHavingQueues <- liftIO $
+    filter ((0 <) . getField @"queueCount" . snd) . zip [0 ..] <$>
+    listPhysicalDeviceQueueFamilyProperties physicalDevice
+
+  let findFamilyIndexWhere condIO = MaybeT $ fmap fst <$> findM condIO indexedFamiliesHavingQueues
+
+  graphics <- findFamilyIndexWhere $ return . (zeroBits /=) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags" . snd
+
+  present <- findFamilyIndexWhere $ \(qfi, _) ->
+    alloca $ \isSupportedPtr -> do
+      vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface isSupportedPtr &
+        onVkFailureThrow "vkGetPhysicalDeviceSurfaceSupportKHR failed."
+      peek isSupportedPtr <&> (== VK_TRUE)
+
+  return $ QueueFamilyIndices graphics present
+
+maybeWithDebugCallback :: VkInstance -> IO a -> IO a
+#ifndef NDEBUG
+maybeWithDebugCallback vulkanInstance action =
+  withFunPtr (newVkDebugReportCallbackEXT debugCallback) $ \debugCallbackPtr ->
+    withVkDebugReportCallbackEXT vulkanInstance (configureVkDebugReportCallbackEXT debugReportFlags debugCallbackPtr) $ \vkDebugReportCallback -> do
+      putStrLn "Debug callback setup."
+      action
+  where
+    debugReportFlags :: VkDebugReportFlagsEXT
+    debugReportFlags = (VK_DEBUG_REPORT_ERROR_BIT_EXT .|. VK_DEBUG_REPORT_WARNING_BIT_EXT)
+
+    debugCallback :: HS_vkDebugReportCallbackEXT
+    debugCallback flags objectType object location messageCode layerPrefixPtr messagePtr userDataPtr = do
+      message <- peekCString messagePtr
+      putStrLn $ "Validation Layer: " ++ message
+      return VK_FALSE
 #else
-    maybeWithDebugCallback = id
+maybeWithDebugCallback _ = id
 #endif
 
-    getFirstSuitablePhysicalDeviceAndQueueFamilyIndices :: VkInstance -> VkSurfaceKHR -> IO (VkPhysicalDevice, QueueFamilyIndices)
-    getFirstSuitablePhysicalDeviceAndQueueFamilyIndices vkInstance surface =
-      listPhysicalDevices vkInstance >>=
-      firstJustM (\physicalDevice -> runMaybeT $ do
-        indexedFamiliesHavingQueues <- liftIO $
-          filter ((0 <) . getField @"queueCount" . snd) . zip [0 ..] <$>
-          listPhysicalDeviceQueueFamilyProperties physicalDevice
+configureVkDebugReportCallbackEXT :: VkDebugReportFlagsEXT -> PFN_vkDebugReportCallbackEXT -> VkDebugReportCallbackCreateInfoEXT
+configureVkDebugReportCallbackEXT debugReportFlags debugCallbackPtr =
+  createVk @VkDebugReportCallbackCreateInfoEXT $
+  set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
+  set @"flags" debugReportFlags &*
+  set @"pfnCallback" debugCallbackPtr &*
+  set @"pNext" VK_NULL
 
-        let findFamilyIndexWhere condIO = MaybeT $ fmap fst <$> findM condIO indexedFamiliesHavingQueues
+configureVkInstance :: VkApplicationInfo -> [String] -> [CString] -> VkInstanceCreateInfo
+configureVkInstance applicationInfo validationLayers extensions =
+  createVk @VkInstanceCreateInfo $
+  set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
+  setVkRef @"pApplicationInfo" applicationInfo &*
+  set @"enabledExtensionCount" (fromIntegral $ length extensions) &*
+  setListRef @"ppEnabledExtensionNames" extensions &*
+  set @"enabledLayerCount" (fromIntegral $ length validationLayers) &*
+  setStrListRef @"ppEnabledLayerNames" validationLayers &*
+  set @"pNext" VK_NULL
 
-        graphicsFamilyIndex <- findFamilyIndexWhere $ return . (zeroBits /=) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags" . snd
+configureVkDevice :: [Word32] -> [CString] -> VkDeviceCreateInfo
+configureVkDevice queueFamilyIndices deviceExtensions =
+  createVk @VkDeviceCreateInfo $
+  set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"flags" 0 &*
+  set @"queueCreateInfoCount" (fromIntegral $ length queueFamilyIndices) &*
+  setListRef @"pQueueCreateInfos" (
+    queueFamilyIndices <&> \qfi ->
+      createVk @VkDeviceQueueCreateInfo $
+      set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"flags" 0 &*
+      set @"queueFamilyIndex" qfi &*
+      set @"queueCount" 1 &*
+      setListRef @"pQueuePriorities" [1.0]
+  ) &*
+  set @"enabledLayerCount" 0 &*
+  set @"ppEnabledLayerNames" VK_NULL &*
+  set @"enabledExtensionCount" (fromIntegral $ length deviceExtensions) &*
+  setListRef @"ppEnabledExtensionNames" deviceExtensions &*
+  setVkRef @"pEnabledFeatures" (
+    createVk @VkPhysicalDeviceFeatures $ handleRemFields @_ @'[]
+  )
 
-        presentFamilyIndex <- do
-          getPhysicalDeviceSurfaceSupportKHR <- liftIO $ vkGetInstanceProc @VkGetPhysicalDeviceSurfaceSupportKHR vkInstance
-          findFamilyIndexWhere $ \(qfi, _) ->
-            alloca $ \isSupportedPtr -> do
-              onVkFailureThrow "vkGetPhysicalDeviceSurfaceSupportKHR failed." $
-                getPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface isSupportedPtr
-              peek isSupportedPtr <&> (== VK_TRUE)
+configureVkSwapchain :: VkSurfaceKHR -> Word32 -> Word32 -> [Word32] -> SwapchainSupportDetails -> VkSwapchainCreateInfoKHR
+configureVkSwapchain surface idealWidth idealHeight queueFamilyIndices (SwapchainSupportDetails capabilities surfaceFormats presentModes) =
+  createVk @VkSwapchainCreateInfoKHR $
+  set @"sType" VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR &*
+  set @"pNext" VK_NULL &*
+  set @"flags" 0 &*
+  set @"surface" surface &*
+  set @"minImageCount" chosenImageCount &*
+  set @"imageFormat" (getField @"format" chosenSurfaceFormat) &*
+  set @"imageColorSpace" (getField @"colorSpace" chosenSurfaceFormat) &*
+  --set @"imageExtent" chosenExtent &*
+  -- Temporarily setting this to something incorrect to test validation layer.
+  set @"imageExtent" (
+    createVk @VkExtent2D $
+    set @"width" 0 &*
+    set @"height" 0
+  ) &*
+  set @"imageArrayLayers" 1 &*
+  set @"imageUsage" VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &*
+  (
+    case length queueFamilyIndices of
+      count | count >= 2 ->
+        set @"imageSharingMode" VK_SHARING_MODE_CONCURRENT &*
+        set @"queueFamilyIndexCount" (fromIntegral count) &*
+        setListRef @"pQueueFamilyIndices" queueFamilyIndices
+      _ ->
+        set @"imageSharingMode" VK_SHARING_MODE_EXCLUSIVE &*
+        set @"queueFamilyIndexCount" 0 &*
+        set @"pQueueFamilyIndices" VK_NULL
+  ) &*
+  set @"preTransform" (getField @"currentTransform" capabilities) &*
+  set @"compositeAlpha" VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR &*
+  set @"presentMode" chosenPresentMode &*
+  set @"clipped" VK_TRUE &*
+  set @"oldSwapchain" VK_NULL
+  where
+    chosenSurfaceFormat =
+      case surfaceFormats of
+        [f] | getField @"format" f == VK_FORMAT_UNDEFINED -> idealSurfaceFormat
+        fs -> find (== idealSurfaceFormat) fs & fromMaybe (throwAppEx "Failed to find an appropriate swap surface format.")
+        where
+          idealSurfaceFormat =
+            createVk @VkSurfaceFormatKHR $
+            set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
+            set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
 
-        return (physicalDevice, QueueFamilyIndices graphicsFamilyIndex presentFamilyIndex)
-      ) >>=
-      maybe (throwAppEx "Failed to find a suitable physical device.") return
+    chosenPresentMode =
+      fromMaybe VK_PRESENT_MODE_FIFO_KHR $
+      find (`elem` presentModes) [VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR]
+
+    chosenExtent =
+      if getField @"width" currentExtent /= maxBound then
+        currentExtent
+      else
+        createVk @VkExtent2D $
+        set @"width" (idealWidth & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
+        set @"height" (idealHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
+      where
+        currentExtent = getField @"currentExtent" capabilities
+        minImageExtent = getField @"minImageExtent" capabilities
+        maxImageExtent = getField @"maxImageExtent" capabilities
+
+    chosenImageCount =
+      if maxImageCount > 0 then
+        min maxImageCount idealImageCount
+      else
+        idealImageCount
+      where
+        idealImageCount = getField @"minImageCount" capabilities + 1
+        maxImageCount = getField @"maxImageCount" capabilities
 
 data QueueFamilyIndices =
   QueueFamilyIndices {
     qfiGraphics :: Word32,
     qfiPresent :: Word32
-  } deriving (Eq, Show, Read)
+  }
 
 qfiAll :: QueueFamilyIndices -> [Word32]
 qfiAll qfi = [qfiGraphics, qfiPresent] <&> ($ qfi)
 
 qfiDistinct :: QueueFamilyIndices -> [Word32]
 qfiDistinct = distinct . qfiAll
+
+data SwapchainSupportDetails =
+  SwapchainSupportDetails {
+    scsdCapabilities :: VkSurfaceCapabilitiesKHR,
+    scsdSurfaceFormats :: [VkSurfaceFormatKHR],
+    scsdPresentModes :: [VkPresentModeKHR]
+  }
+
+getSwapchainSupportDetails :: VkPhysicalDevice -> VkSurfaceKHR -> IO SwapchainSupportDetails
+getSwapchainSupportDetails physicalDevice surface = do
+  capabilities <- liftIO $ getPhysicalDeviceSurfaceCapabilities physicalDevice surface
+  formats <- liftIO $ listPhysicalDeviceSurfaceFormats physicalDevice surface
+  presentModes <- liftIO $ listPhysicalDeviceSurfacePresentModes physicalDevice surface
+  return $ SwapchainSupportDetails capabilities formats presentModes
 
 data VulkanException = VulkanException VkResult String deriving (Eq, Show, Read)
 
@@ -184,118 +341,95 @@ instance Exception ApplicationException where
   displayException (ApplicationException message) =
     "Application error: " ++ message
 
-throwAppEx :: String -> IO a
-throwAppEx message = throwIO $ ApplicationException message
+throwAppEx :: String -> a
+throwAppEx message = throw $ ApplicationException message
+
+throwIOAppEx :: String -> IO a
+throwIOAppEx message = throwIO $ ApplicationException message
 
 withGLFW :: IO a -> IO a
-withGLFW = bracket_ GLFW.init GLFW.terminate
+withGLFW = GLFW.init `bracket_` GLFW.terminate
 
 withVulkanGLFWWindow :: Int -> Int -> String -> (GLFW.Window -> IO a) -> IO a
-withVulkanGLFWWindow width height title = bracket create GLFW.destroyWindow
-  where
-    create = do
-      GLFW.windowHint $ WindowHint'ClientAPI ClientAPI'NoAPI
-      GLFW.windowHint $ WindowHint'Resizable False
-      GLFW.createWindow width height title Nothing Nothing >>=
-        maybe (throwAppEx "Failed to initialize the GLFW window.") return
+withVulkanGLFWWindow width height title =
+  do
+    GLFW.windowHint $ WindowHint'ClientAPI ClientAPI'NoAPI
+    GLFW.windowHint $ WindowHint'Resizable False
+    GLFW.createWindow width height title Nothing Nothing >>=
+      maybe (throwIOAppEx "Failed to initialize the GLFW window.") return
+  `bracket`
+  GLFW.destroyWindow
 
 withGLFWWindowSurface :: VkInstance -> GLFW.Window -> (VkSurfaceKHR -> IO a) -> IO a
-withGLFWWindowSurface vkInstance window = bracket create destroy
-  where
-    create =
-      alloca $ \surfacePtr -> do
-        onVkFailureThrow "GLFW.createWindowSurface failed." $
-          GLFW.createWindowSurface vkInstance window nullPtr surfacePtr
-        peek surfacePtr
-    destroy surface = vkDestroySurfaceKHR vkInstance surface VK_NULL
+withGLFWWindowSurface vulkanInstance window =
+  do
+    alloca $ \surfacePtr -> do
+      GLFW.createWindowSurface vulkanInstance window nullPtr surfacePtr &
+        onVkFailureThrow "GLFW.createWindowSurface failed."
+      peek surfacePtr
+  `bracket`
+  \surface -> vkDestroySurfaceKHR vulkanInstance surface VK_NULL
 
-withVkInstance :: VkApplicationInfo -> [String] -> [CString] -> (VkInstance -> IO a) -> IO a
-withVkInstance applicationInfo validationLayers extensions = bracket create destroy
-  where
-    create =
-      withPtr createInfo $ \createInfoPtr ->
-        alloca $ \vkInstancePtr -> do
-          onVkFailureThrow "vkCreateInstance failed." $
-            vkCreateInstance createInfoPtr VK_NULL vkInstancePtr
-          peek vkInstancePtr
-    destroy vkInstance = vkDestroyInstance vkInstance VK_NULL
-    createInfo =
-      createVk @VkInstanceCreateInfo $
-      set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
-      setVkRef @"pApplicationInfo" applicationInfo &*
-      set @"enabledExtensionCount" (fromIntegral $ length extensions) &*
-      setListRef @"ppEnabledExtensionNames" extensions &*
-      set @"enabledLayerCount" (fromIntegral $ length validationLayers) &*
-      setStrListRef @"ppEnabledLayerNames" validationLayers &*
-      set @"pNext" VK_NULL
+withVkInstance :: VkInstanceCreateInfo -> (VkInstance -> IO a) -> IO a
+withVkInstance createInfo =
+  do
+    withPtr createInfo $ \createInfoPtr ->
+      alloca $ \vulkanInstancePtr -> do
+        vkCreateInstance createInfoPtr VK_NULL vulkanInstancePtr &
+          onVkFailureThrow "vkCreateInstance failed."
+        peek vulkanInstancePtr
+  `bracket`
+  \vulkanInstance -> vkDestroyInstance vulkanInstance VK_NULL
 
-withVkDevice :: VkPhysicalDevice -> [Word32] -> (VkDevice -> IO a) -> IO a
-withVkDevice physicalDevice queueFamilyIndices = bracket create destroy
-  where
-    create =
-      withPtr createInfo $ \createInfoPtr ->
-        alloca $ \vkDevicePtr -> do
-          onVkFailureThrow "vkCreateDevice failed." $
-            vkCreateDevice physicalDevice createInfoPtr VK_NULL vkDevicePtr
-          peek vkDevicePtr
-    destroy vkDevice = vkDestroyDevice vkDevice VK_NULL
-    createInfo =
-      createVk @VkDeviceCreateInfo $
-      set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
-      set @"pNext" VK_NULL &*
-      set @"flags" 0 &*
-      set @"queueCreateInfoCount" (fromIntegral $ length queueFamilyIndices) &*
-      setListRef @"pQueueCreateInfos" (
-        queueFamilyIndices <&> \qfi ->
-          createVk @VkDeviceQueueCreateInfo $
-          set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
-          set @"pNext" VK_NULL &*
-          set @"flags" 0 &*
-          set @"queueFamilyIndex" qfi &*
-          set @"queueCount" 1 &*
-          setListRef @"pQueuePriorities" [1.0]
-      ) &*
-      set @"enabledLayerCount" 0 &*
-      set @"ppEnabledLayerNames" VK_NULL &*
-      set @"enabledExtensionCount" 0 &*
-      set @"ppEnabledExtensionNames" VK_NULL &*
-      setVkRef @"pEnabledFeatures" (
-        createVk @VkPhysicalDeviceFeatures $ handleRemFields @_ @'[]
-      )
+withVkDevice :: VkPhysicalDevice -> VkDeviceCreateInfo -> (VkDevice -> IO a) -> IO a
+withVkDevice physicalDevice createInfo =
+  do
+    withPtr createInfo $ \createInfoPtr ->
+      alloca $ \devicePtr -> do
+        vkCreateDevice physicalDevice createInfoPtr VK_NULL devicePtr &
+          onVkFailureThrow "vkCreateDevice failed."
+        peek devicePtr
+  `bracket`
+  \device -> vkDestroyDevice device VK_NULL
+
+withVkSwapchain :: VkDevice -> VkSwapchainCreateInfoKHR -> (VkSwapchainKHR -> IO a) -> IO a
+withVkSwapchain device createInfo =
+  do
+    withPtr createInfo $ \createInfoPtr ->
+      alloca $ \swapchainPtr -> do
+        vkCreateSwapchainKHR device createInfoPtr VK_NULL swapchainPtr &
+          onVkFailureThrow "vkCreateSwapchainKHR failed."
+        peek swapchainPtr
+  `bracket`
+  \swapchain -> vkDestroySwapchainKHR device swapchain VK_NULL
 
 getDeviceQueue :: VkDevice -> Word32 -> Word32 -> IO VkQueue
-getDeviceQueue vkDevice queueFamilyIndex queueIndex =
+getDeviceQueue device queueFamilyIndex queueIndex =
   alloca $ \deviceQueuePtr -> do
-    vkGetDeviceQueue vkDevice queueFamilyIndex 0 deviceQueuePtr
+    vkGetDeviceQueue device queueFamilyIndex 0 deviceQueuePtr
     peek deviceQueuePtr
 
 withFunPtr :: IO (FunPtr f) -> (FunPtr f -> IO a) -> IO a
 withFunPtr createFunPtr = bracket createFunPtr freeHaskellFunPtr
 
-withVkDebugReportCallbackEXT :: VkInstance -> VkDebugReportFlagsEXT -> PFN_vkDebugReportCallbackEXT -> (VkDebugReportCallbackEXT -> IO a) -> IO a
-withVkDebugReportCallbackEXT vkInstance debugReportFlags debugCallbackPtr = bracket create destroy
-  where
-    create = do
-      createDebugReportCallbackEXT <- vkGetInstanceProc @VkCreateDebugReportCallbackEXT vkInstance
+withVkDebugReportCallbackEXT :: VkInstance -> VkDebugReportCallbackCreateInfoEXT -> (VkDebugReportCallbackEXT -> IO a) -> IO a
+withVkDebugReportCallbackEXT vulkanInstance createInfo =
+    do
+      createDebugReportCallbackEXT <- vkGetInstanceProc @VkCreateDebugReportCallbackEXT vulkanInstance
       withPtr createInfo $ \createInfoPtr ->
         alloca $ \vkDebugReportCallbackEXTPtr -> do
-          onVkFailureThrow "vkCreateDebugReportCallbackEXT failed." $
-            createDebugReportCallbackEXT vkInstance createInfoPtr VK_NULL vkDebugReportCallbackEXTPtr
+          createDebugReportCallbackEXT vulkanInstance createInfoPtr VK_NULL vkDebugReportCallbackEXTPtr &
+            onVkFailureThrow "vkCreateDebugReportCallbackEXT failed."
           peek vkDebugReportCallbackEXTPtr
-    destroy vkDebugReportCallbackEXT = do
-      destroyDebugReportCallbackEXT <- vkGetInstanceProc @VkDestroyDebugReportCallbackEXT vkInstance
-      destroyDebugReportCallbackEXT vkInstance vkDebugReportCallbackEXT VK_NULL
-    createInfo =
-      createVk @VkDebugReportCallbackCreateInfoEXT $
-      set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
-      set @"flags" debugReportFlags &*
-      set @"pfnCallback" debugCallbackPtr &*
-      set @"pNext" VK_NULL
+    `bracket`
+    \vkDebugReportCallbackEXT -> do
+      destroyDebugReportCallbackEXT <- vkGetInstanceProc @VkDestroyDebugReportCallbackEXT vulkanInstance
+      destroyDebugReportCallbackEXT vulkanInstance vkDebugReportCallbackEXT VK_NULL
 
 ensureValidationLayersSupported :: [String] -> IO ()
 ensureValidationLayersSupported validationLayers = do
   unsupportedLayers <- getUnsupportedValidationLayerNames validationLayers
-  unless (null unsupportedLayers) $ throwAppEx ("Expected validation layers are not available: " ++ show unsupportedLayers)
+  unless (null unsupportedLayers) $ throwIOAppEx ("Expected validation layers are not available: " ++ show unsupportedLayers)
 
 getUnsupportedValidationLayerNames :: [String] -> IO [String]
 getUnsupportedValidationLayerNames [] = return []
@@ -305,6 +439,15 @@ getUnsupportedValidationLayerNames expectedLayerNames =
   <&> \case
     [] -> expectedLayerNames
     availableLayerNames -> filter (not . elemOf availableLayerNames) expectedLayerNames
+
+getUnsupportedDeviceExtensionNames :: VkPhysicalDevice -> CString -> [String] -> IO [String]
+getUnsupportedDeviceExtensionNames _ _ [] = return []
+getUnsupportedDeviceExtensionNames physicalDevice layerName expectedExtensionNames = do
+  listPhysicalDeviceExtensionProperties physicalDevice layerName
+  <&> fmap (getStringField @"extensionName")
+  <&> \case
+    [] -> expectedExtensionNames
+    availableExtensionNames -> filter (not . elemOf availableExtensionNames) expectedExtensionNames
 
 getVkList :: Storable a => (Ptr Word32 -> Ptr a -> IO ()) -> IO [a]
 getVkList getArray =
@@ -321,18 +464,41 @@ getVkList getArray =
 listInstanceLayerProperties :: IO [VkLayerProperties]
 listInstanceLayerProperties =
   getVkList $ \layerCountPtr layersPtr ->
-    onVkFailureThrow "vkEnumerateInstanceLayerProperties failed." $
-    vkEnumerateInstanceLayerProperties layerCountPtr layersPtr
+    vkEnumerateInstanceLayerProperties layerCountPtr layersPtr &
+      onVkFailureThrow "vkEnumerateInstanceLayerProperties failed."
 
 listPhysicalDevices :: VkInstance -> IO [VkPhysicalDevice]
-listPhysicalDevices vkInstance =
+listPhysicalDevices vulkanInstance =
   getVkList $ \deviceCountPtr devicesPtr ->
-    onVkFailureThrow "vkEnumeratePhysicalDevices failed." $
-    vkEnumeratePhysicalDevices vkInstance deviceCountPtr devicesPtr
+    vkEnumeratePhysicalDevices vulkanInstance deviceCountPtr devicesPtr &
+      onVkFailureThrow "vkEnumeratePhysicalDevices failed."
 
 listPhysicalDeviceQueueFamilyProperties :: VkPhysicalDevice -> IO [VkQueueFamilyProperties]
-listPhysicalDeviceQueueFamilyProperties device =
-  getVkList $ vkGetPhysicalDeviceQueueFamilyProperties device
+listPhysicalDeviceQueueFamilyProperties physicalDevice = getVkList $ vkGetPhysicalDeviceQueueFamilyProperties physicalDevice
+
+listPhysicalDeviceExtensionProperties :: VkPhysicalDevice -> CString -> IO [VkExtensionProperties]
+listPhysicalDeviceExtensionProperties physicalDevice layerName =
+  getVkList $ \extCountPtr extsPtr ->
+    vkEnumerateDeviceExtensionProperties physicalDevice layerName extCountPtr extsPtr &
+      onVkFailureThrow "vkEnumerateDeviceExtensionProperties failed."
+
+getPhysicalDeviceSurfaceCapabilities :: VkPhysicalDevice -> VkSurfaceKHR -> IO VkSurfaceCapabilitiesKHR
+getPhysicalDeviceSurfaceCapabilities physicalDevice surface =
+  alloca $ \capsPtr -> do
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface capsPtr
+    peek capsPtr
+
+listPhysicalDeviceSurfaceFormats :: VkPhysicalDevice -> VkSurfaceKHR -> IO [VkSurfaceFormatKHR]
+listPhysicalDeviceSurfaceFormats physicalDevice surface =
+  getVkList $ \formatCountPtr formatsPtr ->
+    vkGetPhysicalDeviceSurfaceFormatsKHR physicalDevice surface formatCountPtr formatsPtr &
+      onVkFailureThrow "vkGetPhysicalDeviceSurfaceFormatsKHR failed."
+
+listPhysicalDeviceSurfacePresentModes :: VkPhysicalDevice -> VkSurfaceKHR -> IO [VkPresentModeKHR]
+listPhysicalDeviceSurfacePresentModes physicalDevice surface = do
+  getVkList $ \modeCountPtr modesPtr ->
+    vkGetPhysicalDeviceSurfacePresentModesKHR physicalDevice surface modeCountPtr modesPtr &
+      onVkFailureThrow "vkGetPhysicalDeviceSurfacePresentModesKHR failed."
 
 mainLoop :: GLFW.Window -> IO ()
 mainLoop window = whileM_ (not <$> GLFW.windowShouldClose window) GLFW.pollEvents
@@ -346,3 +512,13 @@ elemOf = flip elem
 
 distinct :: Ord a => [a] -> [a]
 distinct = Set.toList . Set.fromList
+
+guardM :: (Alternative m, Monad m) => m Bool -> m ()
+guardM = (guard =<<)
+
+clamp :: Ord a => a -> a -> a -> a
+clamp a b =
+  case compare a b of
+    LT -> min b . max a
+    GT -> min a . max b
+    EQ -> const a
