@@ -37,8 +37,6 @@ import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Proc
 
--- TODO: Why does the debug callback fail to occur?  I set a bad setting in configureVkSwapchain, which would trigger it.
--- If I have debug callbacks disabled, it cleanly exits with an error, but if I enable them, it freezes.
 main :: IO ()
 main =
   (
@@ -74,8 +72,17 @@ main =
               presentQueue <- getDeviceQueue device (qfiPresent qfi) 0
               putStrLn "Obtained the present queue."
 
-              withVkSwapchain device (configureVkSwapchain surface (fromIntegral width) (fromIntegral height) distinctQfi scsd) $ \swapchain -> do
+              let surfaceCapabilities = scsdCapabilities scsd
+              let swapchainSurfaceFormat = chooseSwapchainSurfaceFormat (scsdSurfaceFormats scsd)
+              let swapchainPresentMode = chooseSwapchainPresentMode (scsdPresentModes scsd)
+              let swapchainExtent = chooseSwapchainExtent (fromIntegral width) (fromIntegral height) surfaceCapabilities
+              let swapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
+
+              withVkSwapchain device (configureVkSwapchain surface surfaceCapabilities swapchainSurfaceFormat swapchainPresentMode swapchainExtent swapchainImageCount distinctQfi) $ \swapchain -> do
                 putStrLn "Swapchain created."
+
+                swapchainImages <- listSwapchainImages device swapchain
+                putStrLn "Obtained the swapchain images."
 
                 putStrLn "Entering main loop."
                 mainLoop window
@@ -227,23 +234,55 @@ configureVkDevice queueFamilyIndices deviceExtensions =
     createVk @VkPhysicalDeviceFeatures $ handleRemFields @_ @'[]
   )
 
-configureVkSwapchain :: VkSurfaceKHR -> Word32 -> Word32 -> [Word32] -> SwapchainSupportDetails -> VkSwapchainCreateInfoKHR
-configureVkSwapchain surface idealWidth idealHeight queueFamilyIndices (SwapchainSupportDetails capabilities surfaceFormats presentModes) =
+chooseSwapchainSurfaceFormat :: [VkSurfaceFormatKHR] -> VkSurfaceFormatKHR
+chooseSwapchainSurfaceFormat = \case
+  [f] | getField @"format" f == VK_FORMAT_UNDEFINED -> idealSurfaceFormat
+  fs -> find (== idealSurfaceFormat) fs & fromMaybe (throwAppEx "Failed to find an appropriate swap surface format.")
+  where
+    idealSurfaceFormat =
+      createVk @VkSurfaceFormatKHR $
+      set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
+      set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+
+chooseSwapchainPresentMode :: [VkPresentModeKHR] -> VkPresentModeKHR
+chooseSwapchainPresentMode presentModes =
+  fromMaybe VK_PRESENT_MODE_FIFO_KHR $
+  find (elemOf presentModes) [VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR]
+
+chooseSwapchainExtent :: Word32 -> Word32 -> VkSurfaceCapabilitiesKHR -> VkExtent2D
+chooseSwapchainExtent idealWidth idealHeight capabilities =
+  if getField @"width" currentExtent /= maxBound then
+    currentExtent
+  else
+    createVk @VkExtent2D $
+    set @"width" (idealWidth & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
+    set @"height" (idealHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
+  where
+    currentExtent = getField @"currentExtent" capabilities
+    minImageExtent = getField @"minImageExtent" capabilities
+    maxImageExtent = getField @"maxImageExtent" capabilities
+
+chooseSwapchainImageCount :: VkSurfaceCapabilitiesKHR -> Word32
+chooseSwapchainImageCount capabilities =
+  if maxImageCount > 0 then
+    min maxImageCount idealImageCount
+  else
+    idealImageCount
+  where
+    idealImageCount = getField @"minImageCount" capabilities + 1
+    maxImageCount = getField @"maxImageCount" capabilities
+
+configureVkSwapchain :: VkSurfaceKHR -> VkSurfaceCapabilitiesKHR -> VkSurfaceFormatKHR -> VkPresentModeKHR -> VkExtent2D -> Word32 -> [Word32] -> VkSwapchainCreateInfoKHR
+configureVkSwapchain surface capabilities surfaceFormat presentMode extent imageCount queueFamilyIndices =
   createVk @VkSwapchainCreateInfoKHR $
   set @"sType" VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR &*
   set @"pNext" VK_NULL &*
   set @"flags" 0 &*
   set @"surface" surface &*
-  set @"minImageCount" chosenImageCount &*
-  set @"imageFormat" (getField @"format" chosenSurfaceFormat) &*
-  set @"imageColorSpace" (getField @"colorSpace" chosenSurfaceFormat) &*
-  --set @"imageExtent" chosenExtent &*
-  -- Temporarily setting this to something incorrect to test validation layer.
-  set @"imageExtent" (
-    createVk @VkExtent2D $
-    set @"width" 0 &*
-    set @"height" 0
-  ) &*
+  set @"minImageCount" imageCount &*
+  set @"imageFormat" (getField @"format" surfaceFormat) &*
+  set @"imageColorSpace" (getField @"colorSpace" surfaceFormat) &*
+  set @"imageExtent" extent &*
   set @"imageArrayLayers" 1 &*
   set @"imageUsage" VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &*
   (
@@ -259,44 +298,9 @@ configureVkSwapchain surface idealWidth idealHeight queueFamilyIndices (Swapchai
   ) &*
   set @"preTransform" (getField @"currentTransform" capabilities) &*
   set @"compositeAlpha" VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR &*
-  set @"presentMode" chosenPresentMode &*
+  set @"presentMode" presentMode &*
   set @"clipped" VK_TRUE &*
   set @"oldSwapchain" VK_NULL
-  where
-    chosenSurfaceFormat =
-      case surfaceFormats of
-        [f] | getField @"format" f == VK_FORMAT_UNDEFINED -> idealSurfaceFormat
-        fs -> find (== idealSurfaceFormat) fs & fromMaybe (throwAppEx "Failed to find an appropriate swap surface format.")
-        where
-          idealSurfaceFormat =
-            createVk @VkSurfaceFormatKHR $
-            set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
-            set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-
-    chosenPresentMode =
-      fromMaybe VK_PRESENT_MODE_FIFO_KHR $
-      find (`elem` presentModes) [VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR]
-
-    chosenExtent =
-      if getField @"width" currentExtent /= maxBound then
-        currentExtent
-      else
-        createVk @VkExtent2D $
-        set @"width" (idealWidth & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
-        set @"height" (idealHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
-      where
-        currentExtent = getField @"currentExtent" capabilities
-        minImageExtent = getField @"minImageExtent" capabilities
-        maxImageExtent = getField @"maxImageExtent" capabilities
-
-    chosenImageCount =
-      if maxImageCount > 0 then
-        min maxImageCount idealImageCount
-      else
-        idealImageCount
-      where
-        idealImageCount = getField @"minImageCount" capabilities + 1
-        maxImageCount = getField @"maxImageCount" capabilities
 
 data QueueFamilyIndices =
   QueueFamilyIndices {
@@ -495,10 +499,16 @@ listPhysicalDeviceSurfaceFormats physicalDevice surface =
       onVkFailureThrow "vkGetPhysicalDeviceSurfaceFormatsKHR failed."
 
 listPhysicalDeviceSurfacePresentModes :: VkPhysicalDevice -> VkSurfaceKHR -> IO [VkPresentModeKHR]
-listPhysicalDeviceSurfacePresentModes physicalDevice surface = do
+listPhysicalDeviceSurfacePresentModes physicalDevice surface =
   getVkList $ \modeCountPtr modesPtr ->
     vkGetPhysicalDeviceSurfacePresentModesKHR physicalDevice surface modeCountPtr modesPtr &
       onVkFailureThrow "vkGetPhysicalDeviceSurfacePresentModesKHR failed."
+
+listSwapchainImages :: VkDevice -> VkSwapchainKHR -> IO [VkImage]
+listSwapchainImages device swapchain = do
+  getVkList $ \imageCountPtr imagesPtr ->
+    vkGetSwapchainImagesKHR device swapchain imageCountPtr imagesPtr &
+      onVkFailureThrow "vkGetSwapchainImagesKHR failed."
 
 mainLoop :: GLFW.Window -> IO ()
 mainLoop window = whileM_ (not <$> GLFW.windowShouldClose window) GLFW.pollEvents
