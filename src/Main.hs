@@ -39,55 +39,54 @@ import Graphics.Vulkan.Marshal.Proc
 
 main :: IO ()
 main =
-  (
+  do
     withGLFW $
-    withVulkanGLFWWindow width height "Vulkan" $ \window -> do
-      putStrLn "Window created."
+      withVulkanGLFWWindow width height "Vulkan" $ \window -> do
+        putStrLn "Window created."
 
-      glfwExtensions <- GLFW.getRequiredInstanceExtensions
+        glfwExtensions <- GLFW.getRequiredInstanceExtensions
 
-      unless (null validationLayers) $ do
-        ensureValidationLayersSupported validationLayers
-        putStrLn "All required validation layers supported."
+        unless (null validationLayers) $ do
+          ensureValidationLayersSupported validationLayers
+          putStrLn "All required validation layers supported."
 
-      withVkInstance (configureVkInstance applicationInfo validationLayers (extensions ++ glfwExtensions)) $ \vulkanInstance -> do
-        putStrLn "Instance created."
+        withVkInstance (configureVkInstance applicationInfo validationLayers (extensions ++ glfwExtensions)) $ \vulkanInstance -> do
+          putStrLn "Instance created."
 
-        maybeWithDebugCallback vulkanInstance $ do
-          withGLFWWindowSurface vulkanInstance window $ \surface -> do
-            putStrLn "Obtained the window surface."
+          maybeWithDebugCallback vulkanInstance $ do
+            withGLFWWindowSurface vulkanInstance window $ \surface -> do
+              putStrLn "Obtained the window surface."
 
-            (physicalDevice, qfi, scsd) <-
-              getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface =<< mapM peekCString deviceExtensions
-            putStrLn "Found a suitable physical device."
+              (physicalDevice, qfi, scsd) <-
+                getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface =<< mapM peekCString deviceExtensions
+              putStrLn "Found a suitable physical device."
 
-            let distinctQfi = qfiDistinct qfi
+              let distinctQfi = qfiDistinct qfi
 
-            withVkDevice physicalDevice (configureVkDevice distinctQfi deviceExtensions) $ \device -> do
-              putStrLn "Vulkan device created."
+              withVkDevice physicalDevice (configureVkDevice distinctQfi deviceExtensions) $ \device -> do
+                putStrLn "Vulkan device created."
 
-              graphicsQueue <- getDeviceQueue device (qfiGraphics qfi) 0
-              putStrLn "Obtained the graphics queue."
+                graphicsQueue <- getDeviceQueue device (qfiGraphics qfi) 0
+                putStrLn "Obtained the graphics queue."
 
-              presentQueue <- getDeviceQueue device (qfiPresent qfi) 0
-              putStrLn "Obtained the present queue."
+                presentQueue <- getDeviceQueue device (qfiPresent qfi) 0
+                putStrLn "Obtained the present queue."
 
-              let surfaceCapabilities = scsdCapabilities scsd
-              let swapchainSurfaceFormat = chooseSwapchainSurfaceFormat (scsdSurfaceFormats scsd)
-              let swapchainPresentMode = chooseSwapchainPresentMode (scsdPresentModes scsd)
-              let swapchainExtent = chooseSwapchainExtent (fromIntegral width) (fromIntegral height) surfaceCapabilities
-              let swapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
+                let surfaceCapabilities = scsdCapabilities scsd
+                let swapchainSurfaceFormat = chooseSwapchainSurfaceFormat (scsdSurfaceFormats scsd)
+                let swapchainPresentMode = chooseSwapchainPresentMode (scsdPresentModes scsd)
+                let swapchainExtent = chooseSwapchainExtent (fromIntegral width) (fromIntegral height) surfaceCapabilities
+                let swapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
 
-              withVkSwapchain device (configureVkSwapchain surface surfaceCapabilities swapchainSurfaceFormat swapchainPresentMode swapchainExtent swapchainImageCount distinctQfi) $ \swapchain -> do
-                putStrLn "Swapchain created."
+                withVkSwapchain device (configureVkSwapchain surface surfaceCapabilities swapchainSurfaceFormat swapchainPresentMode swapchainExtent swapchainImageCount distinctQfi) $ \swapchain -> do
+                  putStrLn "Swapchain created."
 
-                swapchainImages <- listSwapchainImages device swapchain
-                putStrLn "Obtained the swapchain images."
+                  swapchainImages <- listSwapchainImages device swapchain
+                  putStrLn "Obtained the swapchain images."
 
-                putStrLn "Entering main loop."
-                mainLoop window
-                putStrLn "Main loop ended, cleaning up."
-  )
+                  putStrLn "Entering main loop."
+                  mainLoop window
+                  putStrLn "Main loop ended, cleaning up."
   `catch` (
     \(e :: VulkanException) ->
       putStrLn $ displayException e
