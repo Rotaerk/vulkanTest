@@ -84,9 +84,12 @@ main =
                   swapchainImages <- listSwapchainImages device swapchain
                   putStrLn "Obtained the swapchain images."
 
-                  putStrLn "Entering main loop."
-                  mainLoop window
-                  putStrLn "Main loop ended, cleaning up."
+                  withVkImageViews device (configureVkImageView (getField @"format" swapchainSurfaceFormat) <$> swapchainImages) $ \swapchainImageViews -> do
+                    putStrLn "Swapchain image views created."
+
+                    putStrLn "Entering main loop."
+                    mainLoop window
+                    putStrLn "Main loop ended, cleaning up."
   `catch` (
     \(e :: VulkanException) ->
       putStrLn $ displayException e
@@ -301,6 +304,28 @@ configureVkSwapchain surface capabilities surfaceFormat presentMode extent image
   set @"clipped" VK_TRUE &*
   set @"oldSwapchain" VK_NULL
 
+configureVkImageView :: VkFormat -> VkImage -> VkImageViewCreateInfo
+configureVkImageView format image =
+  createVk @VkImageViewCreateInfo $
+  set @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"image" image &*
+  set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
+  set @"format" format &*
+  setVk @"components" (
+    set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
+    set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
+    set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
+    set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
+  ) &*
+  setVk @"subresourceRange" (
+    set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+    set @"baseMipLevel" 0 &*
+    set @"levelCount" 1 &*
+    set @"baseArrayLayer" 0 &*
+    set @"layerCount" 1
+  )
+
 data QueueFamilyIndices =
   QueueFamilyIndices {
     qfiGraphics :: Word32,
@@ -365,46 +390,65 @@ withVulkanGLFWWindow width height title =
 
 withGLFWWindowSurface :: VkInstance -> GLFW.Window -> (VkSurfaceKHR -> IO a) -> IO a
 withGLFWWindowSurface vulkanInstance window =
-  do
+  (
     alloca $ \surfacePtr -> do
       GLFW.createWindowSurface vulkanInstance window nullPtr surfacePtr &
         onVkFailureThrow "GLFW.createWindowSurface failed."
       peek surfacePtr
+  )
   `bracket`
   \surface -> vkDestroySurfaceKHR vulkanInstance surface VK_NULL
 
 withVkInstance :: VkInstanceCreateInfo -> (VkInstance -> IO a) -> IO a
 withVkInstance createInfo =
-  do
+  (
     withPtr createInfo $ \createInfoPtr ->
       alloca $ \vulkanInstancePtr -> do
         vkCreateInstance createInfoPtr VK_NULL vulkanInstancePtr &
           onVkFailureThrow "vkCreateInstance failed."
         peek vulkanInstancePtr
+  )
   `bracket`
   \vulkanInstance -> vkDestroyInstance vulkanInstance VK_NULL
 
 withVkDevice :: VkPhysicalDevice -> VkDeviceCreateInfo -> (VkDevice -> IO a) -> IO a
 withVkDevice physicalDevice createInfo =
-  do
+  (
     withPtr createInfo $ \createInfoPtr ->
       alloca $ \devicePtr -> do
         vkCreateDevice physicalDevice createInfoPtr VK_NULL devicePtr &
           onVkFailureThrow "vkCreateDevice failed."
         peek devicePtr
+  )
   `bracket`
   \device -> vkDestroyDevice device VK_NULL
 
 withVkSwapchain :: VkDevice -> VkSwapchainCreateInfoKHR -> (VkSwapchainKHR -> IO a) -> IO a
 withVkSwapchain device createInfo =
-  do
+  (
     withPtr createInfo $ \createInfoPtr ->
       alloca $ \swapchainPtr -> do
         vkCreateSwapchainKHR device createInfoPtr VK_NULL swapchainPtr &
           onVkFailureThrow "vkCreateSwapchainKHR failed."
         peek swapchainPtr
+  )
   `bracket`
   \swapchain -> vkDestroySwapchainKHR device swapchain VK_NULL
+
+withVkImageViews :: VkDevice -> [VkImageViewCreateInfo] -> ([VkImageView] -> IO a) -> IO a
+withVkImageViews device createInfos =
+  (
+    forM (zip [0..] createInfos) $ \(idx, createInfo) ->
+      withPtr createInfo $ \createInfoPtr ->
+        alloca $ \imageViewPtr -> do
+          vkCreateImageView device createInfoPtr VK_NULL imageViewPtr &
+            onVkFailureThrow ("vkCreateImageView failed for item " ++ show idx ++ ".")
+          peek imageViewPtr
+  )
+  `bracket`
+  \imageViews ->
+    forM_ imageViews $ \imageView ->
+      vkDestroyImageView device imageView VK_NULL
 
 getDeviceQueue :: VkDevice -> Word32 -> Word32 -> IO VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
