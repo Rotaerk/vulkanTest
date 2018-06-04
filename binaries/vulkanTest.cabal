@@ -18,13 +18,13 @@ executable vulkanTest
   main-is: Main.hs
   ghc-options: -threaded
   build-depends:
-    vulkan-api,
-    GLFW-b,
-
     containers,
+    cmdargs,
     extra,
+    GLFW-b,
     monad-loops,
     transformers,
+    vulkan-api,
 
     base
   default-language: Haskell2010

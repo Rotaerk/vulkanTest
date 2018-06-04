@@ -1,9 +1,11 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -fno-cse #-} -- needed for cmdargs
 
 module Main where
 
@@ -36,10 +38,20 @@ import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Proc
+import System.Console.CmdArgs.Implicit
+
+data Arguments = Arguments { shadersPath :: String } deriving (Show, Data, Typeable)
 
 main :: IO ()
 main =
   do
+    arguments <-
+      cmdArgs $
+      Arguments {
+        shadersPath = def &= typ "PATH" &= help "Path to the SPIR-V shader files."
+      }
+      &= summary "Vulkan Test"
+    putStrLn $ "Shaders path is: '" ++ shadersPath arguments ++ "'."
     withGLFW $
       withVulkanGLFWWindow width height "Vulkan" $ \window -> do
         putStrLn "Window created."
@@ -51,7 +63,7 @@ main =
           putStrLn "All required validation layers supported."
 
         withVkInstance (configureVkInstance applicationInfo validationLayers (extensions ++ glfwExtensions)) $ \vulkanInstance -> do
-          putStrLn "Instance created."
+          putStrLn "Vulkan instance created."
 
           maybeWithDebugCallback vulkanInstance $ do
             withGLFWWindowSurface vulkanInstance window $ \surface -> do
@@ -142,10 +154,13 @@ getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface deviceExtensi
   listPhysicalDevices vulkanInstance >>=
   firstJustM (\physicalDevice -> runMaybeT $ do
     qfi <- findQueueFamilyIndices physicalDevice surface
+    liftIO $ putStrLn "Found queue family indices."
 
     guardM $ liftIO $ null <$> getUnsupportedDeviceExtensionNames physicalDevice VK_NULL deviceExtensions
+    liftIO $ putStrLn "All expected device extensions are supported."
 
     scsd <- liftIO $ getSwapchainSupportDetails physicalDevice surface
+    liftIO $ putStrLn "Finished obtaining swapchain support details."
 
     guard $ not . null $ scsdSurfaceFormats scsd
     guard $ not . null $ scsdPresentModes scsd
@@ -348,8 +363,11 @@ data SwapchainSupportDetails =
 getSwapchainSupportDetails :: VkPhysicalDevice -> VkSurfaceKHR -> IO SwapchainSupportDetails
 getSwapchainSupportDetails physicalDevice surface = do
   capabilities <- liftIO $ getPhysicalDeviceSurfaceCapabilities physicalDevice surface
+  putStrLn "Obtained physical device surface capabilities."
   formats <- liftIO $ listPhysicalDeviceSurfaceFormats physicalDevice surface
+  putStrLn "Obtained physical device surface formats."
   presentModes <- liftIO $ listPhysicalDeviceSurfacePresentModes physicalDevice surface
+  putStrLn "Obtained physical device surface present modes."
   return $ SwapchainSupportDetails capabilities formats presentModes
 
 data VulkanException = VulkanException VkResult String deriving (Eq, Show, Read)

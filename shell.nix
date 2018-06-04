@@ -1,2 +1,2 @@
 { refsWithLocalSource ? [] }:
-(import ./default.nix { inherit refsWithLocalSource; }).env
+(import ./vulkanTest.nix { inherit refsWithLocalSource; }).binaries.env
