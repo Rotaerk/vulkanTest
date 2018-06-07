@@ -35,11 +35,11 @@ let
       };
     };
 
-  binaries = 
+  main = 
     overrideCabal
-      (haskellPackages.callCabal2nix projectName ./binaries {})
+      (haskellPackages.callCabal2nix projectName ./main {})
       (drv: {
-        pname = "${projectName}-binaries";
+        pname = "${projectName}-main";
         src = pkgs.lib.cleanSource drv.src;
         librarySystemDepends = [ pkgs.vulkan-loader pkgs.cabal-install ];
       });
@@ -60,7 +60,7 @@ let
 
   fullBuild =
     pkgs.writeShellScriptBin projectName ''
-      exec ${binaries}/bin/vulkanTest --shaderspath='${shaders}' "$@"
+      exec ${main}/bin/vulkanTest --shaderspath='${shaders}' "$@"
     '';
 in
-  { inherit binaries shaders fullBuild; }
+  { inherit main shaders fullBuild; }
