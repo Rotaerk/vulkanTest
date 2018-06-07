@@ -22,6 +22,7 @@ executable vulkanTest
     cmdargs,
     extra,
     GLFW-b,
+    filepath,
     monad-loops,
     resourcet,
     transformers,

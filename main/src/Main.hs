@@ -41,6 +41,7 @@ import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Proc
 import System.Console.CmdArgs.Implicit
+import System.FilePath
 import System.IO
 
 data CommandLineArguments = CommandLineArguments { claShadersPath :: String } deriving (Show, Data, Typeable)
@@ -78,10 +79,10 @@ main =
         configureVkInstance applicationInfo validationLayers (extensions ++ glfwExtensions)
       ioPutStrLn "Vulkan instance created."
 
-#ifndef NDEBUG
+-- #ifndef NDEBUG
       registerDebugCallback vulkanInstance
       ioPutStrLn "Debug callback registered."
-#endif
+-- #endif
 
       surface <- allocateAcquire_ $ newGLFWWindowSurface vulkanInstance window
       ioPutStrLn "Obtained the window surface."
@@ -102,11 +103,12 @@ main =
       presentQueue <- getDeviceQueue device (qfiPresent qfi) 0
       ioPutStrLn "Obtained the present queue."
 
-      let surfaceCapabilities = scsdCapabilities scsd
-      let swapchainSurfaceFormat = chooseSwapchainSurfaceFormat (scsdSurfaceFormats scsd)
-      let swapchainPresentMode = chooseSwapchainPresentMode (scsdPresentModes scsd)
-      let swapchainExtent = chooseSwapchainExtent (fromIntegral width) (fromIntegral height) surfaceCapabilities
-      let swapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
+      let
+        surfaceCapabilities = scsdCapabilities scsd
+        swapchainSurfaceFormat = chooseSwapchainSurfaceFormat (scsdSurfaceFormats scsd)
+        swapchainPresentMode = chooseSwapchainPresentMode (scsdPresentModes scsd)
+        swapchainExtent = chooseSwapchainExtent (fromIntegral width) (fromIntegral height) surfaceCapabilities
+        swapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
 
       swapchain <-
         allocateAcquire_ $
@@ -129,6 +131,24 @@ main =
         newVkImageViews device $
         configureVkImageView (getField @"format" swapchainSurfaceFormat) <$> swapchainImages
       ioPutStrLn "Swapchain image views created."
+
+      do
+        (vertShaderModuleKey, vertShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
+        ioPutStrLn "Created vertex shader module."
+        (fragShaderModuleKey, fragShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
+        ioPutStrLn "Created fragment shader module."
+
+        let
+          shaderStages =
+            [
+              configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
+              configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
+            ]
+
+        release fragShaderModuleKey
+        ioPutStrLn "Destroyed fragment shader module."
+        release vertShaderModuleKey
+        ioPutStrLn "Destroyed vertex shader module."
 
       ioPutStrLn "Entering main loop."
       mainLoop window
@@ -379,6 +399,17 @@ configureShaderModule codeSize codePtr =
   set @"codeSize" codeSize &*
   set @"pCode" (castPtr codePtr)
 
+configurePipelineShaderStage :: VkShaderStageFlagBits -> VkShaderModule -> String -> VkPipelineShaderStageCreateInfo
+configurePipelineShaderStage stage shaderModule entryPointName =
+  createVk @VkPipelineShaderStageCreateInfo $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"flags" 0 &*
+  set @"stage" stage &*
+  set @"module" shaderModule &*
+  setStrRef @"pName" entryPointName &*
+  set @"pSpecializationInfo" VK_NULL
+
 data QueueFamilyIndices =
   QueueFamilyIndices {
     qfiGraphics :: Word32,
@@ -506,7 +537,7 @@ newVkImageViews device createInfos =
     forM_ imageViews $ \imageView ->
       vkDestroyImageView device imageView VK_NULL
 
-fillBufferWithShaderFileContents :: FilePath -> ResIO (ReleaseKey, Ptr Word8, CSize)
+fillBufferWithShaderFileContents :: FilePath -> ResIO (ReleaseKey, CSize, Ptr Word8)
 fillBufferWithShaderFileContents path = do
   (handleKey, handle) <- allocate (openBinaryFile path ReadMode) hClose
   fileSize <- liftIO $ hFileSize handle
@@ -520,7 +551,7 @@ fillBufferWithShaderFileContents path = do
 
   liftIO $ pokeArray (castPtr @_ @Word8 . plusPtr bufferPtr $ bytesRead) $ replicate (alignedSize - bytesRead) 0
 
-  return (bufferPtrKey, bufferPtr, fromIntegral alignedSize)
+  return (bufferPtrKey, fromIntegral alignedSize, bufferPtr)
 
 newShaderModule :: VkDevice -> VkShaderModuleCreateInfo -> Acquire VkShaderModule
 newShaderModule device createInfo =
@@ -533,6 +564,16 @@ newShaderModule device createInfo =
   )
   `mkAcquire`
   \shaderModule -> vkDestroyShaderModule device shaderModule VK_NULL
+
+createShaderModuleFromFile :: VkDevice -> FilePath -> ResIO (ReleaseKey, VkShaderModule)
+createShaderModuleFromFile device path = do
+  (bufferKey, bufferSize, bufferPtr) <- fillBufferWithShaderFileContents path
+  shaderModuleWithKey <-
+    allocateAcquire $
+    newShaderModule device $
+    configureShaderModule bufferSize bufferPtr
+  release bufferKey
+  return shaderModuleWithKey
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec dist/build/vulkanTest/vulkanTest --shaderspath=$(nix-build ../vulkanTest.nix -A shaders)
