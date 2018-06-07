@@ -23,6 +23,7 @@ executable vulkanTest
     extra,
     GLFW-b,
     monad-loops,
+    resourcet,
     transformers,
     vulkan-api,
 
