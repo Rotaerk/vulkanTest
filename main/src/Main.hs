@@ -144,6 +144,16 @@ main =
               configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
               configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
             ]
+          vertexInputInfo = configurePipelineVertexInputState
+          inputAssembly = configurePipelineInputAssemblyState
+          viewportState = configurePipelineViewportState swapchainExtent
+          rasterizer = configurePipelineRasterizationState
+          multisampling = configurePipelineMultisampleState
+          colorBlending = configurePipelineColorBlendState
+          dynamicState = configurePipelineDynamicState
+
+        pipelineLayout <- allocateAcquire_ $ newPipelineLayout device $ configurePipelineLayout
+        ioPutStrLn "Created pipeline layout."
 
         release fragShaderModuleKey
         ioPutStrLn "Destroyed fragment shader module."
@@ -192,7 +202,7 @@ main =
 
     applicationInfo :: VkApplicationInfo
     applicationInfo =
-      createVk @VkApplicationInfo $
+      createVk $
       set @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO &*
       setStrRef @"pApplicationName" "Hello Triangle" &*
       set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
@@ -258,7 +268,7 @@ registerDebugCallback vulkanInstance = do
 
 configureVkDebugReportCallbackEXT :: VkDebugReportFlagsEXT -> PFN_vkDebugReportCallbackEXT -> VkDebugReportCallbackCreateInfoEXT
 configureVkDebugReportCallbackEXT debugReportFlags debugCallbackPtr =
-  createVk @VkDebugReportCallbackCreateInfoEXT $
+  createVk $
   set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
   set @"flags" debugReportFlags &*
   set @"pfnCallback" debugCallbackPtr &*
@@ -266,7 +276,7 @@ configureVkDebugReportCallbackEXT debugReportFlags debugCallbackPtr =
 
 configureVkInstance :: VkApplicationInfo -> [String] -> [CString] -> VkInstanceCreateInfo
 configureVkInstance applicationInfo validationLayers extensions =
-  createVk @VkInstanceCreateInfo $
+  createVk $
   set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
   setVkRef @"pApplicationInfo" applicationInfo &*
   set @"enabledExtensionCount" (fromIntegral $ length extensions) &*
@@ -277,14 +287,14 @@ configureVkInstance applicationInfo validationLayers extensions =
 
 configureVkDevice :: [Word32] -> [CString] -> VkDeviceCreateInfo
 configureVkDevice queueFamilyIndices deviceExtensions =
-  createVk @VkDeviceCreateInfo $
+  createVk $
   set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
   set @"pNext" VK_NULL &*
   set @"flags" 0 &*
   set @"queueCreateInfoCount" (fromIntegral $ length queueFamilyIndices) &*
   setListRef @"pQueueCreateInfos" (
     queueFamilyIndices <&> \qfi ->
-      createVk @VkDeviceQueueCreateInfo $
+      createVk $
       set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
       set @"pNext" VK_NULL &*
       set @"flags" 0 &*
@@ -297,7 +307,7 @@ configureVkDevice queueFamilyIndices deviceExtensions =
   set @"enabledExtensionCount" (fromIntegral $ length deviceExtensions) &*
   setListRef @"ppEnabledExtensionNames" deviceExtensions &*
   setVkRef @"pEnabledFeatures" (
-    createVk @VkPhysicalDeviceFeatures $ handleRemFields @_ @'[]
+    createVk $ handleRemFields @_ @'[]
   )
 
 chooseSwapchainSurfaceFormat :: [VkSurfaceFormatKHR] -> VkSurfaceFormatKHR
@@ -306,7 +316,7 @@ chooseSwapchainSurfaceFormat = \case
   fs -> find (== idealSurfaceFormat) fs & fromMaybe (throwAppEx "Failed to find an appropriate swap surface format.")
   where
     idealSurfaceFormat =
-      createVk @VkSurfaceFormatKHR $
+      createVk $
       set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
       set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
 
@@ -320,7 +330,7 @@ chooseSwapchainExtent idealWidth idealHeight capabilities =
   if getField @"width" currentExtent /= maxBound then
     currentExtent
   else
-    createVk @VkExtent2D $
+    createVk $
     set @"width" (idealWidth & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
     set @"height" (idealHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
   where
@@ -340,7 +350,7 @@ chooseSwapchainImageCount capabilities =
 
 configureVkSwapchain :: VkSurfaceKHR -> VkSurfaceCapabilitiesKHR -> VkSurfaceFormatKHR -> VkPresentModeKHR -> VkExtent2D -> Word32 -> [Word32] -> VkSwapchainCreateInfoKHR
 configureVkSwapchain surface capabilities surfaceFormat presentMode extent imageCount queueFamilyIndices =
-  createVk @VkSwapchainCreateInfoKHR $
+  createVk $
   set @"sType" VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR &*
   set @"pNext" VK_NULL &*
   set @"flags" 0 &*
@@ -370,7 +380,7 @@ configureVkSwapchain surface capabilities surfaceFormat presentMode extent image
 
 configureVkImageView :: VkFormat -> VkImage -> VkImageViewCreateInfo
 configureVkImageView format image =
-  createVk @VkImageViewCreateInfo $
+  createVk $
   set @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &*
   set @"pNext" VK_NULL &*
   set @"image" image &*
@@ -392,7 +402,7 @@ configureVkImageView format image =
 
 configureShaderModule :: CSize -> Ptr Word8 -> VkShaderModuleCreateInfo
 configureShaderModule codeSize codePtr =
-  createVk @VkShaderModuleCreateInfo $
+  createVk $
   set @"sType" VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO &*
   set @"pNext" VK_NULL &*
   set @"flags" 0 &*
@@ -401,7 +411,7 @@ configureShaderModule codeSize codePtr =
 
 configurePipelineShaderStage :: VkShaderStageFlagBits -> VkShaderModule -> String -> VkPipelineShaderStageCreateInfo
 configurePipelineShaderStage stage shaderModule entryPointName =
-  createVk @VkPipelineShaderStageCreateInfo $
+  createVk $
   set @"sType" VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO &*
   set @"pNext" VK_NULL &*
   set @"flags" 0 &*
@@ -409,6 +419,125 @@ configurePipelineShaderStage stage shaderModule entryPointName =
   set @"module" shaderModule &*
   setStrRef @"pName" entryPointName &*
   set @"pSpecializationInfo" VK_NULL
+
+configurePipelineVertexInputState :: VkPipelineVertexInputStateCreateInfo
+configurePipelineVertexInputState =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"vertexBindingDescriptionCount" 0 &*
+  set @"pVertexBindingDescriptions" VK_NULL &*
+  set @"vertexAttributeDescriptionCount" 0 &*
+  set @"pVertexAttributeDescriptions" VK_NULL
+
+configurePipelineInputAssemblyState :: VkPipelineInputAssemblyStateCreateInfo
+configurePipelineInputAssemblyState =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &*
+  set @"primitiveRestartEnable" VK_FALSE
+
+configurePipelineViewportState :: VkExtent2D -> VkPipelineViewportStateCreateInfo
+configurePipelineViewportState extent =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"viewportCount" 1 &*
+  setListRef @"pViewports" [
+    createVk (
+      set @"x" 0 &*
+      set @"y" 0 &*
+      set @"width" (fromIntegral . getField @"width" $ extent) &*
+      set @"height" (fromIntegral . getField @"height" $ extent) &*
+      set @"minDepth" 0 &*
+      set @"maxDepth" 0
+    )
+  ] &*
+  set @"scissorCount" 1 &*
+  setListRef @"pScissors" [
+    createVk (
+      setVk @"offset" (
+        set @"x" 0 &*
+        set @"y" 0
+      ) &*
+      set @"extent" extent
+    )
+  ]
+
+configurePipelineRasterizationState :: VkPipelineRasterizationStateCreateInfo
+configurePipelineRasterizationState =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"depthClampEnable" VK_FALSE &*
+  set @"rasterizerDiscardEnable" VK_FALSE &*
+  set @"polygonMode" VK_POLYGON_MODE_FILL &*
+  set @"lineWidth" 1 &*
+  set @"cullMode" VK_CULL_MODE_BACK_BIT &*
+  set @"frontFace" VK_FRONT_FACE_CLOCKWISE &*
+  set @"depthBiasEnable" VK_FALSE &*
+  set @"depthBiasConstantFactor" 0 &*
+  set @"depthBiasClamp" 0 &*
+  set @"depthBiasSlopeFactor" 0
+
+configurePipelineMultisampleState :: VkPipelineMultisampleStateCreateInfo
+configurePipelineMultisampleState =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"sampleShadingEnable" VK_FALSE &*
+  set @"rasterizationSamples" VK_SAMPLE_COUNT_1_BIT &*
+  set @"minSampleShading" 1 &*
+  set @"pSampleMask" VK_NULL &*
+  set @"alphaToCoverageEnable" VK_FALSE &*
+  set @"alphaToOneEnable" VK_FALSE
+
+configurePipelineColorBlendState :: VkPipelineColorBlendStateCreateInfo
+configurePipelineColorBlendState =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"logicOpEnable" VK_FALSE &*
+  set @"logicOp" VK_LOGIC_OP_COPY &*
+  set @"attachmentCount" 1 &*
+  setListRef @"pAttachments" [
+    createVk (
+      set @"colorWriteMask" (VK_COLOR_COMPONENT_R_BIT .|. VK_COLOR_COMPONENT_G_BIT .|. VK_COLOR_COMPONENT_B_BIT .|. VK_COLOR_COMPONENT_A_BIT) &*
+      set @"blendEnable" VK_FALSE &*
+      set @"srcColorBlendFactor" VK_BLEND_FACTOR_ONE &*
+      set @"dstColorBlendFactor" VK_BLEND_FACTOR_ZERO &*
+      set @"colorBlendOp" VK_BLEND_OP_ADD &*
+      set @"srcAlphaBlendFactor" VK_BLEND_FACTOR_ONE &*
+      set @"dstAlphaBlendFactor" VK_BLEND_FACTOR_ZERO &*
+      set @"alphaBlendOp" VK_BLEND_OP_ADD
+    )
+  ] &*
+  setAt @"blendConstants" @0 0 &*
+  setAt @"blendConstants" @1 0 &*
+  setAt @"blendConstants" @2 0 &*
+  setAt @"blendConstants" @3 0
+
+configurePipelineDynamicState :: VkPipelineDynamicStateCreateInfo
+configurePipelineDynamicState =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"dynamicStateCount" 2 &*
+  setListRef @"pDynamicStates" [
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_LINE_WIDTH
+  ]
+
+configurePipelineLayout :: VkPipelineLayoutCreateInfo
+configurePipelineLayout =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"setLayoutCount" 0 &*
+  set @"pSetLayouts" VK_NULL &*
+  set @"pushConstantRangeCount" 0 &*
+  set @"pPushConstantRanges" VK_NULL
 
 data QueueFamilyIndices =
   QueueFamilyIndices {
@@ -574,6 +703,18 @@ createShaderModuleFromFile device path = do
     configureShaderModule bufferSize bufferPtr
   release bufferKey
   return shaderModuleWithKey
+
+newPipelineLayout :: VkDevice -> VkPipelineLayoutCreateInfo -> Acquire VkPipelineLayout
+newPipelineLayout device createInfo =
+  (
+    withPtr createInfo $ \createInfoPtr ->
+      alloca $ \pipelineLayoutPtr -> do
+        vkCreatePipelineLayout device createInfoPtr VK_NULL pipelineLayoutPtr &
+          onVkFailureThrow "vkCreatePipelineLayout failed."
+        peek pipelineLayoutPtr
+  )
+  `mkAcquire`
+  \pipelineLayout -> vkDestroyPipelineLayout device pipelineLayout VK_NULL
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
