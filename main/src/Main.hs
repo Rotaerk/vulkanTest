@@ -85,12 +85,12 @@ main =
 -- #endif
 
       surface <- allocateAcquire_ $ newGLFWWindowSurface vulkanInstance window
-      ioPutStrLn "Obtained the window surface."
+      ioPutStrLn "Window surface obtained."
 
       (physicalDevice, qfi, scsd) <-
         mapM (liftIO . peekCString) deviceExtensions >>=
         getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface
-      ioPutStrLn "Found a suitable physical device."
+      ioPutStrLn "Suitable physical device found."
 
       let distinctQfi = qfiDistinct qfi
 
@@ -98,14 +98,15 @@ main =
       ioPutStrLn "Vulkan device created."
 
       graphicsQueue <- getDeviceQueue device (qfiGraphics qfi) 0
-      ioPutStrLn "Obtained the graphics queue."
+      ioPutStrLn "Graphics queue obtained."
 
       presentQueue <- getDeviceQueue device (qfiPresent qfi) 0
-      ioPutStrLn "Obtained the present queue."
+      ioPutStrLn "Present queue obtained."
 
       let
         surfaceCapabilities = scsdCapabilities scsd
         swapchainSurfaceFormat = chooseSwapchainSurfaceFormat (scsdSurfaceFormats scsd)
+        swapchainImageFormat = getField @"format" swapchainSurfaceFormat
         swapchainPresentMode = chooseSwapchainPresentMode (scsdPresentModes scsd)
         swapchainExtent = chooseSwapchainExtent (fromIntegral width) (fromIntegral height) surfaceCapabilities
         swapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
@@ -124,19 +125,19 @@ main =
       ioPutStrLn "Swapchain created."
 
       swapchainImages <- listSwapchainImages device swapchain
-      ioPutStrLn "Obtained the swapchain images."
+      ioPutStrLn "Swapchain images created."
 
       swapchainImageViews <-
         allocateAcquire_ $
         newVkImageViews device $
-        configureVkImageView (getField @"format" swapchainSurfaceFormat) <$> swapchainImages
+        configureVkImageView swapchainImageFormat <$> swapchainImages
       ioPutStrLn "Swapchain image views created."
 
       do
         (vertShaderModuleKey, vertShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
-        ioPutStrLn "Created vertex shader module."
+        ioPutStrLn "Vertex shader module created."
         (fragShaderModuleKey, fragShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
-        ioPutStrLn "Created fragment shader module."
+        ioPutStrLn "Fragment shader module created."
 
         let
           shaderStages =
@@ -152,15 +153,18 @@ main =
           colorBlending = configurePipelineColorBlendState
           dynamicState = configurePipelineDynamicState
 
+        renderPass <- allocateAcquire_ $ newRenderPass device $ configureRenderPass swapchainImageFormat
+        ioPutStrLn "Render pass created."
+
         pipelineLayout <- allocateAcquire_ $ newPipelineLayout device $ configurePipelineLayout
-        ioPutStrLn "Created pipeline layout."
+        ioPutStrLn "Pipeline layout created."
 
         release fragShaderModuleKey
-        ioPutStrLn "Destroyed fragment shader module."
+        ioPutStrLn "Fragment shader module destroyed."
         release vertShaderModuleKey
-        ioPutStrLn "Destroyed vertex shader module."
+        ioPutStrLn "Vertex shader module destroyed."
 
-      ioPutStrLn "Entering main loop."
+      ioPutStrLn "Main loop starting."
       mainLoop window
       ioPutStrLn "Main loop ended, cleaning up."
 
@@ -408,6 +412,42 @@ configureShaderModule codeSize codePtr =
   set @"flags" 0 &*
   set @"codeSize" codeSize &*
   set @"pCode" (castPtr codePtr)
+
+configureRenderPass :: VkFormat -> VkRenderPassCreateInfo
+configureRenderPass colorAttachmentFormat =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"attachmentCount" 1 &*
+  setListRef @"pAttachments" [
+    createVk (
+      set @"format" colorAttachmentFormat &*
+      set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+      set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
+      set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
+      set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
+      set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+      set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+      set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+    )
+  ] &*
+  set @"subpassCount" 1 &*
+  setListRef @"pSubpasses" [
+    createVk (
+      set @"pipelineBindPoint" VK_PIPELINE_BIND_POINT_GRAPHICS &*
+      set @"colorAttachmentCount" 1 &*
+      setListRef @"pColorAttachments" [
+        createVk (
+          set @"attachment" 0 &*
+          set @"layout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+        )
+      ] &*
+      set @"pInputAttachments" VK_NULL &*
+      set @"pPreserveAttachments" VK_NULL
+    )
+  ] &*
+  set @"dependencyCount" 0 &*
+  set @"pDependencies" VK_NULL
 
 configurePipelineShaderStage :: VkShaderStageFlagBits -> VkShaderModule -> String -> VkPipelineShaderStageCreateInfo
 configurePipelineShaderStage stage shaderModule entryPointName =
@@ -703,6 +743,18 @@ createShaderModuleFromFile device path = do
     configureShaderModule bufferSize bufferPtr
   release bufferKey
   return shaderModuleWithKey
+
+newRenderPass :: VkDevice -> VkRenderPassCreateInfo -> Acquire VkRenderPass
+newRenderPass device createInfo =
+  (
+    withPtr createInfo $ \createInfoPtr ->
+      alloca $ \renderPassPtr -> do
+        vkCreateRenderPass device createInfoPtr VK_NULL renderPassPtr &
+          onVkFailureThrow "vkCreateRenderPass failed."
+        peek renderPassPtr
+  )
+  `mkAcquire`
+  \renderPass -> vkDestroyRenderPass device renderPass VK_NULL
 
 newPipelineLayout :: VkDevice -> VkPipelineLayoutCreateInfo -> Acquire VkPipelineLayout
 newPipelineLayout device createInfo =
