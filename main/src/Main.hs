@@ -139,25 +139,29 @@ main =
         (fragShaderModuleKey, fragShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
         ioPutStrLn "Fragment shader module created."
 
-        let
-          shaderStages =
-            [
-              configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
-              configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
-            ]
-          vertexInputInfo = configurePipelineVertexInputState
-          inputAssembly = configurePipelineInputAssemblyState
-          viewportState = configurePipelineViewportState swapchainExtent
-          rasterizer = configurePipelineRasterizationState
-          multisampling = configurePipelineMultisampleState
-          colorBlending = configurePipelineColorBlendState
-          dynamicState = configurePipelineDynamicState
-
         renderPass <- allocateAcquire_ $ newRenderPass device $ configureRenderPass swapchainImageFormat
         ioPutStrLn "Render pass created."
 
         pipelineLayout <- allocateAcquire_ $ newPipelineLayout device $ configurePipelineLayout
         ioPutStrLn "Pipeline layout created."
+
+        graphicsPipeline <-
+          allocateAcquire_ $
+          newGraphicsPipeline device $
+          configureGraphicsPipeline
+            [
+              configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
+              configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
+            ]
+            configurePipelineVertexInputState
+            configurePipelineInputAssemblyState
+            (configurePipelineViewportState swapchainExtent)
+            configurePipelineRasterizationState
+            configurePipelineMultisampleState
+            configurePipelineColorBlendState
+            renderPass
+            pipelineLayout
+        ioPutStrLn "Graphics pipeline created."
 
         release fragShaderModuleKey
         ioPutStrLn "Fragment shader module destroyed."
@@ -579,6 +583,47 @@ configurePipelineLayout =
   set @"pushConstantRangeCount" 0 &*
   set @"pPushConstantRanges" VK_NULL
 
+configureGraphicsPipeline ::
+  [VkPipelineShaderStageCreateInfo] ->
+  VkPipelineVertexInputStateCreateInfo ->
+  VkPipelineInputAssemblyStateCreateInfo ->
+  VkPipelineViewportStateCreateInfo ->
+  VkPipelineRasterizationStateCreateInfo ->
+  VkPipelineMultisampleStateCreateInfo ->
+  VkPipelineColorBlendStateCreateInfo ->
+  VkRenderPass ->
+  VkPipelineLayout ->
+  VkGraphicsPipelineCreateInfo
+configureGraphicsPipeline
+  shaderStageCreateInfos
+  vertexInputStateCreateInfo
+  inputAssemblyStateCreateInfo
+  viewportStateCreateInfo
+  rasterizationStateCreateInfo
+  multisampleStateCreateInfo
+  colorBlendStateCreateInfo
+  renderPass
+  pipelineLayout
+  =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"stageCount" (fromIntegral $ length $ shaderStageCreateInfos) &*
+  setListRef @"pStages" shaderStageCreateInfos &*
+  setVkRef @"pVertexInputState" vertexInputStateCreateInfo &*
+  setVkRef @"pInputAssemblyState" inputAssemblyStateCreateInfo &*
+  setVkRef @"pViewportState" viewportStateCreateInfo &*
+  setVkRef @"pRasterizationState" rasterizationStateCreateInfo &*
+  setVkRef @"pMultisampleState" multisampleStateCreateInfo &*
+  set @"pDepthStencilState" VK_NULL &*
+  setVkRef @"pColorBlendState" colorBlendStateCreateInfo &*
+  set @"pDynamicState" VK_NULL &*
+  set @"renderPass" renderPass &*
+  set @"subpass" 0 &*
+  set @"layout" pipelineLayout &*
+  set @"basePipelineHandle" VK_NULL_HANDLE &*
+  set @"basePipelineIndex" (-1)
+
 data QueueFamilyIndices =
   QueueFamilyIndices {
     qfiGraphics :: Word32,
@@ -767,6 +812,32 @@ newPipelineLayout device createInfo =
   )
   `mkAcquire`
   \pipelineLayout -> vkDestroyPipelineLayout device pipelineLayout VK_NULL
+
+{-
+-- Problems with this:
+-- 1) I don't have a withListPtr or whatever
+-- 2) It seems less than ideal to force all the pipelines to be destroyed together.
+newGraphicsPipelines :: VkDevice -> [VkGraphicsPipelineCreateInfo] -> [VkPipeline]
+newGraphicsPipelines device createInfos =
+  (
+  )
+  `mkAcquire`
+  \pipelines ->
+    forM_ pipelines $ \pipeline ->
+      vkDestroyPipeline device pipeline VK_NULL
+-}
+
+newGraphicsPipeline :: VkDevice -> VkGraphicsPipelineCreateInfo -> Acquire VkPipeline
+newGraphicsPipeline device createInfo =
+  (
+    withPtr createInfo $ \createInfoPtr ->
+      alloca $ \pipelinePtr -> do
+        vkCreateGraphicsPipelines device VK_NULL_HANDLE 1 createInfoPtr VK_NULL pipelinePtr &
+          onVkFailureThrow "vkCreateGraphicsPipelines failed."
+        peek pipelinePtr
+  )
+  `mkAcquire`
+  \pipeline -> vkDestroyPipeline device pipeline VK_NULL
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
