@@ -813,31 +813,25 @@ newPipelineLayout device createInfo =
   `mkAcquire`
   \pipelineLayout -> vkDestroyPipelineLayout device pipelineLayout VK_NULL
 
-{-
--- Problems with this:
--- 1) I don't have a withListPtr or whatever
--- 2) It seems less than ideal to force all the pipelines to be destroyed together.
-newGraphicsPipelines :: VkDevice -> [VkGraphicsPipelineCreateInfo] -> [VkPipeline]
+-- Problem: It seems less than ideal to force all the pipelines to be destroyed together.
+newGraphicsPipelines :: VkDevice -> [VkGraphicsPipelineCreateInfo] -> Acquire [VkPipeline]
 newGraphicsPipelines device createInfos =
   (
+    let pipelineCount = length createInfos
+    in
+      withArray createInfos $ \createInfosPtr ->
+        allocaArray pipelineCount $ \pipelinesPtr -> do
+          vkCreateGraphicsPipelines device VK_NULL_HANDLE (fromIntegral pipelineCount) createInfosPtr VK_NULL pipelinesPtr &
+            onVkFailureThrow "vkCreateGraphicsPipelines failed."
+          peekArray pipelineCount pipelinesPtr
   )
   `mkAcquire`
   \pipelines ->
     forM_ pipelines $ \pipeline ->
       vkDestroyPipeline device pipeline VK_NULL
--}
 
 newGraphicsPipeline :: VkDevice -> VkGraphicsPipelineCreateInfo -> Acquire VkPipeline
-newGraphicsPipeline device createInfo =
-  (
-    withPtr createInfo $ \createInfoPtr ->
-      alloca $ \pipelinePtr -> do
-        vkCreateGraphicsPipelines device VK_NULL_HANDLE 1 createInfoPtr VK_NULL pipelinePtr &
-          onVkFailureThrow "vkCreateGraphicsPipelines failed."
-        peek pipelinePtr
-  )
-  `mkAcquire`
-  \pipeline -> vkDestroyPipeline device pipeline VK_NULL
+newGraphicsPipeline device createInfo = head <$> newGraphicsPipelines device [createInfo]
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
