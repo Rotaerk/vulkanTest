@@ -133,40 +133,46 @@ main =
         configureVkImageView swapchainImageFormat <$> swapchainImages
       ioPutStrLn "Swapchain image views created."
 
-      do
-        (vertShaderModuleKey, vertShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
-        ioPutStrLn "Vertex shader module created."
-        (fragShaderModuleKey, fragShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
-        ioPutStrLn "Fragment shader module created."
+      (vertShaderModuleKey, vertShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
+      ioPutStrLn "Vertex shader module created."
+      (fragShaderModuleKey, fragShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
+      ioPutStrLn "Fragment shader module created."
 
-        renderPass <- allocateAcquire_ $ newRenderPass device $ configureRenderPass swapchainImageFormat
-        ioPutStrLn "Render pass created."
+      renderPass <- allocateAcquire_ $ newRenderPass device $ configureRenderPass swapchainImageFormat
+      ioPutStrLn "Render pass created."
 
-        pipelineLayout <- allocateAcquire_ $ newPipelineLayout device $ configurePipelineLayout
-        ioPutStrLn "Pipeline layout created."
+      pipelineLayout <- allocateAcquire_ $ newPipelineLayout device $ configurePipelineLayout
+      ioPutStrLn "Pipeline layout created."
 
-        graphicsPipeline <-
-          allocateAcquire_ $
-          newGraphicsPipeline device $
-          configureGraphicsPipeline
-            [
-              configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
-              configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
-            ]
-            configurePipelineVertexInputState
-            configurePipelineInputAssemblyState
-            (configurePipelineViewportState swapchainExtent)
-            configurePipelineRasterizationState
-            configurePipelineMultisampleState
-            configurePipelineColorBlendState
-            renderPass
-            pipelineLayout
-        ioPutStrLn "Graphics pipeline created."
+      graphicsPipeline <-
+        allocateAcquire_ $
+        newGraphicsPipeline device $
+        configureGraphicsPipeline
+          [
+            configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
+            configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
+          ]
+          configurePipelineVertexInputState
+          configurePipelineInputAssemblyState
+          (configurePipelineViewportState swapchainExtent)
+          configurePipelineRasterizationState
+          configurePipelineMultisampleState
+          configurePipelineColorBlendState
+          renderPass
+          pipelineLayout
+      ioPutStrLn "Graphics pipeline created."
 
-        release fragShaderModuleKey
-        ioPutStrLn "Fragment shader module destroyed."
-        release vertShaderModuleKey
-        ioPutStrLn "Vertex shader module destroyed."
+      release fragShaderModuleKey
+      ioPutStrLn "Fragment shader module destroyed."
+      release vertShaderModuleKey
+      ioPutStrLn "Vertex shader module destroyed."
+
+      swapchainFramebuffers <-
+        allocateAcquire_ $
+        forM swapchainImageViews $ \imageView ->
+          newFramebuffer device $
+          configureFramebuffer renderPass [imageView] swapchainExtent
+      ioPutStrLn "Framebuffers created."
 
       ioPutStrLn "Main loop starting."
       mainLoop window
@@ -624,6 +630,18 @@ configureGraphicsPipeline
   set @"basePipelineHandle" VK_NULL_HANDLE &*
   set @"basePipelineIndex" (-1)
 
+configureFramebuffer :: VkRenderPass -> [VkImageView] -> VkExtent2D -> VkFramebufferCreateInfo
+configureFramebuffer renderPass attachments extent =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"renderPass" renderPass &*
+  set @"attachmentCount" (fromIntegral $ length $ attachments) &*
+  setListRef @"pAttachments" attachments &*
+  set @"width" (getField @"width" extent) &*
+  set @"height" (getField @"height" extent) &*
+  set @"layers" 1
+
 data QueueFamilyIndices =
   QueueFamilyIndices {
     qfiGraphics :: Word32,
@@ -832,6 +850,18 @@ newGraphicsPipelines device createInfos =
 
 newGraphicsPipeline :: VkDevice -> VkGraphicsPipelineCreateInfo -> Acquire VkPipeline
 newGraphicsPipeline device createInfo = head <$> newGraphicsPipelines device [createInfo]
+
+newFramebuffer :: VkDevice -> VkFramebufferCreateInfo -> Acquire VkFramebuffer
+newFramebuffer device createInfo =
+  (
+    withPtr createInfo $ \createInfoPtr ->
+      alloca $ \framebufferPtr -> do
+        vkCreateFramebuffer device createInfoPtr VK_NULL framebufferPtr &
+          onVkFailureThrow "vkCreateFramebuffer failed."
+        peek framebufferPtr
+  )
+  `mkAcquire`
+  \framebuffer -> vkDestroyFramebuffer device framebuffer VK_NULL
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
