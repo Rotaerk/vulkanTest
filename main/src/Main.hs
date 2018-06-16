@@ -718,56 +718,48 @@ newGLFWWindowSurface vulkanInstance window =
   `mkAcquire`
   \surface -> vkDestroySurfaceKHR vulkanInstance surface VK_NULL
 
-newVkInstance :: VkInstanceCreateInfo -> Acquire VkInstance
-newVkInstance createInfo =
+newVk ::
+  (Storable vk, VulkanMarshal ci) =>
+  String ->
+  (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
+  (vk -> Ptr VkAllocationCallbacks -> IO ()) ->
+  ci ->
+  Acquire vk
+newVk createFuncName create destroy createInfo =
   (
     withPtr createInfo $ \createInfoPtr ->
-      alloca $ \vulkanInstancePtr -> do
-        vkCreateInstance createInfoPtr VK_NULL vulkanInstancePtr &
-          onVkFailureThrow "vkCreateInstance failed."
-        peek vulkanInstancePtr
+      alloca $ \vkPtr -> do
+        create createInfoPtr VK_NULL vkPtr &
+          onVkFailureThrow (createFuncName ++ " failed.")
+        peek vkPtr
   )
   `mkAcquire`
-  \vulkanInstance -> vkDestroyInstance vulkanInstance VK_NULL
+  \vk -> destroy vk VK_NULL
+
+newDeviceVk ::
+  (Storable vk, VulkanMarshal ci) =>
+  String ->
+  (VkDevice -> Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
+  (VkDevice -> vk -> Ptr VkAllocationCallbacks -> IO ()) ->
+  VkDevice ->
+  ci ->
+  Acquire vk
+newDeviceVk createFuncName create destroy device createInfo = newVk createFuncName (create device) (destroy device) createInfo
+
+newVkInstance :: VkInstanceCreateInfo -> Acquire VkInstance
+newVkInstance = newVk "vkCreateInstance" vkCreateInstance vkDestroyInstance
 
 newVkDevice :: VkPhysicalDevice -> VkDeviceCreateInfo -> Acquire VkDevice
-newVkDevice physicalDevice createInfo =
-  (
-    withPtr createInfo $ \createInfoPtr ->
-      alloca $ \devicePtr -> do
-        vkCreateDevice physicalDevice createInfoPtr VK_NULL devicePtr &
-          onVkFailureThrow "vkCreateDevice failed."
-        peek devicePtr
-  )
-  `mkAcquire`
-  \device -> vkDestroyDevice device VK_NULL
+newVkDevice physicalDevice = newVk "vkCreateDevice" (vkCreateDevice physicalDevice) vkDestroyDevice
 
 newVkSwapchain :: VkDevice -> VkSwapchainCreateInfoKHR -> Acquire VkSwapchainKHR
-newVkSwapchain device createInfo =
-  (
-    withPtr createInfo $ \createInfoPtr ->
-      alloca $ \swapchainPtr -> do
-        vkCreateSwapchainKHR device createInfoPtr VK_NULL swapchainPtr &
-          onVkFailureThrow "vkCreateSwapchainKHR failed."
-        peek swapchainPtr
-  )
-  `mkAcquire`
-  \swapchain -> vkDestroySwapchainKHR device swapchain VK_NULL
+newVkSwapchain = newDeviceVk "vkCreateSwapchainKHR" vkCreateSwapchainKHR vkDestroySwapchainKHR
+
+newVkImageView :: VkDevice -> VkImageViewCreateInfo -> Acquire VkImageView
+newVkImageView = newDeviceVk "vkCreateImageView" vkCreateImageView vkDestroyImageView
 
 newVkImageViews :: VkDevice -> [VkImageViewCreateInfo] -> Acquire [VkImageView]
-newVkImageViews device createInfos =
-  (
-    forM (zip [0..] createInfos) $ \(idx, createInfo) ->
-      withPtr createInfo $ \createInfoPtr ->
-        alloca $ \imageViewPtr -> do
-          vkCreateImageView device createInfoPtr VK_NULL imageViewPtr &
-            onVkFailureThrow ("vkCreateImageView failed for item " ++ show idx ++ ".")
-          peek imageViewPtr
-  )
-  `mkAcquire`
-  \imageViews ->
-    forM_ imageViews $ \imageView ->
-      vkDestroyImageView device imageView VK_NULL
+newVkImageViews = mapM . newVkImageView
 
 fillBufferWithShaderFileContents :: FilePath -> ResIO (ReleaseKey, CSize, Ptr Word8)
 fillBufferWithShaderFileContents path = do
@@ -786,16 +778,7 @@ fillBufferWithShaderFileContents path = do
   return (bufferPtrKey, fromIntegral alignedSize, bufferPtr)
 
 newShaderModule :: VkDevice -> VkShaderModuleCreateInfo -> Acquire VkShaderModule
-newShaderModule device createInfo =
-  (
-    withPtr createInfo $ \createInfoPtr ->
-      alloca $ \shaderModulePtr -> do
-        vkCreateShaderModule device createInfoPtr VK_NULL shaderModulePtr &
-          onVkFailureThrow "vkCreateShaderModule failed."
-        peek shaderModulePtr
-  )
-  `mkAcquire`
-  \shaderModule -> vkDestroyShaderModule device shaderModule VK_NULL
+newShaderModule = newDeviceVk "vkCreateShaderModule" vkCreateShaderModule vkDestroyShaderModule
 
 createShaderModuleFromFile :: VkDevice -> FilePath -> ResIO (ReleaseKey, VkShaderModule)
 createShaderModuleFromFile device path = do
@@ -808,30 +791,13 @@ createShaderModuleFromFile device path = do
   return shaderModuleWithKey
 
 newRenderPass :: VkDevice -> VkRenderPassCreateInfo -> Acquire VkRenderPass
-newRenderPass device createInfo =
-  (
-    withPtr createInfo $ \createInfoPtr ->
-      alloca $ \renderPassPtr -> do
-        vkCreateRenderPass device createInfoPtr VK_NULL renderPassPtr &
-          onVkFailureThrow "vkCreateRenderPass failed."
-        peek renderPassPtr
-  )
-  `mkAcquire`
-  \renderPass -> vkDestroyRenderPass device renderPass VK_NULL
+newRenderPass = newDeviceVk "vkCreateRenderPass" vkCreateRenderPass vkDestroyRenderPass
 
 newPipelineLayout :: VkDevice -> VkPipelineLayoutCreateInfo -> Acquire VkPipelineLayout
-newPipelineLayout device createInfo =
-  (
-    withPtr createInfo $ \createInfoPtr ->
-      alloca $ \pipelineLayoutPtr -> do
-        vkCreatePipelineLayout device createInfoPtr VK_NULL pipelineLayoutPtr &
-          onVkFailureThrow "vkCreatePipelineLayout failed."
-        peek pipelineLayoutPtr
-  )
-  `mkAcquire`
-  \pipelineLayout -> vkDestroyPipelineLayout device pipelineLayout VK_NULL
+newPipelineLayout = newDeviceVk "vkCreatePipelineLayout" vkCreatePipelineLayout vkDestroyPipelineLayout
 
 -- Problem: It seems less than ideal to force all the pipelines to be destroyed together.
+-- This can be fixed by making a ResIO [(ReleaseKey, VkPipeline)].
 newGraphicsPipelines :: VkDevice -> [VkGraphicsPipelineCreateInfo] -> Acquire [VkPipeline]
 newGraphicsPipelines device createInfos =
   (
@@ -852,16 +818,7 @@ newGraphicsPipeline :: VkDevice -> VkGraphicsPipelineCreateInfo -> Acquire VkPip
 newGraphicsPipeline device createInfo = head <$> newGraphicsPipelines device [createInfo]
 
 newFramebuffer :: VkDevice -> VkFramebufferCreateInfo -> Acquire VkFramebuffer
-newFramebuffer device createInfo =
-  (
-    withPtr createInfo $ \createInfoPtr ->
-      alloca $ \framebufferPtr -> do
-        vkCreateFramebuffer device createInfoPtr VK_NULL framebufferPtr &
-          onVkFailureThrow "vkCreateFramebuffer failed."
-        peek framebufferPtr
-  )
-  `mkAcquire`
-  \framebuffer -> vkDestroyFramebuffer device framebuffer VK_NULL
+newFramebuffer = newDeviceVk "vkCreateFramebuffer" vkCreateFramebuffer vkDestroyFramebuffer
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
