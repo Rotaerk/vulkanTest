@@ -174,6 +174,57 @@ main =
           configureFramebuffer renderPass [imageView] swapchainExtent
       ioPutStrLn "Framebuffers created."
 
+      commandPool <-
+        allocateAcquire_ $
+        newCommandPool device $
+        configureCommandPool (qfiGraphics qfi) 0
+      ioPutStrLn "Command pool created."
+
+      commandBuffers <-
+        allocateCommandBuffers device $
+        configureCommandBuffers commandPool VK_COMMAND_BUFFER_LEVEL_PRIMARY (fromIntegral $ length swapchainFramebuffers)
+      ioPutStrLn "Command buffers created."
+
+      let
+        commandBufferBeginInfo =
+          createVk $
+          set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO &*
+          set @"pNext" VK_NULL &*
+          set @"flags" VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT &*
+          set @"pInheritanceInfo" VK_NULL
+
+        renderPassBeginInfo :: VkFramebuffer -> VkRenderPassBeginInfo
+        renderPassBeginInfo framebuffer =
+          createVk $
+          set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO &*
+          set @"pNext" VK_NULL &*
+          set @"renderPass" renderPass &*
+          set @"framebuffer" framebuffer &*
+          setVk @"renderArea" (
+            setVk @"offset" (set @"x" 0 &* set @"y" 0) &*
+            set @"extent" swapchainExtent
+          ) &*
+          set @"clearValueCount" 1 &*
+          setListRef @"pClearValues" [
+            createVk (
+              setVk @"color" (
+                setAt @"float32" @0 0 &*
+                setAt @"float32" @1 0 &*
+                setAt @"float32" @2 0 &*
+                setAt @"float32" @3 1
+              )
+            )
+          ]
+
+      forM (zip commandBuffers swapchainFramebuffers) $ \(commandBuffer, swapchainFramebuffer) -> do
+        beginCommandBuffer commandBuffer commandBufferBeginInfo
+        cmdBeginRenderPass commandBuffer (renderPassBeginInfo swapchainFramebuffer) VK_SUBPASS_CONTENTS_INLINE
+        liftIO $ vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
+        liftIO $ vkCmdDraw commandBuffer 3 1 0 0
+        liftIO $ vkCmdEndRenderPass commandBuffer
+        endCommandBuffer commandBuffer
+      ioPutStrLn "Command buffers filled."
+
       ioPutStrLn "Main loop starting."
       mainLoop window
       ioPutStrLn "Main loop ended, cleaning up."
@@ -642,6 +693,23 @@ configureFramebuffer renderPass attachments extent =
   set @"height" (getField @"height" extent) &*
   set @"layers" 1
 
+configureCommandPool :: Word32 -> VkCommandPoolCreateFlags -> VkCommandPoolCreateInfo
+configureCommandPool queueFamilyIndex flags =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"queueFamilyIndex" queueFamilyIndex &*
+  set @"flags" flags
+
+configureCommandBuffers :: VkCommandPool -> VkCommandBufferLevel -> Word32 -> VkCommandBufferAllocateInfo
+configureCommandBuffers commandPool level count =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"commandPool" commandPool &*
+  set @"level" level &*
+  set @"commandBufferCount" count
+
 data QueueFamilyIndices =
   QueueFamilyIndices {
     qfiGraphics :: Word32,
@@ -819,6 +887,35 @@ newGraphicsPipeline device createInfo = head <$> newGraphicsPipelines device [cr
 
 newFramebuffer :: VkDevice -> VkFramebufferCreateInfo -> Acquire VkFramebuffer
 newFramebuffer = newDeviceVk "vkCreateFramebuffer" vkCreateFramebuffer vkDestroyFramebuffer
+
+newCommandPool :: VkDevice -> VkCommandPoolCreateInfo -> Acquire VkCommandPool
+newCommandPool = newDeviceVk "vkCreateCommandPool" vkCreateCommandPool vkDestroyCommandPool
+
+allocateCommandBuffers :: MonadIO io => VkDevice -> VkCommandBufferAllocateInfo -> io [VkCommandBuffer]
+allocateCommandBuffers device allocateInfo = liftIO $
+  withPtr allocateInfo $ \allocateInfoPtr ->
+    allocaArray commandBufferCount $ \commandBuffersPtr -> do
+      vkAllocateCommandBuffers device allocateInfoPtr commandBuffersPtr &
+        onVkFailureThrow "vkAllocateCommandBuffers failed."
+      peekArray commandBufferCount commandBuffersPtr
+  where
+    commandBufferCount = fromIntegral $ getField @"commandBufferCount" allocateInfo
+
+beginCommandBuffer :: MonadIO io => VkCommandBuffer -> VkCommandBufferBeginInfo -> io ()
+beginCommandBuffer commandBuffer beginInfo =
+  liftIO $ withPtr beginInfo $ \beginInfoPtr ->
+    vkBeginCommandBuffer commandBuffer beginInfoPtr &
+      onVkFailureThrow "vkBeginCommandBuffer failed."
+
+endCommandBuffer :: MonadIO io => VkCommandBuffer -> io ()
+endCommandBuffer commandBuffer =
+  liftIO $ vkEndCommandBuffer commandBuffer &
+    onVkFailureThrow "vkEndCommandBuffer failed."
+
+cmdBeginRenderPass :: MonadIO io => VkCommandBuffer -> VkRenderPassBeginInfo -> VkSubpassContents -> io ()
+cmdBeginRenderPass commandBuffer beginInfo subpassContents =
+  liftIO $ withPtr beginInfo $ \beginInfoPtr ->
+    vkCmdBeginRenderPass commandBuffer beginInfoPtr subpassContents
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
