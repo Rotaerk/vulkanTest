@@ -18,6 +18,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Loops (whileM_)
 import Control.Monad.Trans.Maybe
 import Control.Monad.Trans.Resource
+import Control.Monad.Trans.State.Lazy
 import Data.Acquire
 import Data.Bits
 import Data.Foldable
@@ -192,12 +193,22 @@ main =
           createVk $
           set @"sType" VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO &*
           set @"pNext" VK_NULL
+        allocateAcquireFence =
+          allocateAcquire_ $
+          newFence device $
+          createVk $
+          set @"sType" VK_STRUCTURE_TYPE_FENCE_CREATE_INFO &*
+          set @"pNext" VK_NULL &*
+          set @"flags" VK_FENCE_CREATE_SIGNALED_BIT
 
-      imageAvailableSemaphore <- allocateAcquireSemaphore
-      ioPutStrLn "Image-available semaphore created."
+      imageAvailableSemaphores <- replicateM maxFramesInFlight allocateAcquireSemaphore
+      ioPutStrLn "Image-available semaphores created."
 
-      renderFinishedSemaphore <- allocateAcquireSemaphore
-      ioPutStrLn "Render-finished semaphore created."
+      renderFinishedSemaphores <- replicateM maxFramesInFlight allocateAcquireSemaphore
+      ioPutStrLn "Render-finished semaphores created."
+
+      inFlightFences <- replicateM maxFramesInFlight allocateAcquireFence
+      ioPutStrLn "In-flight fences created."
 
       let
         commandBufferBeginInfo =
@@ -240,8 +251,13 @@ main =
       ioPutStrLn "Command buffers filled."
 
       ioPutStrLn "Main loop starting."
-      mainLoop window $ do
-        nextImageIndex <- acquireNextImageIndex device swapchain maxBound imageAvailableSemaphore VK_NULL_HANDLE
+      evalStateTWith 0 $ mainLoop window $ do
+        currentFrame <- get
+
+        waitForFences device [inFlightFences !! currentFrame] VK_TRUE maxBound
+        resetFences device [inFlightFences !! currentFrame]
+
+        nextImageIndex <- acquireNextImageIndex device swapchain maxBound (imageAvailableSemaphores !! currentFrame) VK_NULL_HANDLE
 
         queueSubmit
           graphicsQueue
@@ -250,26 +266,28 @@ main =
               set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
               set @"pNext" VK_NULL &*
               set @"waitSemaphoreCount" 1 &*
-              setListRef @"pWaitSemaphores" [imageAvailableSemaphore] &*
+              setListRef @"pWaitSemaphores" [imageAvailableSemaphores !! currentFrame] &*
               setListRef @"pWaitDstStageMask" [VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT] &*
               set @"commandBufferCount" 1 &*
               setListRef @"pCommandBuffers" [commandBuffers !! fromIntegral nextImageIndex] &*
               set @"signalSemaphoreCount" 1 &*
-              setListRef @"pSignalSemaphores" [renderFinishedSemaphore]
+              setListRef @"pSignalSemaphores" [renderFinishedSemaphores !! currentFrame]
             )
           ]
-          VK_NULL_HANDLE
+          (inFlightFences !! currentFrame)
 
         queuePresent presentQueue $
           createVk $
           set @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR &*
           set @"pNext" VK_NULL &*
           set @"waitSemaphoreCount" 1 &*
-          setListRef @"pWaitSemaphores" [renderFinishedSemaphore] &*
+          setListRef @"pWaitSemaphores" [renderFinishedSemaphores !! currentFrame] &*
           set @"swapchainCount" 1 &*
           setListRef @"pSwapchains" [swapchain] &*
           setListRef @"pImageIndices" [nextImageIndex] &*
           set @"pResults" VK_NULL
+
+        put $ mod (currentFrame + 1) maxFramesInFlight
 
       ioPutStrLn "Main loop ended.  Waiting for device to idle."
       liftIO $ vkDeviceWaitIdle device
@@ -311,6 +329,8 @@ main =
         "VK_LAYER_LUNARG_standard_validation"
 #endif
       ]
+
+    maxFramesInFlight = 2
 
     applicationInfo :: VkApplicationInfo
     applicationInfo =
@@ -950,6 +970,9 @@ newCommandPool = newDeviceVk "vkCreateCommandPool" vkCreateCommandPool vkDestroy
 newSemaphore :: VkDevice -> VkSemaphoreCreateInfo -> Acquire VkSemaphore
 newSemaphore = newDeviceVk "vkCreateSemaphore" vkCreateSemaphore vkDestroySemaphore
 
+newFence :: VkDevice -> VkFenceCreateInfo -> Acquire VkFence
+newFence = newDeviceVk "vkCreateFence" vkCreateFence vkDestroyFence
+
 allocateCommandBuffers :: MonadIO io => VkDevice -> VkCommandBufferAllocateInfo -> io [VkCommandBuffer]
 allocateCommandBuffers device allocateInfo = liftIO $
   withPtr allocateInfo $ \allocateInfoPtr ->
@@ -987,6 +1010,16 @@ queuePresent queue presentInfo =
   liftIO $ withPtr presentInfo $ \presentInfoPtr ->
     vkQueuePresentKHR queue presentInfoPtr & void -- tutorial says this shouldn't cause program to end
       --onVkFailureThrow "vkQueuePresentKHR failed."
+
+waitForFences :: MonadIO io => VkDevice -> [VkFence] -> VkBool32 -> Word64 -> io ()
+waitForFences device fences shouldWaitAll timeout =
+  liftIO $ withArray fences $ \fencesPtr ->
+    vkWaitForFences device (fromIntegral $ length fences) fencesPtr shouldWaitAll timeout & void
+
+resetFences :: MonadIO io => VkDevice -> [VkFence] -> io ()
+resetFences device fences =
+  liftIO $ withArray fences $ \fencesPtr ->
+    vkResetFences device (fromIntegral $ length fences) fencesPtr & void
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
@@ -1133,3 +1166,5 @@ allocateAcquire_ :: MonadResource m => Acquire a -> m a
 allocateAcquire_ a = snd <$> allocateAcquire a
 
 ioPutStrLn = liftIO . putStrLn
+
+evalStateTWith = flip evalStateT
