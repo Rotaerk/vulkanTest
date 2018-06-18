@@ -186,6 +186,20 @@ main =
       ioPutStrLn "Command buffers created."
 
       let
+        allocateAcquireSemaphore =
+          allocateAcquire_ $
+          newSemaphore device $
+          createVk $
+          set @"sType" VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO &*
+          set @"pNext" VK_NULL
+
+      imageAvailableSemaphore <- allocateAcquireSemaphore
+      ioPutStrLn "Image-available semaphore created."
+
+      renderFinishedSemaphore <- allocateAcquireSemaphore
+      ioPutStrLn "Render-finished semaphore created."
+
+      let
         commandBufferBeginInfo =
           createVk $
           set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO &*
@@ -226,8 +240,41 @@ main =
       ioPutStrLn "Command buffers filled."
 
       ioPutStrLn "Main loop starting."
-      mainLoop window
-      ioPutStrLn "Main loop ended, cleaning up."
+      mainLoop window $ do
+        nextImageIndex <- acquireNextImageIndex device swapchain maxBound imageAvailableSemaphore VK_NULL_HANDLE
+
+        queueSubmit
+          graphicsQueue
+          [
+            createVk (
+              set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
+              set @"pNext" VK_NULL &*
+              set @"waitSemaphoreCount" 1 &*
+              setListRef @"pWaitSemaphores" [imageAvailableSemaphore] &*
+              setListRef @"pWaitDstStageMask" [VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT] &*
+              set @"commandBufferCount" 1 &*
+              setListRef @"pCommandBuffers" [commandBuffers !! fromIntegral nextImageIndex] &*
+              set @"signalSemaphoreCount" 1 &*
+              setListRef @"pSignalSemaphores" [renderFinishedSemaphore]
+            )
+          ]
+          VK_NULL_HANDLE
+
+        queuePresent presentQueue $
+          createVk $
+          set @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR &*
+          set @"pNext" VK_NULL &*
+          set @"waitSemaphoreCount" 1 &*
+          setListRef @"pWaitSemaphores" [renderFinishedSemaphore] &*
+          set @"swapchainCount" 1 &*
+          setListRef @"pSwapchains" [swapchain] &*
+          setListRef @"pImageIndices" [nextImageIndex] &*
+          set @"pResults" VK_NULL
+
+      ioPutStrLn "Main loop ended.  Waiting for device to idle."
+      liftIO $ vkDeviceWaitIdle device
+
+      ioPutStrLn "Cleaning up."
 
   `catch` (
     \(e :: VulkanException) ->
@@ -507,8 +554,17 @@ configureRenderPass colorAttachmentFormat =
       set @"pPreserveAttachments" VK_NULL
     )
   ] &*
-  set @"dependencyCount" 0 &*
-  set @"pDependencies" VK_NULL
+  set @"dependencyCount" 1 &*
+  setListRef @"pDependencies" [
+    createVk (
+      set @"srcSubpass" VK_SUBPASS_EXTERNAL &*
+      set @"dstSubpass" 0 &*
+      set @"srcStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
+      set @"srcAccessMask" 0 &*
+      set @"dstStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
+      set @"dstAccessMask" (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+    )
+  ]
 
 configurePipelineShaderStage :: VkShaderStageFlagBits -> VkShaderModule -> String -> VkPipelineShaderStageCreateInfo
 configurePipelineShaderStage stage shaderModule entryPointName =
@@ -891,6 +947,9 @@ newFramebuffer = newDeviceVk "vkCreateFramebuffer" vkCreateFramebuffer vkDestroy
 newCommandPool :: VkDevice -> VkCommandPoolCreateInfo -> Acquire VkCommandPool
 newCommandPool = newDeviceVk "vkCreateCommandPool" vkCreateCommandPool vkDestroyCommandPool
 
+newSemaphore :: VkDevice -> VkSemaphoreCreateInfo -> Acquire VkSemaphore
+newSemaphore = newDeviceVk "vkCreateSemaphore" vkCreateSemaphore vkDestroySemaphore
+
 allocateCommandBuffers :: MonadIO io => VkDevice -> VkCommandBufferAllocateInfo -> io [VkCommandBuffer]
 allocateCommandBuffers device allocateInfo = liftIO $
   withPtr allocateInfo $ \allocateInfoPtr ->
@@ -916,6 +975,18 @@ cmdBeginRenderPass :: MonadIO io => VkCommandBuffer -> VkRenderPassBeginInfo -> 
 cmdBeginRenderPass commandBuffer beginInfo subpassContents =
   liftIO $ withPtr beginInfo $ \beginInfoPtr ->
     vkCmdBeginRenderPass commandBuffer beginInfoPtr subpassContents
+
+queueSubmit :: MonadIO io => VkQueue -> [VkSubmitInfo] -> VkFence -> io ()
+queueSubmit queue submitInfos fence =
+  liftIO $ withArray submitInfos $ \submitInfosPtr ->
+    vkQueueSubmit queue (fromIntegral $ length $ submitInfos) submitInfosPtr fence &
+      onVkFailureThrow "vkQueueSubmit failed."
+
+queuePresent :: MonadIO io => VkQueue -> VkPresentInfoKHR -> io ()
+queuePresent queue presentInfo =
+  liftIO $ withPtr presentInfo $ \presentInfoPtr ->
+    vkQueuePresentKHR queue presentInfoPtr & void -- tutorial says this shouldn't cause program to end
+      --onVkFailureThrow "vkQueuePresentKHR failed."
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
@@ -1022,8 +1093,15 @@ listSwapchainImages device swapchain = do
     vkGetSwapchainImagesKHR device swapchain imageCountPtr imagesPtr &
       onVkFailureThrow "vkGetSwapchainImagesKHR failed."
 
-mainLoop :: MonadIO io => GLFW.Window -> io ()
-mainLoop window = whileM_ (not <$> liftIO (GLFW.windowShouldClose window)) (liftIO GLFW.pollEvents)
+acquireNextImageIndex :: MonadIO io => VkDevice -> VkSwapchainKHR -> Word64 -> VkSemaphore -> VkFence -> io Word32
+acquireNextImageIndex device swapchain timeout semaphore fence =
+  liftIO $ alloca $ \imageIndexPtr -> do
+    vkAcquireNextImageKHR device swapchain timeout semaphore fence imageIndexPtr & void -- tutorial says this shouldn't cause program to end
+      --onVkFailureThrow "vkAcquireNextImageKHR failed."
+    peek imageIndexPtr
+
+mainLoop :: MonadIO io => GLFW.Window -> io () -> io ()
+mainLoop window body = whileM_ (not <$> liftIO (GLFW.windowShouldClose window)) (liftIO GLFW.pollEvents >> body)
 
 (<&>) :: Functor f => f a -> (a -> b) -> f b
 (<&>) = flip (<$>)
