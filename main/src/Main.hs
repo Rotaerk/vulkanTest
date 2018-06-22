@@ -1031,18 +1031,10 @@ newFunPtrFrom :: IO (FunPtr f) -> Acquire (FunPtr f)
 newFunPtrFrom = flip mkAcquire freeHaskellFunPtr
 
 registeredVkDebugReportCallbackEXT :: VkInstance -> VkDebugReportCallbackCreateInfoEXT -> Acquire VkDebugReportCallbackEXT
-registeredVkDebugReportCallbackEXT vulkanInstance createInfo =
-    do
-      createDebugReportCallbackEXT <- vkGetInstanceProc @VkCreateDebugReportCallbackEXT vulkanInstance
-      withPtr createInfo $ \createInfoPtr ->
-        alloca $ \vkDebugReportCallbackEXTPtr -> do
-          createDebugReportCallbackEXT vulkanInstance createInfoPtr VK_NULL vkDebugReportCallbackEXTPtr &
-            onVkFailureThrow "vkCreateDebugReportCallbackEXT failed."
-          peek vkDebugReportCallbackEXTPtr
-    `mkAcquire`
-    \vkDebugReportCallbackEXT -> do
-      destroyDebugReportCallbackEXT <- vkGetInstanceProc @VkDestroyDebugReportCallbackEXT vulkanInstance
-      destroyDebugReportCallbackEXT vulkanInstance vkDebugReportCallbackEXT VK_NULL
+registeredVkDebugReportCallbackEXT vulkanInstance createInfo = do
+  createDebugReportCallbackEXT <- liftIO $ vkGetInstanceProc @VkCreateDebugReportCallbackEXT vulkanInstance
+  destroyDebugReportCallbackEXT <- liftIO $ vkGetInstanceProc @VkDestroyDebugReportCallbackEXT vulkanInstance
+  newVk "vkCreateDebugReportCallbackEXT" (createDebugReportCallbackEXT vulkanInstance) (destroyDebugReportCallbackEXT vulkanInstance) createInfo
 
 ensureValidationLayersSupported :: MonadIO io => [String] -> io ()
 ensureValidationLayersSupported validationLayers = do
