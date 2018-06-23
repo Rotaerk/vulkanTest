@@ -16,6 +16,7 @@ import Control.Monad
 import Control.Monad.Extra (firstJustM, findM, unlessM)
 import Control.Monad.IO.Class
 import Control.Monad.Loops (whileM_)
+import Control.Monad.Trans.Class
 import Control.Monad.Trans.Maybe
 import Control.Monad.Trans.Resource
 import Control.Monad.Trans.State.Lazy
@@ -134,39 +135,38 @@ main =
         configureVkImageView swapchainImageFormat <$> swapchainImages
       ioPutStrLn "Swapchain image views created."
 
-      (vertShaderModuleKey, vertShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
-      ioPutStrLn "Vertex shader module created."
-      (fragShaderModuleKey, fragShaderModule) <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
-      ioPutStrLn "Fragment shader module created."
+      (renderPass, pipelineLayout, graphicsPipeline) <- runResourceT $ do
+        vertShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
+        ioPutStrLn "Vertex shader module created."
+        fragShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
+        ioPutStrLn "Fragment shader module created."
 
-      renderPass <- allocateAcquire_ $ newRenderPass device $ configureRenderPass swapchainImageFormat
-      ioPutStrLn "Render pass created."
+        renderPass <- lift $ allocateAcquire_ $ newRenderPass device $ configureRenderPass swapchainImageFormat
+        ioPutStrLn "Render pass created."
 
-      pipelineLayout <- allocateAcquire_ $ newPipelineLayout device $ configurePipelineLayout
-      ioPutStrLn "Pipeline layout created."
+        pipelineLayout <- lift $ allocateAcquire_ $ newPipelineLayout device $ configurePipelineLayout
+        ioPutStrLn "Pipeline layout created."
 
-      graphicsPipeline <-
-        allocateAcquire_ $
-        newGraphicsPipeline device $
-        configureGraphicsPipeline
-          [
-            configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
-            configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
-          ]
-          configurePipelineVertexInputState
-          configurePipelineInputAssemblyState
-          (configurePipelineViewportState swapchainExtent)
-          configurePipelineRasterizationState
-          configurePipelineMultisampleState
-          configurePipelineColorBlendState
-          renderPass
-          pipelineLayout
-      ioPutStrLn "Graphics pipeline created."
+        graphicsPipeline <-
+          lift $
+          allocateAcquire_ $
+          newGraphicsPipeline device $
+          configureGraphicsPipeline
+            [
+              configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
+              configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
+            ]
+            configurePipelineVertexInputState
+            configurePipelineInputAssemblyState
+            (configurePipelineViewportState swapchainExtent)
+            configurePipelineRasterizationState
+            configurePipelineMultisampleState
+            configurePipelineColorBlendState
+            renderPass
+            pipelineLayout
+        ioPutStrLn "Graphics pipeline created."
 
-      release fragShaderModuleKey
-      ioPutStrLn "Fragment shader module destroyed."
-      release vertShaderModuleKey
-      ioPutStrLn "Vertex shader module destroyed."
+        return (renderPass, pipelineLayout, graphicsPipeline)
 
       swapchainFramebuffers <-
         allocateAcquire_ $
@@ -381,7 +381,7 @@ findQueueFamilyIndices physicalDevice surface = do
 
   return $ QueueFamilyIndices graphics present
 
-registerDebugCallback :: VkInstance -> ResIO ()
+registerDebugCallback :: MonadUnliftIO io => VkInstance -> ResourceT io ()
 registerDebugCallback vulkanInstance = do
   debugCallbackPtr <- allocateAcquire_ $ newFunPtrFrom $ newVkDebugReportCallbackEXT debugCallback
   void $ allocateAcquire_ $
@@ -905,34 +905,35 @@ newVkImageView = newDeviceVk "vkCreateImageView" vkCreateImageView vkDestroyImag
 newVkImageViews :: VkDevice -> [VkImageViewCreateInfo] -> Acquire [VkImageView]
 newVkImageViews = mapM . newVkImageView
 
-fillBufferWithShaderFileContents :: FilePath -> ResIO (ReleaseKey, CSize, Ptr Word8)
+fillBufferWithShaderFileContents :: MonadUnliftIO io => FilePath -> ResourceT io (CSize, Ptr Word8)
 fillBufferWithShaderFileContents path = do
-  (handleKey, handle) <- allocate (openBinaryFile path ReadMode) hClose
-  fileSize <- liftIO $ hFileSize handle
+  (bufferPtr, alignedSize, bytesRead) <- runResourceT $ do
+    handle <- allocate_ (openBinaryFile path ReadMode) hClose
+    fileSize <- liftIO $ hFileSize handle
 
-  -- Vulkan requires SPIR-V bytecode to have an alignment of 4 bytes.
-  let alignedSize = fromIntegral . (4 *) . (`div` 4) . (3 +) $ fileSize
+    -- Vulkan requires SPIR-V bytecode to have an alignment of 4 bytes.
+    let alignedSize = fromIntegral . (4 *) . (`div` 4) . (3 +) $ fileSize
 
-  (bufferPtrKey, bufferPtr) <- allocate (mallocArray @Word8 alignedSize) free
-  bytesRead <- liftIO $ hGetBuf handle bufferPtr alignedSize
-  release handleKey
+    bufferPtr <- lift $ allocate_ (mallocArray @Word8 alignedSize) free
+    bytesRead <- liftIO $ hGetBuf handle bufferPtr alignedSize
+
+    return (bufferPtr, alignedSize, bytesRead)
 
   liftIO $ pokeArray (castPtr @_ @Word8 . plusPtr bufferPtr $ bytesRead) $ replicate (alignedSize - bytesRead) 0
 
-  return (bufferPtrKey, fromIntegral alignedSize, bufferPtr)
+  return (fromIntegral alignedSize, bufferPtr)
 
 newShaderModule :: VkDevice -> VkShaderModuleCreateInfo -> Acquire VkShaderModule
 newShaderModule = newDeviceVk "vkCreateShaderModule" vkCreateShaderModule vkDestroyShaderModule
 
-createShaderModuleFromFile :: VkDevice -> FilePath -> ResIO (ReleaseKey, VkShaderModule)
+createShaderModuleFromFile :: MonadUnliftIO io => VkDevice -> FilePath -> ResourceT io VkShaderModule
 createShaderModuleFromFile device path = do
-  (bufferKey, bufferSize, bufferPtr) <- fillBufferWithShaderFileContents path
-  shaderModuleWithKey <-
-    allocateAcquire $
-    newShaderModule device $
-    configureShaderModule bufferSize bufferPtr
-  release bufferKey
-  return shaderModuleWithKey
+  runResourceT $ do
+    (bufferSize, bufferPtr) <- fillBufferWithShaderFileContents path
+    lift $
+      allocateAcquire_ $
+      newShaderModule device $
+      configureShaderModule bufferSize bufferPtr
 
 newRenderPass :: VkDevice -> VkRenderPassCreateInfo -> Acquire VkRenderPass
 newRenderPass = newDeviceVk "vkCreateRenderPass" vkCreateRenderPass vkDestroyRenderPass
@@ -1157,6 +1158,7 @@ allocate_ create free = snd <$> allocate create free
 allocateAcquire_ :: MonadResource m => Acquire a -> m a
 allocateAcquire_ a = snd <$> allocateAcquire a
 
+ioPutStrLn :: MonadIO io => String -> io ()
 ioPutStrLn = liftIO . putStrLn
 
 evalStateTWith = flip evalStateT
