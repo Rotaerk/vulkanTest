@@ -248,73 +248,70 @@ main =
         )
       ioPutStrLn "Swapchain image views created."
 
-      (renderPass, pipelineLayout, graphicsPipeline) <- runResourceT $ do
+      renderPass <-
+        allocateAcquire_ $
+        newRenderPass device $
+        createVk $
+        set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO &*
+        set @"pNext" VK_NULL &*
+        set @"attachmentCount" 1 &*
+        setListRef @"pAttachments" [
+          createVk (
+            set @"format" swapchainImageFormat &*
+            set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+            set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
+            set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
+            set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
+            set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+            set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+            set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+          )
+        ] &*
+        set @"subpassCount" 1 &*
+        setListRef @"pSubpasses" [
+          createVk (
+            set @"pipelineBindPoint" VK_PIPELINE_BIND_POINT_GRAPHICS &*
+            set @"colorAttachmentCount" 1 &*
+            setListRef @"pColorAttachments" [
+              createVk (
+                set @"attachment" 0 &*
+                set @"layout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+              )
+            ] &*
+            set @"pInputAttachments" VK_NULL &*
+            set @"pPreserveAttachments" VK_NULL
+          )
+        ] &*
+        set @"dependencyCount" 1 &*
+        setListRef @"pDependencies" [
+          createVk (
+            set @"srcSubpass" VK_SUBPASS_EXTERNAL &*
+            set @"dstSubpass" 0 &*
+            set @"srcStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
+            set @"srcAccessMask" 0 &*
+            set @"dstStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
+            set @"dstAccessMask" (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+          )
+        ]
+      ioPutStrLn "Render pass created."
+
+      pipelineLayout <-
+        allocateAcquire_ $
+        newPipelineLayout device $
+        createVk $
+        set @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &*
+        set @"pNext" VK_NULL &*
+        set @"setLayoutCount" 0 &*
+        set @"pSetLayouts" VK_NULL &*
+        set @"pushConstantRangeCount" 0 &*
+        set @"pPushConstantRanges" VK_NULL
+      ioPutStrLn "Pipeline layout created."
+
+      graphicsPipeline <- runResourceT $ do
         vertShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
         ioPutStrLn "Vertex shader module created."
         fragShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
         ioPutStrLn "Fragment shader module created."
-
-        renderPass <-
-          lift $
-          allocateAcquire_ $
-          newRenderPass device $
-          createVk $
-          set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO &*
-          set @"pNext" VK_NULL &*
-          set @"attachmentCount" 1 &*
-          setListRef @"pAttachments" [
-            createVk (
-              set @"format" swapchainImageFormat &*
-              set @"samples" VK_SAMPLE_COUNT_1_BIT &*
-              set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
-              set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
-              set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
-              set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
-              set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
-              set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-            )
-          ] &*
-          set @"subpassCount" 1 &*
-          setListRef @"pSubpasses" [
-            createVk (
-              set @"pipelineBindPoint" VK_PIPELINE_BIND_POINT_GRAPHICS &*
-              set @"colorAttachmentCount" 1 &*
-              setListRef @"pColorAttachments" [
-                createVk (
-                  set @"attachment" 0 &*
-                  set @"layout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                )
-              ] &*
-              set @"pInputAttachments" VK_NULL &*
-              set @"pPreserveAttachments" VK_NULL
-            )
-          ] &*
-          set @"dependencyCount" 1 &*
-          setListRef @"pDependencies" [
-            createVk (
-              set @"srcSubpass" VK_SUBPASS_EXTERNAL &*
-              set @"dstSubpass" 0 &*
-              set @"srcStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
-              set @"srcAccessMask" 0 &*
-              set @"dstStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
-              set @"dstAccessMask" (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
-            )
-          ]
-        ioPutStrLn "Render pass created."
-
-        pipelineLayout <-
-          lift $
-          allocateAcquire_ $
-          newPipelineLayout device $
-          createVk $
-          set @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &*
-          set @"pNext" VK_NULL &*
-          set @"setLayoutCount" 0 &*
-          set @"pSetLayouts" VK_NULL &*
-          set @"pushConstantRangeCount" 0 &*
-          set @"pPushConstantRanges" VK_NULL
-
-        ioPutStrLn "Pipeline layout created."
 
         let
           shaderStageCreateInfos =
@@ -333,8 +330,7 @@ main =
                 setStrRef @"pName" entryPointName &*
                 set @"pSpecializationInfo" VK_NULL
 
-        graphicsPipeline <-
-          lift $
+        lift $
           allocateAcquire_ $
           newGraphicsPipeline device $
           createVk $
@@ -441,9 +437,7 @@ main =
           set @"layout" pipelineLayout &*
           set @"basePipelineHandle" VK_NULL_HANDLE &*
           set @"basePipelineIndex" (-1)
-        ioPutStrLn "Graphics pipeline created."
-
-        return (renderPass, pipelineLayout, graphicsPipeline)
+      ioPutStrLn "Graphics pipeline created."
 
       swapchainFramebuffers <-
         allocateAcquire_ $
