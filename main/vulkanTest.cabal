@@ -18,8 +18,9 @@ executable vulkanTest
   main-is: Main.hs
   ghc-options: -threaded
   build-depends:
-    containers,
+    clock,
     cmdargs,
+    containers,
     extra,
     GLFW-b,
     filepath,

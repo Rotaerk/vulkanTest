@@ -23,9 +23,11 @@ import Control.Monad.Trans.Resource
 import Control.Monad.Trans.State.Lazy
 import Data.Acquire
 import Data.Bits
+import Data.Bool
 import Data.Foldable
 import Data.Function
 import Data.Functor
+import Data.IORef
 import Data.List
 import Data.Maybe
 import qualified Data.Set as Set
@@ -43,11 +45,41 @@ import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Proc
+import System.Clock
 import System.Console.CmdArgs.Implicit
 import System.FilePath
 import System.IO
 
 data CommandLineArguments = CommandLineArguments { claShadersPath :: String } deriving (Show, Data, Typeable)
+
+(initialWindowWidth, initialWindowHeight) = (800, 600)
+
+extensions :: [CString]
+extensions =
+  [
+  ]
+#ifndef NDEBUG
+  ++
+  [
+    VK_EXT_DEBUG_REPORT_EXTENSION_NAME
+  ]
+#endif
+
+deviceExtensions :: [CString]
+deviceExtensions =
+  [
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+  ]
+
+validationLayers :: [String]
+validationLayers =
+  [
+#ifndef NDEBUG
+    "VK_LAYER_LUNARG_standard_validation"
+#endif
+  ]
+
+maxFramesInFlight = 2
 
 main :: IO ()
 main =
@@ -67,8 +99,14 @@ main =
       allocateAcquire_ initializedGLFW
       ioPutStrLn "GLFW initialized."
 
-      window <- allocateAcquire_ $ newVulkanGLFWWindow width height "Vulkan"
+      window <- allocateAcquire_ $ newVulkanGLFWWindow initialWindowWidth initialWindowHeight "Vulkan"
       ioPutStrLn "Window created."
+
+      lastResizeTimeRef <- liftIO $ newIORef Nothing
+
+      liftIO $ GLFW.setFramebufferSizeCallback window $ Just $ \_ _ _ -> do
+        time <- getTime Monotonic
+        writeIORef lastResizeTimeRef $ Just time
 
       glfwExtensions <- liftIO $ GLFW.getRequiredInstanceExtensions
 
@@ -108,7 +146,7 @@ main =
       surface <- allocateAcquire_ $ newGLFWWindowSurface vulkanInstance window
       ioPutStrLn "Window surface obtained."
 
-      (physicalDevice, qfi, scsd) <-
+      (physicalDevice, qfi) <-
         mapM (liftIO . peekCString) deviceExtensions >>=
         getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface
       ioPutStrLn "Suitable physical device found."
@@ -148,153 +186,6 @@ main =
       presentQueue <- getDeviceQueue device (qfiPresent qfi) 0
       ioPutStrLn "Present queue obtained."
 
-      let
-        surfaceCapabilities = scsdCapabilities scsd
-
-        swapchainSurfaceFormat =
-          case scsdSurfaceFormats scsd of
-            [f] | getField @"format" f == VK_FORMAT_UNDEFINED -> idealSurfaceFormat
-            fs -> find (== idealSurfaceFormat) fs & fromMaybe (throwAppEx "Failed to find an appropriate swap surface format.")
-            where
-              idealSurfaceFormat =
-                createVk $
-                set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
-                set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-
-        swapchainImageFormat = getField @"format" swapchainSurfaceFormat
-
-        swapchainPresentMode =
-          fromMaybe VK_PRESENT_MODE_FIFO_KHR $
-          find (elemOf $ scsdPresentModes scsd) [VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR]
-
-        swapchainExtent =
-          if getField @"width" currentExtent /= maxBound then
-            currentExtent
-          else
-            createVk $
-            set @"width" (fromIntegral width & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
-            set @"height" (fromIntegral height & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
-          where
-            currentExtent = getField @"currentExtent" surfaceCapabilities
-            minImageExtent = getField @"minImageExtent" surfaceCapabilities
-            maxImageExtent = getField @"maxImageExtent" surfaceCapabilities
-
-        swapchainImageCount =
-          if maxImageCount > 0 then
-            min maxImageCount idealImageCount
-          else
-            idealImageCount
-          where
-            idealImageCount = getField @"minImageCount" surfaceCapabilities + 1
-            maxImageCount = getField @"maxImageCount" surfaceCapabilities
-
-      swapchain <-
-        allocateAcquire_ $
-        newVkSwapchain device $
-        createVk $
-        set @"sType" VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR &*
-        set @"pNext" VK_NULL &*
-        set @"flags" 0 &*
-        set @"surface" surface &*
-        set @"minImageCount" swapchainImageCount &*
-        set @"imageFormat" (getField @"format" swapchainSurfaceFormat) &*
-        set @"imageColorSpace" (getField @"colorSpace" swapchainSurfaceFormat) &*
-        set @"imageExtent" swapchainExtent &*
-        set @"imageArrayLayers" 1 &*
-        set @"imageUsage" VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &*
-        (
-          case length distinctQfi of
-            count | count >= 2 ->
-              set @"imageSharingMode" VK_SHARING_MODE_CONCURRENT &*
-              set @"queueFamilyIndexCount" (fromIntegral count) &*
-              setListRef @"pQueueFamilyIndices" distinctQfi
-            _ ->
-              set @"imageSharingMode" VK_SHARING_MODE_EXCLUSIVE &*
-              set @"queueFamilyIndexCount" 0 &*
-              set @"pQueueFamilyIndices" VK_NULL
-        ) &*
-        set @"preTransform" (getField @"currentTransform" surfaceCapabilities) &*
-        set @"compositeAlpha" VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR &*
-        set @"presentMode" swapchainPresentMode &*
-        set @"clipped" VK_TRUE &*
-        set @"oldSwapchain" VK_NULL
-      ioPutStrLn "Swapchain created."
-
-      swapchainImages <- listSwapchainImages device swapchain
-      ioPutStrLn "Swapchain images created."
-
-      swapchainImageViews <-
-        allocateAcquire_ $
-        newVkImageViews device $
-        ffor swapchainImages $ \image ->
-        createVk $
-        set @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &*
-        set @"pNext" VK_NULL &*
-        set @"image" image &*
-        set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
-        set @"format" swapchainImageFormat &*
-        setVk @"components" (
-          set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
-          set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
-          set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
-          set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
-        ) &*
-        setVk @"subresourceRange" (
-          set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
-          set @"baseMipLevel" 0 &*
-          set @"levelCount" 1 &*
-          set @"baseArrayLayer" 0 &*
-          set @"layerCount" 1
-        )
-      ioPutStrLn "Swapchain image views created."
-
-      renderPass <-
-        allocateAcquire_ $
-        newRenderPass device $
-        createVk $
-        set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO &*
-        set @"pNext" VK_NULL &*
-        set @"attachmentCount" 1 &*
-        setListRef @"pAttachments" [
-          createVk (
-            set @"format" swapchainImageFormat &*
-            set @"samples" VK_SAMPLE_COUNT_1_BIT &*
-            set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
-            set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
-            set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
-            set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
-            set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
-            set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-          )
-        ] &*
-        set @"subpassCount" 1 &*
-        setListRef @"pSubpasses" [
-          createVk (
-            set @"pipelineBindPoint" VK_PIPELINE_BIND_POINT_GRAPHICS &*
-            set @"colorAttachmentCount" 1 &*
-            setListRef @"pColorAttachments" [
-              createVk (
-                set @"attachment" 0 &*
-                set @"layout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-              )
-            ] &*
-            set @"pInputAttachments" VK_NULL &*
-            set @"pPreserveAttachments" VK_NULL
-          )
-        ] &*
-        set @"dependencyCount" 1 &*
-        setListRef @"pDependencies" [
-          createVk (
-            set @"srcSubpass" VK_SUBPASS_EXTERNAL &*
-            set @"dstSubpass" 0 &*
-            set @"srcStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
-            set @"srcAccessMask" 0 &*
-            set @"dstStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
-            set @"dstAccessMask" (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
-          )
-        ]
-      ioPutStrLn "Render pass created."
-
       pipelineLayout <-
         allocateAcquire_ $
         newPipelineLayout device $
@@ -307,153 +198,6 @@ main =
         set @"pPushConstantRanges" VK_NULL
       ioPutStrLn "Pipeline layout created."
 
-      graphicsPipeline <- runResourceT $ do
-        vertShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
-        ioPutStrLn "Vertex shader module created."
-        fragShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
-        ioPutStrLn "Fragment shader module created."
-
-        let
-          shaderStageCreateInfos =
-            [
-              configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
-              configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
-            ]
-            where
-              configurePipelineShaderStage stage shaderModule entryPointName =
-                createVk @VkPipelineShaderStageCreateInfo $
-                set @"sType" VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO &*
-                set @"pNext" VK_NULL &*
-                set @"flags" 0 &*
-                set @"stage" stage &*
-                set @"module" shaderModule &*
-                setStrRef @"pName" entryPointName &*
-                set @"pSpecializationInfo" VK_NULL
-
-        lift $
-          allocateAcquire_ $
-          newGraphicsPipeline device $
-          createVk $
-          set @"sType" VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO &*
-          set @"pNext" VK_NULL &*
-          set @"stageCount" (fromIntegral $ length $ shaderStageCreateInfos) &*
-          setListRef @"pStages" shaderStageCreateInfos &*
-          setVkRef @"pVertexInputState" (
-            createVk $
-            set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO &*
-            set @"pNext" VK_NULL &*
-            set @"vertexBindingDescriptionCount" 0 &*
-            set @"pVertexBindingDescriptions" VK_NULL &*
-            set @"vertexAttributeDescriptionCount" 0 &*
-            set @"pVertexAttributeDescriptions" VK_NULL
-          ) &*
-          setVkRef @"pInputAssemblyState" (
-            createVk $
-            set @"sType" VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO &*
-            set @"pNext" VK_NULL &*
-            set @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &*
-            set @"primitiveRestartEnable" VK_FALSE
-          ) &*
-          setVkRef @"pViewportState" (
-            createVk $
-            set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO &*
-            set @"pNext" VK_NULL &*
-            set @"viewportCount" 1 &*
-            setListRef @"pViewports" [
-              createVk (
-                set @"x" 0 &*
-                set @"y" 0 &*
-                set @"width" (fromIntegral . getField @"width" $ swapchainExtent) &*
-                set @"height" (fromIntegral . getField @"height" $ swapchainExtent) &*
-                set @"minDepth" 0 &*
-                set @"maxDepth" 0
-              )
-            ] &*
-            set @"scissorCount" 1 &*
-            setListRef @"pScissors" [
-              createVk (
-                setVk @"offset" (
-                  set @"x" 0 &*
-                  set @"y" 0
-                ) &*
-                set @"extent" swapchainExtent
-              )
-            ]
-          ) &*
-          setVkRef @"pRasterizationState" (
-            createVk $
-            set @"sType" VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO &*
-            set @"pNext" VK_NULL &*
-            set @"depthClampEnable" VK_FALSE &*
-            set @"rasterizerDiscardEnable" VK_FALSE &*
-            set @"polygonMode" VK_POLYGON_MODE_FILL &*
-            set @"lineWidth" 1 &*
-            set @"cullMode" VK_CULL_MODE_BACK_BIT &*
-            set @"frontFace" VK_FRONT_FACE_CLOCKWISE &*
-            set @"depthBiasEnable" VK_FALSE &*
-            set @"depthBiasConstantFactor" 0 &*
-            set @"depthBiasClamp" 0 &*
-            set @"depthBiasSlopeFactor" 0
-          ) &*
-          setVkRef @"pMultisampleState" (
-            createVk $
-            set @"sType" VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO &*
-            set @"pNext" VK_NULL &*
-            set @"sampleShadingEnable" VK_FALSE &*
-            set @"rasterizationSamples" VK_SAMPLE_COUNT_1_BIT &*
-            set @"minSampleShading" 1 &*
-            set @"pSampleMask" VK_NULL &*
-            set @"alphaToCoverageEnable" VK_FALSE &*
-            set @"alphaToOneEnable" VK_FALSE
-          ) &*
-          set @"pDepthStencilState" VK_NULL &*
-          setVkRef @"pColorBlendState" (
-            createVk $
-            set @"sType" VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO &*
-            set @"pNext" VK_NULL &*
-            set @"logicOpEnable" VK_FALSE &*
-            set @"logicOp" VK_LOGIC_OP_COPY &*
-            set @"attachmentCount" 1 &*
-            setListRef @"pAttachments" [
-              createVk (
-                set @"colorWriteMask" (VK_COLOR_COMPONENT_R_BIT .|. VK_COLOR_COMPONENT_G_BIT .|. VK_COLOR_COMPONENT_B_BIT .|. VK_COLOR_COMPONENT_A_BIT) &*
-                set @"blendEnable" VK_FALSE &*
-                set @"srcColorBlendFactor" VK_BLEND_FACTOR_ONE &*
-                set @"dstColorBlendFactor" VK_BLEND_FACTOR_ZERO &*
-                set @"colorBlendOp" VK_BLEND_OP_ADD &*
-                set @"srcAlphaBlendFactor" VK_BLEND_FACTOR_ONE &*
-                set @"dstAlphaBlendFactor" VK_BLEND_FACTOR_ZERO &*
-                set @"alphaBlendOp" VK_BLEND_OP_ADD
-              )
-            ] &*
-            setAt @"blendConstants" @0 0 &*
-            setAt @"blendConstants" @1 0 &*
-            setAt @"blendConstants" @2 0 &*
-            setAt @"blendConstants" @3 0
-          ) &*
-          set @"pDynamicState" VK_NULL &*
-          set @"renderPass" renderPass &*
-          set @"subpass" 0 &*
-          set @"layout" pipelineLayout &*
-          set @"basePipelineHandle" VK_NULL_HANDLE &*
-          set @"basePipelineIndex" (-1)
-      ioPutStrLn "Graphics pipeline created."
-
-      swapchainFramebuffers <-
-        allocateAcquire_ $
-        forM swapchainImageViews $ \imageView ->
-          newFramebuffer device $
-          createVk $
-          set @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO &*
-          set @"pNext" VK_NULL &*
-          set @"renderPass" renderPass &*
-          set @"attachmentCount" 1 &*
-          setListRef @"pAttachments" [imageView] &*
-          set @"width" (getField @"width" swapchainExtent) &*
-          set @"height" (getField @"height" swapchainExtent) &*
-          set @"layers" 1
-      ioPutStrLn "Framebuffers created."
-
       commandPool <-
         allocateAcquire_ $
         newCommandPool device $
@@ -463,16 +207,6 @@ main =
         set @"queueFamilyIndex" (qfiGraphics qfi) &*
         set @"flags" 0
       ioPutStrLn "Command pool created."
-
-      commandBuffers <-
-        allocateCommandBuffers device $
-        createVk $
-        set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO &*
-        set @"pNext" VK_NULL &*
-        set @"commandPool" commandPool &*
-        set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
-        set @"commandBufferCount" (fromIntegral $ length swapchainFramebuffers)
-      ioPutStrLn "Command buffers created."
 
       let
         allocateAcquireSemaphore =
@@ -498,89 +232,430 @@ main =
       inFlightFences <- replicateM maxFramesInFlight allocateAcquireFence
       ioPutStrLn "In-flight fences created."
 
-      let
-        commandBufferBeginInfo =
-          createVk $
-          set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO &*
-          set @"pNext" VK_NULL &*
-          set @"flags" VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT &*
-          set @"pInheritanceInfo" VK_NULL
+      fix $ \recreateSwapchainAndContinue -> do
+        shouldRebuildSwapchain <- runResourceT $ do
+          (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
 
-        renderPassBeginInfo :: VkFramebuffer -> VkRenderPassBeginInfo
-        renderPassBeginInfo framebuffer =
-          createVk $
-          set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO &*
-          set @"pNext" VK_NULL &*
-          set @"renderPass" renderPass &*
-          set @"framebuffer" framebuffer &*
-          setVk @"renderArea" (
-            setVk @"offset" (set @"x" 0 &* set @"y" 0) &*
-            set @"extent" swapchainExtent
-          ) &*
-          set @"clearValueCount" 1 &*
-          setListRef @"pClearValues" [
-            createVk (
-              setVk @"color" (
-                setAt @"float32" @0 0 &*
-                setAt @"float32" @1 0 &*
-                setAt @"float32" @2 0 &*
-                setAt @"float32" @3 1
+          surfaceCapabilities <- liftIO $ getPhysicalDeviceSurfaceCapabilities physicalDevice surface
+          ioPutStrLn "Obtained physical device surface capabilities."
+
+          surfaceFormats <- liftIO $ listPhysicalDeviceSurfaceFormats physicalDevice surface
+          ioPutStrLn "Obtained physical device surface formats."
+
+          surfacePresentModes <- liftIO $ listPhysicalDeviceSurfacePresentModes physicalDevice surface
+          ioPutStrLn "Obtained physical device surface present modes."
+
+          ioPutStrLn $ "GLFW Framebuffer dimensions: " ++ show windowFramebufferWidth ++ "x" ++ show windowFramebufferHeight
+
+          let
+            swapchainSurfaceFormat =
+              case surfaceFormats of
+                [f] | getField @"format" f == VK_FORMAT_UNDEFINED -> idealSurfaceFormat
+                fs -> find (== idealSurfaceFormat) fs & fromMaybe (throwAppEx "Failed to find an appropriate swap surface format.")
+                where
+                  idealSurfaceFormat =
+                    createVk $
+                    set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
+                    set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+
+            swapchainImageFormat = getField @"format" swapchainSurfaceFormat
+
+            swapchainPresentMode =
+              fromMaybe VK_PRESENT_MODE_FIFO_KHR $
+              find (elemOf surfacePresentModes) [VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR]
+
+            swapchainExtent =
+              if getField @"width" currentExtent /= maxBound then
+                currentExtent
+              else
+                createVk $
+                set @"width" (fromIntegral windowFramebufferWidth & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
+                set @"height" (fromIntegral windowFramebufferHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
+              where
+                currentExtent = getField @"currentExtent" surfaceCapabilities
+                minImageExtent = getField @"minImageExtent" surfaceCapabilities
+                maxImageExtent = getField @"maxImageExtent" surfaceCapabilities
+
+            swapchainImageCount =
+              if maxImageCount > 0 then
+                min maxImageCount idealImageCount
+              else
+                idealImageCount
+              where
+                idealImageCount = getField @"minImageCount" surfaceCapabilities + 1
+                maxImageCount = getField @"maxImageCount" surfaceCapabilities
+
+          ioPutStrLn $ "Surface min extent: " ++ show (getField @"minImageExtent" surfaceCapabilities)
+          ioPutStrLn $ "Surface max extent: " ++ show (getField @"maxImageExtent" surfaceCapabilities)
+
+          swapchain <-
+            allocateAcquire_ $
+            newVkSwapchain device $
+            createVk $
+            set @"sType" VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR &*
+            set @"pNext" VK_NULL &*
+            set @"flags" 0 &*
+            set @"surface" surface &*
+            set @"minImageCount" swapchainImageCount &*
+            set @"imageFormat" (getField @"format" swapchainSurfaceFormat) &*
+            set @"imageColorSpace" (getField @"colorSpace" swapchainSurfaceFormat) &*
+            set @"imageExtent" swapchainExtent &*
+            set @"imageArrayLayers" 1 &*
+            set @"imageUsage" VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &*
+            (
+              case length distinctQfi of
+                count | count >= 2 ->
+                  set @"imageSharingMode" VK_SHARING_MODE_CONCURRENT &*
+                  set @"queueFamilyIndexCount" (fromIntegral count) &*
+                  setListRef @"pQueueFamilyIndices" distinctQfi
+                _ ->
+                  set @"imageSharingMode" VK_SHARING_MODE_EXCLUSIVE &*
+                  set @"queueFamilyIndexCount" 0 &*
+                  set @"pQueueFamilyIndices" VK_NULL
+            ) &*
+            set @"preTransform" (getField @"currentTransform" surfaceCapabilities) &*
+            set @"compositeAlpha" VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR &*
+            set @"presentMode" swapchainPresentMode &*
+            set @"clipped" VK_TRUE &*
+            set @"oldSwapchain" VK_NULL
+          ioPutStrLn "Swapchain created."
+
+          swapchainImages <- listSwapchainImages device swapchain
+          ioPutStrLn "Swapchain images created."
+
+          swapchainImageViews <-
+            allocateAcquire_ $
+            newVkImageViews device $
+            ffor swapchainImages $ \image ->
+            createVk $
+            set @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &*
+            set @"pNext" VK_NULL &*
+            set @"image" image &*
+            set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
+            set @"format" swapchainImageFormat &*
+            setVk @"components" (
+              set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
+              set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
+              set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
+              set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
+            ) &*
+            setVk @"subresourceRange" (
+              set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+              set @"baseMipLevel" 0 &*
+              set @"levelCount" 1 &*
+              set @"baseArrayLayer" 0 &*
+              set @"layerCount" 1
+            )
+          ioPutStrLn "Swapchain image views created."
+
+          renderPass <-
+            allocateAcquire_ $
+            newRenderPass device $
+            createVk $
+            set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO &*
+            set @"pNext" VK_NULL &*
+            set @"attachmentCount" 1 &*
+            setListRef @"pAttachments" [
+              createVk (
+                set @"format" swapchainImageFormat &*
+                set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+                set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
+                set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
+                set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
+                set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+                set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+                set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
               )
-            )
-          ]
+            ] &*
+            set @"subpassCount" 1 &*
+            setListRef @"pSubpasses" [
+              createVk (
+                set @"pipelineBindPoint" VK_PIPELINE_BIND_POINT_GRAPHICS &*
+                set @"colorAttachmentCount" 1 &*
+                setListRef @"pColorAttachments" [
+                  createVk (
+                    set @"attachment" 0 &*
+                    set @"layout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                  )
+                ] &*
+                set @"pInputAttachments" VK_NULL &*
+                set @"pPreserveAttachments" VK_NULL
+              )
+            ] &*
+            set @"dependencyCount" 1 &*
+            setListRef @"pDependencies" [
+              createVk (
+                set @"srcSubpass" VK_SUBPASS_EXTERNAL &*
+                set @"dstSubpass" 0 &*
+                set @"srcStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
+                set @"srcAccessMask" 0 &*
+                set @"dstStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
+                set @"dstAccessMask" (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+              )
+            ]
+          ioPutStrLn "Render pass created."
 
-      forM (zip commandBuffers swapchainFramebuffers) $ \(commandBuffer, swapchainFramebuffer) -> do
-        beginCommandBuffer commandBuffer commandBufferBeginInfo
-        cmdBeginRenderPass commandBuffer (renderPassBeginInfo swapchainFramebuffer) VK_SUBPASS_CONTENTS_INLINE
-        liftIO $ vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
-        liftIO $ vkCmdDraw commandBuffer 3 1 0 0
-        liftIO $ vkCmdEndRenderPass commandBuffer
-        endCommandBuffer commandBuffer
-      ioPutStrLn "Command buffers filled."
+          graphicsPipeline <- runResourceT $ do
+            vertShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
+            ioPutStrLn "Vertex shader module created."
+            fragShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
+            ioPutStrLn "Fragment shader module created."
 
-      ioPutStrLn "Main loop starting."
-      evalStateTWith 0 $ mainLoop window $ do
-        currentFrame <- get
+            let
+              shaderStageCreateInfos =
+                [
+                  configurePipelineShaderStage VK_SHADER_STAGE_VERTEX_BIT vertShaderModule "main",
+                  configurePipelineShaderStage VK_SHADER_STAGE_FRAGMENT_BIT fragShaderModule "main"
+                ]
+                where
+                  configurePipelineShaderStage stage shaderModule entryPointName =
+                    createVk @VkPipelineShaderStageCreateInfo $
+                    set @"sType" VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO &*
+                    set @"pNext" VK_NULL &*
+                    set @"flags" 0 &*
+                    set @"stage" stage &*
+                    set @"module" shaderModule &*
+                    setStrRef @"pName" entryPointName &*
+                    set @"pSpecializationInfo" VK_NULL
 
-        waitForFences device [inFlightFences !! currentFrame] VK_TRUE maxBound
-        resetFences device [inFlightFences !! currentFrame]
-
-        nextImageIndex <- acquireNextImageIndex device swapchain maxBound (imageAvailableSemaphores !! currentFrame) VK_NULL_HANDLE
-
-        queueSubmit
-          graphicsQueue
-          [
-            createVk (
-              set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
+            lift $
+              allocateAcquire_ $
+              newGraphicsPipeline device $
+              createVk $
+              set @"sType" VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO &*
               set @"pNext" VK_NULL &*
-              set @"waitSemaphoreCount" 1 &*
-              setListRef @"pWaitSemaphores" [imageAvailableSemaphores !! currentFrame] &*
-              setListRef @"pWaitDstStageMask" [VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT] &*
-              set @"commandBufferCount" 1 &*
-              setListRef @"pCommandBuffers" [commandBuffers !! fromIntegral nextImageIndex] &*
-              set @"signalSemaphoreCount" 1 &*
-              setListRef @"pSignalSemaphores" [renderFinishedSemaphores !! currentFrame]
-            )
-          ]
-          (inFlightFences !! currentFrame)
+              set @"stageCount" (fromIntegral $ length $ shaderStageCreateInfos) &*
+              setListRef @"pStages" shaderStageCreateInfos &*
+              setVkRef @"pVertexInputState" (
+                createVk $
+                set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO &*
+                set @"pNext" VK_NULL &*
+                set @"vertexBindingDescriptionCount" 0 &*
+                set @"pVertexBindingDescriptions" VK_NULL &*
+                set @"vertexAttributeDescriptionCount" 0 &*
+                set @"pVertexAttributeDescriptions" VK_NULL
+              ) &*
+              setVkRef @"pInputAssemblyState" (
+                createVk $
+                set @"sType" VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO &*
+                set @"pNext" VK_NULL &*
+                set @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &*
+                set @"primitiveRestartEnable" VK_FALSE
+              ) &*
+              setVkRef @"pViewportState" (
+                createVk $
+                set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO &*
+                set @"pNext" VK_NULL &*
+                set @"viewportCount" 1 &*
+                setListRef @"pViewports" [
+                  createVk (
+                    set @"x" 0 &*
+                    set @"y" 0 &*
+                    set @"width" (fromIntegral . getField @"width" $ swapchainExtent) &*
+                    set @"height" (fromIntegral . getField @"height" $ swapchainExtent) &*
+                    set @"minDepth" 0 &*
+                    set @"maxDepth" 0
+                  )
+                ] &*
+                set @"scissorCount" 1 &*
+                setListRef @"pScissors" [
+                  createVk (
+                    setVk @"offset" (
+                      set @"x" 0 &*
+                      set @"y" 0
+                    ) &*
+                    set @"extent" swapchainExtent
+                  )
+                ]
+              ) &*
+              setVkRef @"pRasterizationState" (
+                createVk $
+                set @"sType" VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO &*
+                set @"pNext" VK_NULL &*
+                set @"depthClampEnable" VK_FALSE &*
+                set @"rasterizerDiscardEnable" VK_FALSE &*
+                set @"polygonMode" VK_POLYGON_MODE_FILL &*
+                set @"lineWidth" 1 &*
+                set @"cullMode" VK_CULL_MODE_BACK_BIT &*
+                set @"frontFace" VK_FRONT_FACE_CLOCKWISE &*
+                set @"depthBiasEnable" VK_FALSE &*
+                set @"depthBiasConstantFactor" 0 &*
+                set @"depthBiasClamp" 0 &*
+                set @"depthBiasSlopeFactor" 0
+              ) &*
+              setVkRef @"pMultisampleState" (
+                createVk $
+                set @"sType" VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO &*
+                set @"pNext" VK_NULL &*
+                set @"sampleShadingEnable" VK_FALSE &*
+                set @"rasterizationSamples" VK_SAMPLE_COUNT_1_BIT &*
+                set @"minSampleShading" 1 &*
+                set @"pSampleMask" VK_NULL &*
+                set @"alphaToCoverageEnable" VK_FALSE &*
+                set @"alphaToOneEnable" VK_FALSE
+              ) &*
+              set @"pDepthStencilState" VK_NULL &*
+              setVkRef @"pColorBlendState" (
+                createVk $
+                set @"sType" VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO &*
+                set @"pNext" VK_NULL &*
+                set @"logicOpEnable" VK_FALSE &*
+                set @"logicOp" VK_LOGIC_OP_COPY &*
+                set @"attachmentCount" 1 &*
+                setListRef @"pAttachments" [
+                  createVk (
+                    set @"colorWriteMask" (VK_COLOR_COMPONENT_R_BIT .|. VK_COLOR_COMPONENT_G_BIT .|. VK_COLOR_COMPONENT_B_BIT .|. VK_COLOR_COMPONENT_A_BIT) &*
+                    set @"blendEnable" VK_FALSE &*
+                    set @"srcColorBlendFactor" VK_BLEND_FACTOR_ONE &*
+                    set @"dstColorBlendFactor" VK_BLEND_FACTOR_ZERO &*
+                    set @"colorBlendOp" VK_BLEND_OP_ADD &*
+                    set @"srcAlphaBlendFactor" VK_BLEND_FACTOR_ONE &*
+                    set @"dstAlphaBlendFactor" VK_BLEND_FACTOR_ZERO &*
+                    set @"alphaBlendOp" VK_BLEND_OP_ADD
+                  )
+                ] &*
+                setAt @"blendConstants" @0 0 &*
+                setAt @"blendConstants" @1 0 &*
+                setAt @"blendConstants" @2 0 &*
+                setAt @"blendConstants" @3 0
+              ) &*
+              set @"pDynamicState" VK_NULL &*
+              set @"renderPass" renderPass &*
+              set @"subpass" 0 &*
+              set @"layout" pipelineLayout &*
+              set @"basePipelineHandle" VK_NULL_HANDLE &*
+              set @"basePipelineIndex" (-1)
+          ioPutStrLn "Graphics pipeline created."
 
-        queuePresent presentQueue $
-          createVk $
-          set @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR &*
-          set @"pNext" VK_NULL &*
-          set @"waitSemaphoreCount" 1 &*
-          setListRef @"pWaitSemaphores" [renderFinishedSemaphores !! currentFrame] &*
-          set @"swapchainCount" 1 &*
-          setListRef @"pSwapchains" [swapchain] &*
-          setListRef @"pImageIndices" [nextImageIndex] &*
-          set @"pResults" VK_NULL
+          swapchainFramebuffers <-
+            allocateAcquire_ $
+            forM swapchainImageViews $ \imageView ->
+              newFramebuffer device $
+              createVk $
+              set @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO &*
+              set @"pNext" VK_NULL &*
+              set @"renderPass" renderPass &*
+              set @"attachmentCount" 1 &*
+              setListRef @"pAttachments" [imageView] &*
+              set @"width" (getField @"width" swapchainExtent) &*
+              set @"height" (getField @"height" swapchainExtent) &*
+              set @"layers" 1
+          ioPutStrLn "Framebuffers created."
 
-        put $ mod (currentFrame + 1) maxFramesInFlight
+          commandBuffers <-
+            allocateAcquire_ $
+            allocatedCommandBuffers device $
+            createVk $
+            set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO &*
+            set @"pNext" VK_NULL &*
+            set @"commandPool" commandPool &*
+            set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
+            set @"commandBufferCount" (fromIntegral $ length swapchainFramebuffers)
+          ioPutStrLn "Command buffers created."
 
-      ioPutStrLn "Main loop ended.  Waiting for device to idle."
-      liftIO $ vkDeviceWaitIdle device
+          let
+            commandBufferBeginInfo =
+              createVk $
+              set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO &*
+              set @"pNext" VK_NULL &*
+              set @"flags" VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT &*
+              set @"pInheritanceInfo" VK_NULL
 
-      ioPutStrLn "Cleaning up."
+            renderPassBeginInfo :: VkFramebuffer -> VkRenderPassBeginInfo
+            renderPassBeginInfo framebuffer =
+              createVk $
+              set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO &*
+              set @"pNext" VK_NULL &*
+              set @"renderPass" renderPass &*
+              set @"framebuffer" framebuffer &*
+              setVk @"renderArea" (
+                setVk @"offset" (set @"x" 0 &* set @"y" 0) &*
+                set @"extent" swapchainExtent
+              ) &*
+              set @"clearValueCount" 1 &*
+              setListRef @"pClearValues" [
+                createVk (
+                  setVk @"color" (
+                    setAt @"float32" @0 0 &*
+                    setAt @"float32" @1 0 &*
+                    setAt @"float32" @2 0 &*
+                    setAt @"float32" @3 1
+                  )
+                )
+              ]
+
+          forM (zip commandBuffers swapchainFramebuffers) $ \(commandBuffer, swapchainFramebuffer) -> do
+            beginCommandBuffer commandBuffer commandBufferBeginInfo
+            cmdBeginRenderPass commandBuffer (renderPassBeginInfo swapchainFramebuffer) VK_SUBPASS_CONTENTS_INLINE
+            liftIO $ vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
+            liftIO $ vkCmdDraw commandBuffer 3 1 0 0
+            liftIO $ vkCmdEndRenderPass commandBuffer
+            endCommandBuffer commandBuffer
+          ioPutStrLn "Command buffers filled."
+
+          ioPutStrLn "Window event loop starting."
+          shouldRebuildSwapchain <- evalStateTWith 0 $ windowEventLoop window lastResizeTimeRef $ do
+            currentFrame <- get
+
+            waitForFences device [inFlightFences !! currentFrame] VK_TRUE maxBound
+            resetFences device [inFlightFences !! currentFrame]
+
+            (acquireResult, nextImageIndex) <- acquireNextImageIndex device swapchain maxBound (imageAvailableSemaphores !! currentFrame) VK_NULL_HANDLE
+
+            case acquireResult of
+              VK_ERROR_OUT_OF_DATE_KHR -> do
+                ioPutStrLn "acquireNextImageIndex returned out-of-date."
+                return True
+              r | r `notElem` [VK_SUCCESS, VK_SUBOPTIMAL_KHR] -> liftIO $ throwIO $ VulkanException r "vkAcquireNextImageKHR failed."
+              _ -> do
+                queueSubmit
+                  graphicsQueue
+                  [
+                    createVk (
+                      set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
+                      set @"pNext" VK_NULL &*
+                      set @"waitSemaphoreCount" 1 &*
+                      setListRef @"pWaitSemaphores" [imageAvailableSemaphores !! currentFrame] &*
+                      setListRef @"pWaitDstStageMask" [VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT] &*
+                      set @"commandBufferCount" 1 &*
+                      setListRef @"pCommandBuffers" [commandBuffers !! fromIntegral nextImageIndex] &*
+                      set @"signalSemaphoreCount" 1 &*
+                      setListRef @"pSignalSemaphores" [renderFinishedSemaphores !! currentFrame]
+                    )
+                  ]
+                  (inFlightFences !! currentFrame)
+
+                queuePresentResult <-
+                  queuePresent presentQueue $
+                    createVk $
+                    set @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR &*
+                    set @"pNext" VK_NULL &*
+                    set @"waitSemaphoreCount" 1 &*
+                    setListRef @"pWaitSemaphores" [renderFinishedSemaphores !! currentFrame] &*
+                    set @"swapchainCount" 1 &*
+                    setListRef @"pSwapchains" [swapchain] &*
+                    setListRef @"pImageIndices" [nextImageIndex] &*
+                    set @"pResults" VK_NULL
+
+                case queuePresentResult of
+                  r | r `elem` [VK_ERROR_OUT_OF_DATE_KHR, VK_SUBOPTIMAL_KHR] -> do
+                    ioPutStrLn "queuePresent returned out-of-date or sub-optimal."
+                    return True
+                  r | r /= VK_SUCCESS -> liftIO $ throwIO $ VulkanException r "vkQueuePresentKHR failed."
+                  _ -> do
+                    put $ mod (currentFrame + 1) maxFramesInFlight
+                    return False
+
+          ioPutStrLn "Window event loop ended.  Waiting for device to idle."
+          liftIO $ vkDeviceWaitIdle device
+
+          ioPutStrLn "Cleaning up swapchain-related objects."
+          return shouldRebuildSwapchain
+
+        if shouldRebuildSwapchain then
+          recreateSwapchainAndContinue
+        else
+          ioPutStrLn "Cleaning up the rest."
 
   `catch` (
     \(e :: VulkanException) ->
@@ -590,37 +665,8 @@ main =
     \(e :: ApplicationException) ->
       putStrLn $ displayException e
   )
-  where
-    (width, height) = (800, 600)
 
-    extensions :: [CString]
-    extensions =
-      [
-      ]
-#ifndef NDEBUG
-      ++
-      [
-        VK_EXT_DEBUG_REPORT_EXTENSION_NAME
-      ]
-#endif
-
-    deviceExtensions :: [CString]
-    deviceExtensions =
-      [
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME
-      ]
-
-    validationLayers :: [String]
-    validationLayers =
-      [
-#ifndef NDEBUG
-        "VK_LAYER_LUNARG_standard_validation"
-#endif
-      ]
-
-    maxFramesInFlight = 2
-
-getFirstSuitablePhysicalDeviceAndProperties :: MonadIO io => VkInstance -> VkSurfaceKHR -> [String] -> io (VkPhysicalDevice, QueueFamilyIndices, SwapchainSupportDetails)
+getFirstSuitablePhysicalDeviceAndProperties :: MonadIO io => VkInstance -> VkSurfaceKHR -> [String] -> io (VkPhysicalDevice, QueueFamilyIndices)
 getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface deviceExtensions =
   listPhysicalDevices vulkanInstance >>=
   firstJustM (\physicalDevice -> runMaybeT $ do
@@ -630,13 +676,13 @@ getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface deviceExtensi
     guardM $ liftIO $ null <$> getUnsupportedDeviceExtensionNames physicalDevice VK_NULL deviceExtensions
     liftIO $ putStrLn "All expected device extensions are supported."
 
-    scsd <- liftIO $ getSwapchainSupportDetails physicalDevice surface
-    liftIO $ putStrLn "Finished obtaining swapchain support details."
+    surfaceFormats <- liftIO $ listPhysicalDeviceSurfaceFormats physicalDevice surface
+    surfacePresentModes <- liftIO $ listPhysicalDeviceSurfacePresentModes physicalDevice surface
 
-    guard $ not . null $ scsdSurfaceFormats scsd
-    guard $ not . null $ scsdPresentModes scsd
+    guard $ not . null $ surfaceFormats
+    guard $ not . null $ surfacePresentModes
 
-    return (physicalDevice, qfi, scsd)
+    return (physicalDevice, qfi)
   ) >>=
   maybe (throwIOAppEx "Failed to find a suitable physical device.") return
 
@@ -688,24 +734,11 @@ qfiAll qfi = [qfiGraphics, qfiPresent] <&> ($ qfi)
 qfiDistinct :: QueueFamilyIndices -> [Word32]
 qfiDistinct = distinct . qfiAll
 
-data SwapchainSupportDetails =
-  SwapchainSupportDetails {
-    scsdCapabilities :: VkSurfaceCapabilitiesKHR,
-    scsdSurfaceFormats :: [VkSurfaceFormatKHR],
-    scsdPresentModes :: [VkPresentModeKHR]
-  }
-
-getSwapchainSupportDetails :: VkPhysicalDevice -> VkSurfaceKHR -> IO SwapchainSupportDetails
-getSwapchainSupportDetails physicalDevice surface = do
-  capabilities <- liftIO $ getPhysicalDeviceSurfaceCapabilities physicalDevice surface
-  putStrLn "Obtained physical device surface capabilities."
-  formats <- liftIO $ listPhysicalDeviceSurfaceFormats physicalDevice surface
-  putStrLn "Obtained physical device surface formats."
-  presentModes <- liftIO $ listPhysicalDeviceSurfacePresentModes physicalDevice surface
-  putStrLn "Obtained physical device surface present modes."
-  return $ SwapchainSupportDetails capabilities formats presentModes
-
-data VulkanException = VulkanException VkResult String deriving (Eq, Show, Read)
+data VulkanException =
+  VulkanException {
+    vkexResult :: VkResult,
+    vkexMessage :: String
+  } deriving (Eq, Show, Read)
 
 instance Exception VulkanException where
   displayException (VulkanException code message) =
@@ -735,7 +768,6 @@ newVulkanGLFWWindow :: Int -> Int -> String -> Acquire GLFW.Window
 newVulkanGLFWWindow width height title =
   do
     GLFW.windowHint $ WindowHint'ClientAPI ClientAPI'NoAPI
-    GLFW.windowHint $ WindowHint'Resizable False
     GLFW.createWindow width height title Nothing Nothing >>=
       maybe (throwIOAppEx "Failed to initialize the GLFW window.") return
   `mkAcquire`
@@ -869,15 +901,22 @@ newSemaphore = newDeviceVk "vkCreateSemaphore" vkCreateSemaphore vkDestroySemaph
 newFence :: VkDevice -> VkFenceCreateInfo -> Acquire VkFence
 newFence = newDeviceVk "vkCreateFence" vkCreateFence vkDestroyFence
 
-allocateCommandBuffers :: MonadIO io => VkDevice -> VkCommandBufferAllocateInfo -> io [VkCommandBuffer]
-allocateCommandBuffers device allocateInfo = liftIO $
-  withPtr allocateInfo $ \allocateInfoPtr ->
-    allocaArray commandBufferCount $ \commandBuffersPtr -> do
-      vkAllocateCommandBuffers device allocateInfoPtr commandBuffersPtr &
-        onVkFailureThrow "vkAllocateCommandBuffers failed."
-      peekArray commandBufferCount commandBuffersPtr
+allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire [VkCommandBuffer]
+allocatedCommandBuffers device allocateInfo =
+  (
+    withPtr allocateInfo $ \allocateInfoPtr ->
+      allocaArray commandBufferCount $ \commandBuffersPtr -> do
+        vkAllocateCommandBuffers device allocateInfoPtr commandBuffersPtr &
+          onVkFailureThrow "vkAllocateCommandBuffers failed."
+        peekArray commandBufferCount commandBuffersPtr
+  )
+  `mkAcquire`
+  \commandBuffers ->
+    withArray commandBuffers $ \commandBuffersPtr ->
+      vkFreeCommandBuffers device commandPool (fromIntegral $ length commandBuffers) commandBuffersPtr
   where
     commandBufferCount = fromIntegral $ getField @"commandBufferCount" allocateInfo
+    commandPool = getField @"commandPool" allocateInfo
 
 beginCommandBuffer :: MonadIO io => VkCommandBuffer -> VkCommandBufferBeginInfo -> io ()
 beginCommandBuffer commandBuffer beginInfo =
@@ -901,11 +940,10 @@ queueSubmit queue submitInfos fence =
     vkQueueSubmit queue (fromIntegral $ length $ submitInfos) submitInfosPtr fence &
       onVkFailureThrow "vkQueueSubmit failed."
 
-queuePresent :: MonadIO io => VkQueue -> VkPresentInfoKHR -> io ()
+queuePresent :: MonadIO io => VkQueue -> VkPresentInfoKHR -> io VkResult
 queuePresent queue presentInfo =
   liftIO $ withPtr presentInfo $ \presentInfoPtr ->
-    vkQueuePresentKHR queue presentInfoPtr & void -- tutorial says this shouldn't cause program to end
-      --onVkFailureThrow "vkQueuePresentKHR failed."
+    vkQueuePresentKHR queue presentInfoPtr
 
 waitForFences :: MonadIO io => VkDevice -> [VkFence] -> VkBool32 -> Word64 -> io ()
 waitForFences device fences shouldWaitAll timeout =
@@ -1014,15 +1052,29 @@ listSwapchainImages device swapchain = do
     vkGetSwapchainImagesKHR device swapchain imageCountPtr imagesPtr &
       onVkFailureThrow "vkGetSwapchainImagesKHR failed."
 
-acquireNextImageIndex :: MonadIO io => VkDevice -> VkSwapchainKHR -> Word64 -> VkSemaphore -> VkFence -> io Word32
+acquireNextImageIndex :: MonadIO io => VkDevice -> VkSwapchainKHR -> Word64 -> VkSemaphore -> VkFence -> io (VkResult, Word32)
 acquireNextImageIndex device swapchain timeout semaphore fence =
   liftIO $ alloca $ \imageIndexPtr -> do
-    vkAcquireNextImageKHR device swapchain timeout semaphore fence imageIndexPtr & void -- tutorial says this shouldn't cause program to end
-      --onVkFailureThrow "vkAcquireNextImageKHR failed."
-    peek imageIndexPtr
+    result <- vkAcquireNextImageKHR device swapchain timeout semaphore fence imageIndexPtr
+    (result,) <$> peek imageIndexPtr
 
-mainLoop :: MonadIO io => GLFW.Window -> io () -> io ()
-mainLoop window body = whileM_ (not <$> liftIO (GLFW.windowShouldClose window)) (liftIO GLFW.pollEvents >> body)
+windowEventLoop :: MonadIO io => GLFW.Window -> IORef (Maybe TimeSpec) -> io Bool -> io Bool
+windowEventLoop window lastResizeTimeRef body = fix $ \loop ->
+  liftIO (GLFW.windowShouldClose window) >>= \case
+    True -> return False
+    False -> do
+      liftIO GLFW.pollEvents
+      shouldResize <- liftIO $ do
+        currentTime <- getTime Monotonic
+        atomicModifyIORef lastResizeTimeRef $ \case
+          Just lastResizeTime | currentTime - lastResizeTime >= resizeDelay -> (Nothing, True)
+          v -> (v, False)
+      if shouldResize then
+        return True
+      else
+        body >>= bool loop (return True)
+  where
+    resizeDelay = fromNanoSecs (100 * 1000 * 1000) -- 100 milliseconds
 
 (<&>) :: Functor f => f a -> (a -> b) -> f b
 (<&>) = flip (<$>)
