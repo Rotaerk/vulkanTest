@@ -63,4 +63,4 @@ let
       exec ${main}/bin/vulkanTest --shaderspath='${shaders}' "$@"
     '';
 in
-  { inherit main shaders fullBuild; }
+  { inherit pkgs haskellPackages main shaders fullBuild; }
