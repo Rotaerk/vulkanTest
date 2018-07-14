@@ -42,7 +42,9 @@ import Graphics.Vulkan.Ext.VK_EXT_debug_report
 import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
+import Graphics.Vulkan.Marshal.Create.DataFrame
 import Graphics.Vulkan.Marshal.Proc
+import Numeric.DataFrame
 import System.Clock
 import System.Console.CmdArgs.Implicit
 import System.FilePath
@@ -621,10 +623,7 @@ main =
               set @"alphaBlendOp" VK_BLEND_OP_ADD
             )
           ] &*
-          setAt @"blendConstants" @0 0 &*
-          setAt @"blendConstants" @1 0 &*
-          setAt @"blendConstants" @2 0 &*
-          setAt @"blendConstants" @3 0
+          setVec @"blendConstants" (vec4 0 0 0 0)
         ) &*
         set @"pDynamicState" VK_NULL &*
         set @"renderPass" renderPass &*
@@ -691,12 +690,7 @@ main =
           set @"clearValueCount" 1 &*
           setListRef @"pClearValues" [
             createVk (
-              setVk @"color" (
-                setAt @"float32" @0 0 &*
-                setAt @"float32" @1 0 &*
-                setAt @"float32" @2 0 &*
-                setAt @"float32" @3 1
-              )
+              setVk @"color" (setVec @"float32" $ vec4 0 0 0 1)
             )
           ]
 
