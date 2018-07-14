@@ -24,7 +24,7 @@ let
           else
             super.HUnit;
 
-        vulkan-api = overrideCabal (relSourceOverrides.vulkan-api "vulkan-api" "1.1.0.0" super.vulkan-api) (drv: {
+        vulkan-api = overrideCabal (relSourceOverrides.vulkan-api "vulkan-api" "1.1.3.0" super.vulkan-api) (drv: {
           librarySystemDepends = [ pkgs.vulkan-loader ];
           configureFlags = [ "-fuseNativeFFI-1-0" ];
         });
@@ -41,7 +41,6 @@ let
       (drv: {
         pname = "${projectName}-main";
         src = pkgs.lib.cleanSource drv.src;
-        librarySystemDepends = [ pkgs.vulkan-loader pkgs.cabal-install ];
       });
 
   shaders =
@@ -60,6 +59,8 @@ let
 
   fullBuild =
     pkgs.writeShellScriptBin projectName ''
+      LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${pkgs.vulkan-validation-layers}/lib"
+      XDG_DATA_DIRS="$XDG_DATA_DIRS:${pkgs.vulkan-validation-layers}/share"
       exec ${main}/bin/vulkanTest --shaderspath='${shaders}' "$@"
     '';
 in
