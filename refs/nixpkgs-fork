@@ -1,0 +1,7 @@
+{
+  scheme = "github";
+  owner = "rotaerk";
+  repo = "nixpkgs";
+  rev = "456537ef2ffd5529d26e782cfbee34a9bbf6af08";
+  sha256 = "09gp5i17l4q4v185aw90r853fc5n0vil0fny4nl2zckq7vl4nrmx";
+}
