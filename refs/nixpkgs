@@ -1,7 +1,7 @@
 {
   scheme = "github";
-  owner = "rotaerk";
+  owner = "NixOS";
   repo = "nixpkgs";
-  rev = "c94b084b46a835baa24a01f1c75ff8b6c4baf55f";
-  sha256 = "0spbncvzj86mq9immncahpf64as7bhjca0dyqimjidfmswxab2ca";
+  rev = "cb2921c8390f27947980f71e0149bf1d5e75a92e";
+  sha256 = "05hcyyh95c4xsqwfw7q4yjifakcj6mjjhja56hnnl2cadb7fxpyl";
 }

@@ -5,7 +5,7 @@ let
   enableProfiling = true;
 
   refs = import ./refs.nix;
-  pkgs = (refs { inherit refsWithLocalSource; }).sourceImports.nixpkgs-fork {};
+  pkgs = (refs { inherit refsWithLocalSource; }).sourceImports.nixpkgs {};
   inherit (refs { inherit refsWithLocalSource pkgs; }) sources sourceImports sourceOverrides relSourceOverrides;
   inherit (pkgs.haskell.lib) overrideCabal;
 
