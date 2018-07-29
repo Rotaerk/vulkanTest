@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -34,6 +35,7 @@ import Foreign.Marshal.Alloc
 import Foreign.Marshal.Array
 import Foreign.Ptr
 import Foreign.Storable
+import GHC.Generics (Generic)
 import Graphics.UI.GLFW (WindowHint(..), ClientAPI(..))
 import qualified Graphics.UI.GLFW as GLFW
 import Graphics.Vulkan
@@ -45,6 +47,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
 import Graphics.Vulkan.Marshal.Proc
 import Numeric.DataFrame
+import Numeric.PrimBytes
 import System.Clock
 import System.Console.CmdArgs.Implicit
 import System.FilePath
@@ -80,6 +83,14 @@ validationLayers =
   ]
 
 maxFramesInFlight = 2
+
+vertices :: DataFrame Vertex '[XN 0]
+vertices =
+  fromJust $ fromList (D @0) $ scalar <$> [
+    Vertex (vec2 0 (-0.5)) (vec3 1 0 0),
+    Vertex (vec2 0.5 0.5) (vec3 0 1 0),
+    Vertex (vec2 (-0.5) 0.5) (vec3 0 0 1)
+  ]
 
 main :: IO ()
 main =
@@ -304,7 +315,7 @@ main =
       set @"flags" 0 &*
       set @"queueCreateInfoCount" (fromIntegral $ length qfis) &*
       setListRef @"pQueueCreateInfos" (
-        qfis<&> \qfi ->
+        qfis <&> \qfi ->
           createVk $
           set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
           set @"pNext" VK_NULL &*
@@ -536,13 +547,16 @@ main =
         set @"stageCount" (fromIntegral $ length $ shaderStageCreateInfos) &*
         setListRef @"pStages" shaderStageCreateInfos &*
         setVkRef @"pVertexInputState" (
-          createVk $
-          set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO &*
-          set @"pNext" VK_NULL &*
-          set @"vertexBindingDescriptionCount" 0 &*
-          set @"pVertexBindingDescriptions" VK_NULL &*
-          set @"vertexAttributeDescriptionCount" 0 &*
-          set @"pVertexAttributeDescriptions" VK_NULL
+          let
+            vertexAttributeDescriptions = vertexAttributeDescriptionsAt 0
+          in
+            createVk $
+            set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO &*
+            set @"pNext" VK_NULL &*
+            set @"vertexBindingDescriptionCount" 1 &*
+            setVkRef @"pVertexBindingDescriptions" (vertexBindingDescriptionAt 0 VK_VERTEX_INPUT_RATE_VERTEX) &*
+            set @"vertexAttributeDescriptionCount" (fromIntegral $ length vertexAttributeDescriptions) &*
+            setListRef @"pVertexAttributeDescriptions" vertexAttributeDescriptions
         ) &*
         setVkRef @"pInputAssemblyState" (
           createVk $
@@ -738,6 +752,35 @@ main =
             r | r `elem` [VK_ERROR_OUT_OF_DATE_KHR, VK_SUBOPTIMAL_KHR] -> return True
             r | r /= VK_SUCCESS -> liftIO $ throwIO $ VulkanException r "vkQueuePresentKHR failed."
             _ -> return False
+
+data Vertex =
+  Vertex {
+    vtxPos :: Vec2f,
+    vtxColor :: Vec3f
+  } deriving (Eq, Show, Generic)
+
+instance PrimBytes Vertex
+
+vertexBindingDescriptionAt :: Word32 -> VkVertexInputRate -> VkVertexInputBindingDescription
+vertexBindingDescriptionAt binding inputRate =
+  createVk @VkVertexInputBindingDescription $
+  set @"binding" binding &*
+  set @"stride" (fromIntegral $ sizeOf @(Scalar Vertex) undefined) &*
+  set @"inputRate" inputRate
+
+vertexAttributeDescriptionsAt :: Word32 -> [VkVertexInputAttributeDescription]
+vertexAttributeDescriptionsAt binding =
+  createVk @VkVertexInputAttributeDescription <$> [
+    set @"binding" binding &*
+    set @"location" 0 &*
+    set @"format" VK_FORMAT_R32G32_SFLOAT &*
+    set @"offset" 0,
+
+    set @"binding" binding &*
+    set @"location" 1 &*
+    set @"format" VK_FORMAT_R32G32B32_SFLOAT &*
+    set @"offset" (fromIntegral $ sizeOf @Vec2f undefined)
+  ]
 
 registerDebugCallback :: MonadUnliftIO io => VkInstance -> ResourceT io ()
 registerDebugCallback vulkanInstance = do
