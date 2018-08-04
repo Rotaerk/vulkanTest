@@ -47,6 +47,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
 import Graphics.Vulkan.Marshal.Proc
 import Numeric.DataFrame
+import Numeric.Dim
 import Numeric.PrimBytes
 import System.Clock
 import System.Console.CmdArgs.Implicit
@@ -84,14 +85,6 @@ validationLayers =
 
 maxFramesInFlight = 2
 
-vertices :: DataFrame Vertex '[XN 0]
-vertices =
-  fromJust $ fromList (D @0) $ scalar <$> [
-    Vertex (vec2 0 (-0.5)) (vec3 1 0 0),
-    Vertex (vec2 0.5 0.5) (vec3 0 1 0),
-    Vertex (vec2 (-0.5) 0.5) (vec3 0 0 1)
-  ]
-
 main :: IO ()
 main =
   do
@@ -104,6 +97,15 @@ main =
 
     let shadersPath = claShadersPath arguments
     putStrLn $ "Shaders path is: '" ++ shadersPath ++ "'."
+
+    let
+      vertices :: DataFrame Vertex '[XN 3]
+      vertices =
+        fromJust $ fromList (D @3) $ scalar <$> [
+          Vertex (vec2 0 (-0.5)) (vec3 1 1 1),
+          Vertex (vec2 0.5 0.5) (vec3 0 1 0),
+          Vertex (vec2 (-0.5) 0.5) (vec3 0 0 1)
+        ]
 
     runResourceT $ do
       -- Before initializing, probably should setErrorCallback
@@ -159,6 +161,29 @@ main =
       commandPool <- createCommandPool device graphicsQfi
       ioPutStrLn "Command pool created."
 
+      vertexBuffer <- createVertexBuffer device vertices
+      ioPutStrLn "Vertex buffer created."
+
+      vertexBufferMemReqs <- getBufferMemoryRequirements device vertexBuffer
+      ioPutStrLn "Vertex buffer memory requirements obtained."
+
+      physicalDeviceMemProperties <- getPhysicalDeviceMemoryProperties physicalDevice
+      ioPutStrLn "Physical device memory properties obtained."
+
+      vertexBufferMemory <-
+        allocateVertexBufferMemory device (getField @"size" vertexBufferMemReqs) $
+        findMemoryType
+          physicalDeviceMemProperties
+          (getField @"memoryTypeBits" vertexBufferMemReqs)
+          (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+      ioPutStrLn "Vertex buffer memory allocated."
+
+      liftIO $ vkBindBufferMemory device vertexBuffer vertexBufferMemory 0
+      ioPutStrLn "Vertex buffer bound to allocated memory."
+
+      fillVertexBufferMemory device vertexBufferMemory vertices
+      ioPutStrLn "Vertex buffer memory filled with vertices."
+
       imageAvailableSemaphores <- replicateM maxFramesInFlight $ createSemaphore device
       ioPutStrLn "Image-available semaphores created."
 
@@ -208,7 +233,7 @@ main =
         commandBuffers <- allocateCommandBuffers device commandPool swapchainFramebuffers
         ioPutStrLn "Command buffers allocated."
 
-        fillCommandBuffers renderPass graphicsPipeline swapchainExtent (zip commandBuffers swapchainFramebuffers)
+        fillCommandBuffers renderPass graphicsPipeline swapchainExtent (zip commandBuffers swapchainFramebuffers) vertexBuffer (fromIntegral $ dimVal $ dim1 vertices)
         ioPutStrLn "Command buffers filled."
 
         let drawFrame' = drawFrame device swapchain graphicsQueue presentQueue commandBuffers
@@ -661,6 +686,43 @@ main =
       set @"height" (getField @"height" swapchainExtent) &*
       set @"layers" 1
 
+    createVertexBuffer :: MonadIO io => VkDevice -> DataFrame Vertex '[XN 3] -> ResourceT io VkBuffer
+    createVertexBuffer device (XFrame vertices) =
+      allocateAcquire_ $
+      newBuffer device $
+      createVk $
+      set @"sType" VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"size" (fromIntegral $ bSizeOf vertices) &*
+      set @"usage" VK_BUFFER_USAGE_VERTEX_BUFFER_BIT &*
+      set @"sharingMode" VK_SHARING_MODE_EXCLUSIVE &*
+      set @"pQueueFamilyIndices" VK_NULL
+
+    findMemoryType :: VkPhysicalDeviceMemoryProperties -> Word32 -> VkMemoryPropertyFlags -> Word32
+    findMemoryType memProperties typeFilter propertyFlags =
+      fromMaybe (throwAppEx "Failed to find a suitable memory type.") $
+      listToMaybe $
+      filter (isMatch . fromIntegral) $
+      [0 .. getField @"memoryTypeCount" memProperties - 1]
+      where
+        memoryTypes = getVec @"memoryTypes" memProperties
+        isMatch i = testBit typeFilter i && propertyFlags == (propertyFlags .&. getField @"propertyFlags" (ixOff i memoryTypes))
+
+    allocateVertexBufferMemory :: MonadIO io => VkDevice -> VkDeviceSize -> Word32 -> ResourceT io VkDeviceMemory
+    allocateVertexBufferMemory device size memoryTypeIndex =
+      allocateAcquire_ $
+      allocatedMemory device $
+      createVk $
+      set @"sType" VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"allocationSize" size &*
+      set @"memoryTypeIndex" memoryTypeIndex
+
+    fillVertexBufferMemory :: MonadUnliftIO io => VkDevice -> VkDeviceMemory -> DataFrame Vertex '[XN 3] -> io ()
+    fillVertexBufferMemory device vertexBufferMemory (XFrame vertices) =
+      with (mappedMemory device vertexBufferMemory 0 (fromIntegral $ bSizeOf vertices)) $ \ptr ->
+        liftIO $ poke (castPtr ptr) vertices
+
     allocateCommandBuffers :: MonadIO io => VkDevice -> VkCommandPool -> [VkFramebuffer] -> ResourceT io [VkCommandBuffer]
     allocateCommandBuffers device commandPool framebuffers =
       allocateAcquire_ $
@@ -672,13 +734,14 @@ main =
       set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
       set @"commandBufferCount" (fromIntegral $ length framebuffers)
 
-    fillCommandBuffers :: MonadIO io => VkRenderPass -> VkPipeline -> VkExtent2D -> [(VkCommandBuffer, VkFramebuffer)] -> io ()
-    fillCommandBuffers renderPass graphicsPipeline swapchainExtent commandBuffersWithFramebuffers =
+    fillCommandBuffers :: MonadIO io => VkRenderPass -> VkPipeline -> VkExtent2D -> [(VkCommandBuffer, VkFramebuffer)] -> VkBuffer -> Word32 -> io ()
+    fillCommandBuffers renderPass graphicsPipeline swapchainExtent commandBuffersWithFramebuffers vertexBuffer vertexCount =
       forM_ commandBuffersWithFramebuffers $ \(commandBuffer, swapchainFramebuffer) -> do
         beginCommandBuffer commandBuffer commandBufferBeginInfo
         cmdBeginRenderPass commandBuffer (renderPassBeginInfo swapchainFramebuffer) VK_SUBPASS_CONTENTS_INLINE
         liftIO $ vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
-        liftIO $ vkCmdDraw commandBuffer 3 1 0 0
+        cmdBindVertexBuffers commandBuffer 0 [(vertexBuffer, 0)]
+        liftIO $ vkCmdDraw commandBuffer vertexCount 1 0 0
         liftIO $ vkCmdEndRenderPass commandBuffer
         endCommandBuffer commandBuffer
 
@@ -970,6 +1033,32 @@ newSemaphore = newDeviceVk "vkCreateSemaphore" vkCreateSemaphore vkDestroySemaph
 newFence :: VkDevice -> VkFenceCreateInfo -> Acquire VkFence
 newFence = newDeviceVk "vkCreateFence" vkCreateFence vkDestroyFence
 
+newBuffer :: VkDevice -> VkBufferCreateInfo -> Acquire VkBuffer
+newBuffer = newDeviceVk "vkCreateBuffer" vkCreateBuffer vkDestroyBuffer
+
+allocatedMemory :: VkDevice -> VkMemoryAllocateInfo -> Acquire VkDeviceMemory
+allocatedMemory device allocateInfo =
+  (
+    withPtr allocateInfo $ \allocateInfoPtr ->
+      alloca $ \deviceMemoryPtr -> do
+        vkAllocateMemory device allocateInfoPtr VK_NULL deviceMemoryPtr &
+          onVkFailureThrow "vkAllocateMemory failed."
+        peek deviceMemoryPtr
+  )
+  `mkAcquire`
+  \deviceMemory ->
+    vkFreeMemory device deviceMemory VK_NULL
+
+mappedMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> Acquire (Ptr Void)
+mappedMemory device deviceMemory offset size =
+  (
+    alloca $ \ptrPtr -> do
+      vkMapMemory device deviceMemory offset size 0 ptrPtr
+      peek ptrPtr
+  )
+  `mkAcquire`
+  const (vkUnmapMemory device deviceMemory)
+
 allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire [VkCommandBuffer]
 allocatedCommandBuffers device allocateInfo =
   (
@@ -1002,6 +1091,13 @@ cmdBeginRenderPass :: MonadIO io => VkCommandBuffer -> VkRenderPassBeginInfo -> 
 cmdBeginRenderPass commandBuffer beginInfo subpassContents =
   liftIO $ withPtr beginInfo $ \beginInfoPtr ->
     vkCmdBeginRenderPass commandBuffer beginInfoPtr subpassContents
+
+cmdBindVertexBuffers :: MonadIO io => VkCommandBuffer -> Word32 -> [(VkBuffer, VkDeviceSize)] -> io ()
+cmdBindVertexBuffers commandBuffer firstBinding bindings =
+  liftIO $
+  withArray (fst <$> bindings) $ \buffersPtr ->
+  withArray (snd <$> bindings) $ \offsetsPtr ->
+    vkCmdBindVertexBuffers commandBuffer firstBinding (fromIntegral $ length bindings) buffersPtr offsetsPtr
 
 queueSubmit :: MonadIO io => VkQueue -> [VkSubmitInfo] -> VkFence -> io ()
 queueSubmit queue submitInfos fence =
@@ -1126,6 +1222,18 @@ acquireNextImageIndex device swapchain timeout semaphore fence =
   liftIO $ alloca $ \imageIndexPtr -> do
     result <- vkAcquireNextImageKHR device swapchain timeout semaphore fence imageIndexPtr
     (result,) <$> peek imageIndexPtr
+
+getBufferMemoryRequirements :: MonadIO io => VkDevice -> VkBuffer -> io VkMemoryRequirements
+getBufferMemoryRequirements device buffer =
+  liftIO $ alloca $ \memReqsPtr -> do
+    vkGetBufferMemoryRequirements device buffer memReqsPtr
+    peek memReqsPtr
+
+getPhysicalDeviceMemoryProperties :: MonadIO io => VkPhysicalDevice -> io VkPhysicalDeviceMemoryProperties
+getPhysicalDeviceMemoryProperties physicalDevice =
+  liftIO $ alloca $ \memPropsPtr -> do
+    vkGetPhysicalDeviceMemoryProperties physicalDevice memPropsPtr
+    peek memPropsPtr
 
 windowEventLoop :: MonadIO io => GLFW.Window -> IORef (Maybe TimeSpec) -> io Bool -> io Bool
 windowEventLoop window lastResizeTimeRef body = fix $ \loop ->
