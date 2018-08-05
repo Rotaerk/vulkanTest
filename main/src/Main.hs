@@ -3,6 +3,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
@@ -83,6 +84,7 @@ validationLayers =
 #endif
   ]
 
+maxFramesInFlight :: Int
 maxFramesInFlight = 2
 
 main :: IO ()
@@ -98,160 +100,158 @@ main =
     let shadersPath = claShadersPath arguments
     putStrLn $ "Shaders path is: '" ++ shadersPath ++ "'."
 
-    let
-      vertices :: DataFrame Vertex '[XN 3]
-      vertices =
-        fromJust $ fromList (D @3) $ scalar <$> [
-          Vertex (vec2 0 (-0.5)) (vec3 1 1 1),
-          Vertex (vec2 0.5 0.5) (vec3 0 1 0),
-          Vertex (vec2 (-0.5) 0.5) (vec3 0 0 1)
-        ]
+    case
+      fromList (D @3) $ scalar <$> [
+        Vertex (vec2 0 (-0.5)) (vec3 1 1 1),
+        Vertex (vec2 0.5 0.5) (vec3 0 1 0),
+        Vertex (vec2 (-0.5) 0.5) (vec3 0 0 1)
+      ]
+      of
+      Just (XFrame vertices) ->
+        runResourceT $ do
+          -- Before initializing, probably should setErrorCallback
+          initializeGLFW
+          ioPutStrLn "GLFW initialized."
 
-    runResourceT $ do
-      -- Before initializing, probably should setErrorCallback
-      initializeGLFW
-      ioPutStrLn "GLFW initialized."
+          window <- createWindow
+          ioPutStrLn "Window created."
 
-      window <- createWindow
-      ioPutStrLn "Window created."
+          lastResizeTimeRef <- liftIO $ newIORef Nothing
 
-      lastResizeTimeRef <- liftIO $ newIORef Nothing
+          liftIO $ GLFW.setFramebufferSizeCallback window $ Just $ \_ _ _ -> do
+            time <- getTime Monotonic
+            writeIORef lastResizeTimeRef $ Just time
+          ioPutStrLn "Window framebuffer size callback registered."
 
-      liftIO $ GLFW.setFramebufferSizeCallback window $ Just $ \_ _ _ -> do
-        time <- getTime Monotonic
-        writeIORef lastResizeTimeRef $ Just time
-      ioPutStrLn "Window framebuffer size callback registered."
+          glfwExtensions <- liftIO $ GLFW.getRequiredInstanceExtensions
 
-      glfwExtensions <- liftIO $ GLFW.getRequiredInstanceExtensions
+          unless (null validationLayers) $ do
+            ensureValidationLayersSupported validationLayers
+            ioPutStrLn "All required validation layers supported."
 
-      unless (null validationLayers) $ do
-        ensureValidationLayersSupported validationLayers
-        ioPutStrLn "All required validation layers supported."
-
-      vulkanInstance <- createVulkanInstance (extensions ++ glfwExtensions) validationLayers
-      ioPutStrLn "Vulkan instance created."
+          vulkanInstance <- createVulkanInstance (extensions ++ glfwExtensions) validationLayers
+          ioPutStrLn "Vulkan instance created."
 
 #ifndef NDEBUG
-      registerDebugCallback vulkanInstance
-      ioPutStrLn "Debug callback registered."
+          registerDebugCallback vulkanInstance
+          ioPutStrLn "Debug callback registered."
 #endif
 
-      surface <- createSurface vulkanInstance window
-      ioPutStrLn "Window surface obtained."
+          surface <- createSurface vulkanInstance window
+          ioPutStrLn "Window surface obtained."
 
-      (physicalDevice, graphicsQfi, presentQfi) <-
-        mapM (liftIO . peekCString) deviceExtensions >>=
-        getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface
-      ioPutStrLn "Suitable physical device found."
+          (physicalDevice, graphicsQfi, presentQfi) <-
+            mapM (liftIO . peekCString) deviceExtensions >>=
+            getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface
+          ioPutStrLn "Suitable physical device found."
 
-      let distinctQfis = distinct [graphicsQfi, presentQfi]
+          let distinctQfis = distinct [graphicsQfi, presentQfi]
 
-      device <- createDevice physicalDevice distinctQfis
-      ioPutStrLn "Vulkan device created."
+          device <- createDevice physicalDevice distinctQfis
+          ioPutStrLn "Vulkan device created."
 
-      graphicsQueue <- getDeviceQueue device graphicsQfi 0
-      ioPutStrLn "Graphics queue obtained."
+          graphicsQueue <- getDeviceQueue device graphicsQfi 0
+          ioPutStrLn "Graphics queue obtained."
 
-      presentQueue <- getDeviceQueue device presentQfi 0
-      ioPutStrLn "Present queue obtained."
+          presentQueue <- getDeviceQueue device presentQfi 0
+          ioPutStrLn "Present queue obtained."
 
-      pipelineLayout <- createPipelineLayout device
-      ioPutStrLn "Pipeline layout created."
+          pipelineLayout <- createPipelineLayout device
+          ioPutStrLn "Pipeline layout created."
 
-      commandPool <- createCommandPool device graphicsQfi
-      ioPutStrLn "Command pool created."
+          commandPool <- createCommandPool device graphicsQfi
+          ioPutStrLn "Command pool created."
 
-      vertexBuffer <- createVertexBuffer device vertices
-      ioPutStrLn "Vertex buffer created."
+          vertexBuffer <- createVertexBuffer device (fromIntegral $ bSizeOf vertices)
+          ioPutStrLn "Vertex buffer created."
 
-      vertexBufferMemReqs <- getBufferMemoryRequirements device vertexBuffer
-      ioPutStrLn "Vertex buffer memory requirements obtained."
+          vertexBufferMemReqs <- getBufferMemoryRequirements device vertexBuffer
+          ioPutStrLn "Vertex buffer memory requirements obtained."
 
-      physicalDeviceMemProperties <- getPhysicalDeviceMemoryProperties physicalDevice
-      ioPutStrLn "Physical device memory properties obtained."
+          physicalDeviceMemProperties <- getPhysicalDeviceMemoryProperties physicalDevice
+          ioPutStrLn "Physical device memory properties obtained."
 
-      vertexBufferMemory <-
-        allocateVertexBufferMemory device (getField @"size" vertexBufferMemReqs) $
-        findMemoryType
-          physicalDeviceMemProperties
-          (getField @"memoryTypeBits" vertexBufferMemReqs)
-          (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-      ioPutStrLn "Vertex buffer memory allocated."
+          vertexBufferMemory <-
+            allocateVertexBufferMemory device (getField @"size" vertexBufferMemReqs) $
+            findMemoryType
+              physicalDeviceMemProperties
+              (getField @"memoryTypeBits" vertexBufferMemReqs)
+              (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+          ioPutStrLn "Vertex buffer memory allocated."
 
-      liftIO $ vkBindBufferMemory device vertexBuffer vertexBufferMemory 0
-      ioPutStrLn "Vertex buffer bound to allocated memory."
+          liftIO $ vkBindBufferMemory device vertexBuffer vertexBufferMemory 0
+          ioPutStrLn "Vertex buffer bound to allocated memory."
 
-      fillVertexBufferMemory device vertexBufferMemory vertices
-      ioPutStrLn "Vertex buffer memory filled with vertices."
+          fillVertexBufferMemory device vertexBufferMemory vertices
+          ioPutStrLn "Vertex buffer memory filled with vertices."
 
-      imageAvailableSemaphores <- replicateM maxFramesInFlight $ createSemaphore device
-      ioPutStrLn "Image-available semaphores created."
+          imageAvailableSemaphores <- replicateM maxFramesInFlight $ createSemaphore device
+          ioPutStrLn "Image-available semaphores created."
 
-      renderFinishedSemaphores <- replicateM maxFramesInFlight $ createSemaphore device
-      ioPutStrLn "Render-finished semaphores created."
+          renderFinishedSemaphores <- replicateM maxFramesInFlight $ createSemaphore device
+          ioPutStrLn "Render-finished semaphores created."
 
-      inFlightFences <- replicateM maxFramesInFlight $ createFence device
-      ioPutStrLn "In-flight fences created."
+          inFlightFences <- replicateM maxFramesInFlight $ createFence device
+          ioPutStrLn "In-flight fences created."
 
-      doWhileM $ runResourceT $ do
-        (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
+          doWhileM $ runResourceT $ do
+            (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
 
-        surfaceCapabilities <- liftIO $ getPhysicalDeviceSurfaceCapabilities physicalDevice surface
-        ioPutStrLn "Obtained physical device surface capabilities."
+            surfaceCapabilities <- liftIO $ getPhysicalDeviceSurfaceCapabilities physicalDevice surface
+            ioPutStrLn "Obtained physical device surface capabilities."
 
-        surfaceFormats <- liftIO $ listPhysicalDeviceSurfaceFormats physicalDevice surface
-        ioPutStrLn "Obtained physical device surface formats."
+            surfaceFormats <- liftIO $ listPhysicalDeviceSurfaceFormats physicalDevice surface
+            ioPutStrLn "Obtained physical device surface formats."
 
-        surfacePresentModes <- liftIO $ listPhysicalDeviceSurfacePresentModes physicalDevice surface
-        ioPutStrLn "Obtained physical device surface present modes."
+            surfacePresentModes <- liftIO $ listPhysicalDeviceSurfacePresentModes physicalDevice surface
+            ioPutStrLn "Obtained physical device surface present modes."
 
-        let
-          swapchainSurfaceFormat = chooseSwapchainSurfaceFormat surfaceFormats
-          swapchainImageFormat = getField @"format" swapchainSurfaceFormat
-          swapchainSurfacePresentMode = chooseSwapchainSurfacePresentMode surfacePresentModes
-          swapchainExtent = chooseSwapchainSurfaceExtent surfaceCapabilities (fromIntegral windowFramebufferWidth) (fromIntegral windowFramebufferHeight)
-          swapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
+            let
+              swapchainSurfaceFormat = chooseSwapchainSurfaceFormat surfaceFormats
+              swapchainImageFormat = getField @"format" swapchainSurfaceFormat
+              swapchainSurfacePresentMode = chooseSwapchainSurfacePresentMode surfacePresentModes
+              swapchainExtent = chooseSwapchainSurfaceExtent surfaceCapabilities (fromIntegral windowFramebufferWidth) (fromIntegral windowFramebufferHeight)
+              swapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
 
-        swapchain <- createSwapchain device surface surfaceCapabilities swapchainSurfaceFormat swapchainSurfacePresentMode swapchainExtent swapchainImageCount distinctQfis
-        ioPutStrLn "Swapchain created."
+            swapchain <- createSwapchain device surface surfaceCapabilities swapchainSurfaceFormat swapchainSurfacePresentMode swapchainExtent swapchainImageCount distinctQfis
+            ioPutStrLn "Swapchain created."
 
-        swapchainImages <- listSwapchainImages device swapchain
-        ioPutStrLn "Swapchain images obtained."
+            swapchainImages <- listSwapchainImages device swapchain
+            ioPutStrLn "Swapchain images obtained."
 
-        swapchainImageViews <- createSwapchainImageViews device swapchainImageFormat swapchainImages
-        ioPutStrLn "Swapchain image views created."
+            swapchainImageViews <- createSwapchainImageViews device swapchainImageFormat swapchainImages
+            ioPutStrLn "Swapchain image views created."
 
-        renderPass <- createRenderPass device swapchainImageFormat
-        ioPutStrLn "Render pass created."
+            renderPass <- createRenderPass device swapchainImageFormat
+            ioPutStrLn "Render pass created."
 
-        graphicsPipeline <- createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent
-        ioPutStrLn "Graphics pipeline created."
+            graphicsPipeline <- createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent
+            ioPutStrLn "Graphics pipeline created."
 
-        swapchainFramebuffers <- createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews
-        ioPutStrLn "Framebuffers created."
+            swapchainFramebuffers <- createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews
+            ioPutStrLn "Framebuffers created."
 
-        commandBuffers <- allocateCommandBuffers device commandPool swapchainFramebuffers
-        ioPutStrLn "Command buffers allocated."
+            commandBuffers <- allocateCommandBuffers device commandPool swapchainFramebuffers
+            ioPutStrLn "Command buffers allocated."
 
-        fillCommandBuffers renderPass graphicsPipeline swapchainExtent (zip commandBuffers swapchainFramebuffers) vertexBuffer (fromIntegral $ dimVal $ dim1 vertices)
-        ioPutStrLn "Command buffers filled."
+            fillCommandBuffers renderPass graphicsPipeline swapchainExtent (zip commandBuffers swapchainFramebuffers) vertexBuffer (fromIntegral $ dimVal $ dim1 vertices)
+            ioPutStrLn "Command buffers filled."
 
-        let drawFrame' = drawFrame device swapchain graphicsQueue presentQueue commandBuffers
+            let drawFrame' = drawFrame device swapchain graphicsQueue presentQueue commandBuffers
 
-        ioPutStrLn "Window event loop starting."
-        shouldRebuildSwapchain <- evalStateTWith 0 $ windowEventLoop window lastResizeTimeRef $ do
-          currentFrame <- get
-          put $ mod (currentFrame + 1) maxFramesInFlight
-          drawFrame' (inFlightFences !! currentFrame) (imageAvailableSemaphores !! currentFrame) (renderFinishedSemaphores !! currentFrame)
+            ioPutStrLn "Window event loop starting."
+            shouldRebuildSwapchain <- evalStateTWith 0 $ windowEventLoop window lastResizeTimeRef $ do
+              currentFrame <- get
+              put $ mod (currentFrame + 1) maxFramesInFlight
+              drawFrame' (inFlightFences !! currentFrame) (imageAvailableSemaphores !! currentFrame) (renderFinishedSemaphores !! currentFrame)
 
-        ioPutStrLn "Window event loop ended.  Waiting for device to idle."
-        liftIO $ vkDeviceWaitIdle device
+            ioPutStrLn "Window event loop ended.  Waiting for device to idle."
+            liftIO $ vkDeviceWaitIdle device
 
-        ioPutStrLn "Cleaning up swapchain-related objects."
-        return shouldRebuildSwapchain
+            ioPutStrLn "Cleaning up swapchain-related objects."
+            return shouldRebuildSwapchain
 
-      ioPutStrLn "Cleaning up the rest."
-
+          ioPutStrLn "Cleaning up the rest."
   `catch` (
     \(e :: VulkanException) ->
       putStrLn $ displayException e
@@ -686,14 +686,14 @@ main =
       set @"height" (getField @"height" swapchainExtent) &*
       set @"layers" 1
 
-    createVertexBuffer :: MonadIO io => VkDevice -> DataFrame Vertex '[XN 3] -> ResourceT io VkBuffer
-    createVertexBuffer device (XFrame vertices) =
+    createVertexBuffer :: MonadIO io => VkDevice -> VkDeviceSize -> ResourceT io VkBuffer
+    createVertexBuffer device size =
       allocateAcquire_ $
       newBuffer device $
       createVk $
       set @"sType" VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &*
       set @"pNext" VK_NULL &*
-      set @"size" (fromIntegral $ bSizeOf vertices) &*
+      set @"size" size &*
       set @"usage" VK_BUFFER_USAGE_VERTEX_BUFFER_BIT &*
       set @"sharingMode" VK_SHARING_MODE_EXCLUSIVE &*
       set @"pQueueFamilyIndices" VK_NULL
@@ -718,8 +718,8 @@ main =
       set @"allocationSize" size &*
       set @"memoryTypeIndex" memoryTypeIndex
 
-    fillVertexBufferMemory :: MonadUnliftIO io => VkDevice -> VkDeviceMemory -> DataFrame Vertex '[XN 3] -> io ()
-    fillVertexBufferMemory device vertexBufferMemory (XFrame vertices) =
+    fillVertexBufferMemory :: (MonadUnliftIO io, PrimBytes d, Storable d) => VkDevice -> VkDeviceMemory -> d -> io ()
+    fillVertexBufferMemory device vertexBufferMemory vertices =
       with (mappedMemory device vertexBufferMemory 0 (fromIntegral $ bSizeOf vertices)) $ \ptr ->
         liftIO $ poke (castPtr ptr) vertices
 
@@ -1288,6 +1288,7 @@ allocateAcquire_ a = snd <$> allocateAcquire a
 ioPutStrLn :: MonadIO io => String -> io ()
 ioPutStrLn = liftIO . putStrLn
 
+evalStateTWith :: Monad m => s -> StateT s m a -> m a
 evalStateTWith = flip evalStateT
 
 doWhileM :: Monad m => m Bool -> m ()
