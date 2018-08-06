@@ -162,28 +162,11 @@ main =
           commandPool <- createCommandPool device graphicsQfi
           ioPutStrLn "Command pool created."
 
-          vertexBuffer <- createVertexBuffer device (fromIntegral $ bSizeOf vertices)
-          ioPutStrLn "Vertex buffer created."
-
-          vertexBufferMemReqs <- getBufferMemoryRequirements device vertexBuffer
-          ioPutStrLn "Vertex buffer memory requirements obtained."
-
           physicalDeviceMemProperties <- getPhysicalDeviceMemoryProperties physicalDevice
           ioPutStrLn "Physical device memory properties obtained."
 
-          vertexBufferMemory <-
-            allocateVertexBufferMemory device (getField @"size" vertexBufferMemReqs) $
-            findMemoryType
-              physicalDeviceMemProperties
-              (getField @"memoryTypeBits" vertexBufferMemReqs)
-              (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-          ioPutStrLn "Vertex buffer memory allocated."
-
-          liftIO $ vkBindBufferMemory device vertexBuffer vertexBufferMemory 0
-          ioPutStrLn "Vertex buffer bound to allocated memory."
-
-          fillVertexBufferMemory device vertexBufferMemory vertices
-          ioPutStrLn "Vertex buffer memory filled with vertices."
+          (vertexBuffer, vertexBufferMemory) <- prepareVertexBuffer device commandPool graphicsQueue physicalDeviceMemProperties vertices
+          ioPutStrLn "Vertex buffer prepared."
 
           imageAvailableSemaphores <- replicateM maxFramesInFlight $ createSemaphore device
           ioPutStrLn "Image-available semaphores created."
@@ -231,7 +214,7 @@ main =
             swapchainFramebuffers <- createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews
             ioPutStrLn "Framebuffers created."
 
-            commandBuffers <- allocateCommandBuffers device commandPool swapchainFramebuffers
+            commandBuffers <- allocateCommandBuffers device commandPool (fromIntegral $ length swapchainFramebuffers)
             ioPutStrLn "Command buffers allocated."
 
             fillCommandBuffers renderPass graphicsPipeline swapchainExtent (zip commandBuffers swapchainFramebuffers) vertexBuffer (fromIntegral $ dimVal $ dim1 vertices)
@@ -686,20 +669,67 @@ main =
       set @"height" (getField @"height" swapchainExtent) &*
       set @"layers" 1
 
-    createVertexBuffer :: MonadIO io => VkDevice -> VkDeviceSize -> ResourceT io VkBuffer
-    createVertexBuffer device size =
-      allocateAcquire_ $
-      newBuffer device $
-      createVk $
-      set @"sType" VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &*
-      set @"pNext" VK_NULL &*
-      set @"size" size &*
-      set @"usage" VK_BUFFER_USAGE_VERTEX_BUFFER_BIT &*
-      set @"sharingMode" VK_SHARING_MODE_EXCLUSIVE &*
-      set @"pQueueFamilyIndices" VK_NULL
+    prepareVertexBuffer :: (MonadUnliftIO io, Storable vs, PrimBytes vs) => VkDevice -> VkCommandPool -> VkQueue -> VkPhysicalDeviceMemoryProperties -> vs -> ResourceT io (VkBuffer, VkDeviceMemory)
+    prepareVertexBuffer device commandPool copySubmissionQueue physDevMemProps vertices =
+      runResourceT $ do
+        (stagingBuffer, stagingBufferMemory) <-
+          createAllocatedBuffer
+            device
+            bufferSize
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+            VK_SHARING_MODE_EXCLUSIVE
+            (findMemoryType' $ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
 
-    findMemoryType :: VkPhysicalDeviceMemoryProperties -> Word32 -> VkMemoryPropertyFlags -> Word32
-    findMemoryType memProperties typeFilter propertyFlags =
+        with (mappedMemory device stagingBufferMemory 0 bufferSize) $ \ptr ->
+          liftIO $ poke (castPtr ptr) vertices
+
+        (vertexBuffer, vertexBufferMemory) <-
+          lift $
+          createAllocatedBuffer
+            device
+            bufferSize
+            (VK_BUFFER_USAGE_TRANSFER_DST_BIT .|. VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+            VK_SHARING_MODE_EXCLUSIVE
+            (findMemoryType' VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+
+        copyBuffer device commandPool copySubmissionQueue stagingBuffer vertexBuffer bufferSize
+
+        return (vertexBuffer, vertexBufferMemory)
+
+      where
+        bufferSize = fromIntegral $ bSizeOf vertices
+        findMemoryType' = findMemoryType physDevMemProps
+
+    createAllocatedBuffer :: MonadIO io => VkDevice -> VkDeviceSize -> VkBufferUsageFlags -> VkSharingMode -> (Word32 -> Word32) -> ResourceT io (VkBuffer, VkDeviceMemory)
+    createAllocatedBuffer device size usageFlags sharingMode memoryTypeIndexFromMemoryTypeBits = do
+      buffer <-
+        allocateAcquire_ $
+        newBuffer device $
+        createVk $
+        set @"sType" VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &*
+        set @"pNext" VK_NULL &*
+        set @"size" size &*
+        set @"usage" usageFlags &*
+        set @"sharingMode" sharingMode &*
+        set @"pQueueFamilyIndices" VK_NULL
+
+      memReqs <- getBufferMemoryRequirements device buffer
+
+      bufferMemory <-
+        allocateAcquire_ $
+        allocatedMemory device $
+        createVk $
+        set @"sType" VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &*
+        set @"pNext" VK_NULL &*
+        set @"allocationSize" (getField @"size" memReqs) &*
+        set @"memoryTypeIndex" (memoryTypeIndexFromMemoryTypeBits $ getField @"memoryTypeBits" memReqs)
+
+      liftIO $ vkBindBufferMemory device buffer bufferMemory 0
+
+      return (buffer, bufferMemory)
+
+    findMemoryType :: VkPhysicalDeviceMemoryProperties -> VkMemoryPropertyFlags -> Word32 -> Word32
+    findMemoryType memProperties propertyFlags typeFilter =
       fromMaybe (throwAppEx "Failed to find a suitable memory type.") $
       listToMaybe $
       filter (isMatch . fromIntegral) $
@@ -708,23 +738,46 @@ main =
         memoryTypes = getVec @"memoryTypes" memProperties
         isMatch i = testBit typeFilter i && propertyFlags == (propertyFlags .&. getField @"propertyFlags" (ixOff i memoryTypes))
 
-    allocateVertexBufferMemory :: MonadIO io => VkDevice -> VkDeviceSize -> Word32 -> ResourceT io VkDeviceMemory
-    allocateVertexBufferMemory device size memoryTypeIndex =
-      allocateAcquire_ $
-      allocatedMemory device $
-      createVk $
-      set @"sType" VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &*
-      set @"pNext" VK_NULL &*
-      set @"allocationSize" size &*
-      set @"memoryTypeIndex" memoryTypeIndex
+    copyBuffer :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkBuffer -> VkBuffer -> VkDeviceSize -> io ()
+    copyBuffer device commandPool submissionQueue srcBuffer dstBuffer bufferSize =
+      runResourceT $ do
+        [commandBuffer] <- allocateCommandBuffers device commandPool 1
 
-    fillVertexBufferMemory :: (MonadUnliftIO io, PrimBytes d, Storable d) => VkDevice -> VkDeviceMemory -> d -> io ()
-    fillVertexBufferMemory device vertexBufferMemory vertices =
-      with (mappedMemory device vertexBufferMemory 0 (fromIntegral $ bSizeOf vertices)) $ \ptr ->
-        liftIO $ poke (castPtr ptr) vertices
+        with_ (recordingCommandBuffer commandBuffer commandBufferBeginInfo) $
+          cmdCopyBuffer commandBuffer srcBuffer dstBuffer [copyRegion]
 
-    allocateCommandBuffers :: MonadIO io => VkDevice -> VkCommandPool -> [VkFramebuffer] -> ResourceT io [VkCommandBuffer]
-    allocateCommandBuffers device commandPool framebuffers =
+        let
+          submitInfo =
+            createVk $
+            set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
+            set @"pNext" VK_NULL &*
+            set @"waitSemaphoreCount" 0 &*
+            set @"pWaitSemaphores" VK_NULL &*
+            set @"pWaitDstStageMask" VK_NULL &*
+            set @"commandBufferCount" 1 &*
+            setListRef @"pCommandBuffers" [commandBuffer] &*
+            set @"signalSemaphoreCount" 0 &*
+            set @"pSignalSemaphores" VK_NULL
+
+        queueSubmit submissionQueue [submitInfo] VK_NULL_HANDLE
+        liftIO $ vkQueueWaitIdle submissionQueue & onVkFailureThrow "vkQueueWaitIdle failed."
+      
+      where
+        commandBufferBeginInfo =
+          createVk $
+          set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO &*
+          set @"pNext" VK_NULL &*
+          set @"flags" VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT &*
+          set @"pInheritanceInfo" VK_NULL
+
+        copyRegion =
+          createVk @VkBufferCopy $
+          set @"size" bufferSize &*
+          set @"srcOffset" 0 &*
+          set @"dstOffset" 0
+
+    allocateCommandBuffers :: MonadIO io => VkDevice -> VkCommandPool -> Word32 -> ResourceT io [VkCommandBuffer]
+    allocateCommandBuffers device commandPool count =
       allocateAcquire_ $
       allocatedCommandBuffers device $
       createVk $
@@ -732,18 +785,17 @@ main =
       set @"pNext" VK_NULL &*
       set @"commandPool" commandPool &*
       set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
-      set @"commandBufferCount" (fromIntegral $ length framebuffers)
+      set @"commandBufferCount" count
 
-    fillCommandBuffers :: MonadIO io => VkRenderPass -> VkPipeline -> VkExtent2D -> [(VkCommandBuffer, VkFramebuffer)] -> VkBuffer -> Word32 -> io ()
+    fillCommandBuffers :: MonadUnliftIO io => VkRenderPass -> VkPipeline -> VkExtent2D -> [(VkCommandBuffer, VkFramebuffer)] -> VkBuffer -> Word32 -> io ()
     fillCommandBuffers renderPass graphicsPipeline swapchainExtent commandBuffersWithFramebuffers vertexBuffer vertexCount =
-      forM_ commandBuffersWithFramebuffers $ \(commandBuffer, swapchainFramebuffer) -> do
-        beginCommandBuffer commandBuffer commandBufferBeginInfo
-        cmdBeginRenderPass commandBuffer (renderPassBeginInfo swapchainFramebuffer) VK_SUBPASS_CONTENTS_INLINE
-        liftIO $ vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
-        cmdBindVertexBuffers commandBuffer 0 [(vertexBuffer, 0)]
-        liftIO $ vkCmdDraw commandBuffer vertexCount 1 0 0
-        liftIO $ vkCmdEndRenderPass commandBuffer
-        endCommandBuffer commandBuffer
+      forM_ commandBuffersWithFramebuffers $ \(commandBuffer, swapchainFramebuffer) ->
+        with_ (recordingCommandBuffer commandBuffer commandBufferBeginInfo) $ do
+          cmdBeginRenderPass commandBuffer (renderPassBeginInfo swapchainFramebuffer) VK_SUBPASS_CONTENTS_INLINE
+          liftIO $ vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
+          cmdBindVertexBuffers commandBuffer 0 [(vertexBuffer, 0)]
+          liftIO $ vkCmdDraw commandBuffer vertexCount 1 0 0
+          liftIO $ vkCmdEndRenderPass commandBuffer
 
       where
         commandBufferBeginInfo =
@@ -1076,16 +1128,18 @@ allocatedCommandBuffers device allocateInfo =
     commandBufferCount = fromIntegral $ getField @"commandBufferCount" allocateInfo
     commandPool = getField @"commandPool" allocateInfo
 
-beginCommandBuffer :: MonadIO io => VkCommandBuffer -> VkCommandBufferBeginInfo -> io ()
-beginCommandBuffer commandBuffer beginInfo =
-  liftIO $ withPtr beginInfo $ \beginInfoPtr ->
-    vkBeginCommandBuffer commandBuffer beginInfoPtr &
-      onVkFailureThrow "vkBeginCommandBuffer failed."
-
-endCommandBuffer :: MonadIO io => VkCommandBuffer -> io ()
-endCommandBuffer commandBuffer =
-  liftIO $ vkEndCommandBuffer commandBuffer &
-    onVkFailureThrow "vkEndCommandBuffer failed."
+recordingCommandBuffer :: VkCommandBuffer -> VkCommandBufferBeginInfo -> Acquire ()
+recordingCommandBuffer commandBuffer beginInfo =
+  (
+    withPtr beginInfo $ \beginInfoPtr ->
+      vkBeginCommandBuffer commandBuffer beginInfoPtr &
+        onVkFailureThrow "vkBeginCommandBuffer failed."
+  )
+  `mkAcquire`
+  const (
+    vkEndCommandBuffer commandBuffer &
+      onVkFailureThrow "vkEndCommandBuffer failed."
+  )
 
 cmdBeginRenderPass :: MonadIO io => VkCommandBuffer -> VkRenderPassBeginInfo -> VkSubpassContents -> io ()
 cmdBeginRenderPass commandBuffer beginInfo subpassContents =
@@ -1098,6 +1152,12 @@ cmdBindVertexBuffers commandBuffer firstBinding bindings =
   withArray (fst <$> bindings) $ \buffersPtr ->
   withArray (snd <$> bindings) $ \offsetsPtr ->
     vkCmdBindVertexBuffers commandBuffer firstBinding (fromIntegral $ length bindings) buffersPtr offsetsPtr
+
+cmdCopyBuffer :: MonadIO io => VkCommandBuffer -> VkBuffer -> VkBuffer -> [VkBufferCopy] -> io ()
+cmdCopyBuffer commandBuffer srcBuffer dstBuffer copyRegions =
+  liftIO $
+  withArray copyRegions $ \copyRegionsPtr ->
+    vkCmdCopyBuffer commandBuffer srcBuffer dstBuffer (fromIntegral $ length copyRegions) copyRegionsPtr
 
 queueSubmit :: MonadIO io => VkQueue -> [VkSubmitInfo] -> VkFence -> io ()
 queueSubmit queue submitInfos fence =
