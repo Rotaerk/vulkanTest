@@ -87,6 +87,23 @@ validationLayers =
 maxFramesInFlight :: Int
 maxFramesInFlight = 2
 
+xVertices :: DataFrame Vertex '[XN 3]
+xVertices =
+  fromJust $
+  fromList (D @3) $ scalar <$> [
+    Vertex (vec2 (-0.5) (-0.5)) (vec3 1 0 0),
+    Vertex (vec2 0.5 (-0.5)) (vec3 0 1 0),
+    Vertex (vec2 0.5 0.5) (vec3 0 0 1),
+    Vertex (vec2 (-0.5) 0.5) (vec3 1 1 1)
+  ]
+
+xIndices :: DataFrame Word16 '[XN 3]
+xIndices =
+  fromJust $
+  fromList (D @3) [
+    0, 1, 2, 2, 3, 0
+  ]
+
 main :: IO ()
 main =
   do
@@ -100,14 +117,8 @@ main =
     let shadersPath = claShadersPath arguments
     putStrLn $ "Shaders path is: '" ++ shadersPath ++ "'."
 
-    case
-      fromList (D @3) $ scalar <$> [
-        Vertex (vec2 0 (-0.5)) (vec3 1 1 1),
-        Vertex (vec2 0.5 0.5) (vec3 0 1 0),
-        Vertex (vec2 (-0.5) 0.5) (vec3 0 0 1)
-      ]
-      of
-      Just (XFrame vertices) ->
+    case (xVertices, xIndices) of
+      (XFrame vertices, XFrame indices) ->
         runResourceT $ do
           -- Before initializing, probably should setErrorCallback
           initializeGLFW
@@ -165,8 +176,11 @@ main =
           physicalDeviceMemProperties <- getPhysicalDeviceMemoryProperties physicalDevice
           ioPutStrLn "Physical device memory properties obtained."
 
-          (vertexBuffer, vertexBufferMemory) <- prepareVertexBuffer device commandPool graphicsQueue physicalDeviceMemProperties vertices
+          (vertexBuffer, vertexBufferMemory) <- prepareBuffer device commandPool graphicsQueue physicalDeviceMemProperties vertices VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
           ioPutStrLn "Vertex buffer prepared."
+
+          (indexBuffer, indexBufferMemory) <- prepareBuffer device commandPool graphicsQueue physicalDeviceMemProperties indices VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+          ioPutStrLn "Index buffer prepared."
 
           imageAvailableSemaphores <- replicateM maxFramesInFlight $ createSemaphore device
           ioPutStrLn "Image-available semaphores created."
@@ -217,7 +231,7 @@ main =
             commandBuffers <- allocateCommandBuffers device commandPool (fromIntegral $ length swapchainFramebuffers)
             ioPutStrLn "Command buffers allocated."
 
-            fillCommandBuffers renderPass graphicsPipeline swapchainExtent (zip commandBuffers swapchainFramebuffers) vertexBuffer (fromIntegral $ dimVal $ dim1 vertices)
+            fillCommandBuffers renderPass graphicsPipeline swapchainExtent (zip commandBuffers swapchainFramebuffers) vertexBuffer indexBuffer (fromIntegral $ dimVal $ dim1 indices)
             ioPutStrLn "Command buffers filled."
 
             let drawFrame' = drawFrame device swapchain graphicsQueue presentQueue commandBuffers
@@ -669,8 +683,16 @@ main =
       set @"height" (getField @"height" swapchainExtent) &*
       set @"layers" 1
 
-    prepareVertexBuffer :: (MonadUnliftIO io, Storable vs, PrimBytes vs) => VkDevice -> VkCommandPool -> VkQueue -> VkPhysicalDeviceMemoryProperties -> vs -> ResourceT io (VkBuffer, VkDeviceMemory)
-    prepareVertexBuffer device commandPool copySubmissionQueue physDevMemProps vertices =
+    prepareBuffer ::
+      (MonadUnliftIO io, Storable vs, PrimBytes vs) =>
+      VkDevice ->
+      VkCommandPool ->
+      VkQueue ->
+      VkPhysicalDeviceMemoryProperties ->
+      vs ->
+      VkBufferUsageFlags ->
+      ResourceT io (VkBuffer, VkDeviceMemory)
+    prepareBuffer device commandPool copySubmissionQueue physDevMemProps vertices usageFlags =
       runResourceT $ do
         (stagingBuffer, stagingBufferMemory) <-
           createAllocatedBuffer
@@ -688,7 +710,7 @@ main =
           createAllocatedBuffer
             device
             bufferSize
-            (VK_BUFFER_USAGE_TRANSFER_DST_BIT .|. VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+            (VK_BUFFER_USAGE_TRANSFER_DST_BIT .|. usageFlags)
             VK_SHARING_MODE_EXCLUSIVE
             (findMemoryType' VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 
@@ -787,14 +809,15 @@ main =
       set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
       set @"commandBufferCount" count
 
-    fillCommandBuffers :: MonadUnliftIO io => VkRenderPass -> VkPipeline -> VkExtent2D -> [(VkCommandBuffer, VkFramebuffer)] -> VkBuffer -> Word32 -> io ()
-    fillCommandBuffers renderPass graphicsPipeline swapchainExtent commandBuffersWithFramebuffers vertexBuffer vertexCount =
+    fillCommandBuffers :: MonadUnliftIO io => VkRenderPass -> VkPipeline -> VkExtent2D -> [(VkCommandBuffer, VkFramebuffer)] -> VkBuffer -> VkBuffer -> Word32 -> io ()
+    fillCommandBuffers renderPass graphicsPipeline swapchainExtent commandBuffersWithFramebuffers vertexBuffer indexBuffer indexCount =
       forM_ commandBuffersWithFramebuffers $ \(commandBuffer, swapchainFramebuffer) ->
         with_ (recordingCommandBuffer commandBuffer commandBufferBeginInfo) $ do
           cmdBeginRenderPass commandBuffer (renderPassBeginInfo swapchainFramebuffer) VK_SUBPASS_CONTENTS_INLINE
           liftIO $ vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
           cmdBindVertexBuffers commandBuffer 0 [(vertexBuffer, 0)]
-          liftIO $ vkCmdDraw commandBuffer vertexCount 1 0 0
+          liftIO $ vkCmdBindIndexBuffer commandBuffer indexBuffer 0 VK_INDEX_TYPE_UINT16
+          liftIO $ vkCmdDrawIndexed commandBuffer indexCount 1 0 0 0
           liftIO $ vkCmdEndRenderPass commandBuffer
 
       where
