@@ -167,7 +167,10 @@ main =
           presentQueue <- getDeviceQueue device presentQfi 0
           ioPutStrLn "Present queue obtained."
 
-          pipelineLayout <- createPipelineLayout device
+          descriptorSetLayout <- createDescriptorSetLayout device
+          ioPutStrLn "Descriptor set layout created."
+
+          pipelineLayout <- createPipelineLayout device descriptorSetLayout
           ioPutStrLn "Pipeline layout created."
 
           commandPool <- createCommandPool device graphicsQfi
@@ -190,6 +193,8 @@ main =
 
           inFlightFences <- replicateM maxFramesInFlight $ createFence device
           ioPutStrLn "In-flight fences created."
+
+          renderStartTimeRef <- liftIO $ newIORef Nothing
 
           doWhileM $ runResourceT $ do
             (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
@@ -219,6 +224,9 @@ main =
             swapchainImageViews <- createSwapchainImageViews device swapchainImageFormat swapchainImages
             ioPutStrLn "Swapchain image views created."
 
+            uniformBuffersWithMemory <- forM swapchainImages . const $ createUniformBuffer device physicalDeviceMemProperties
+            ioPutStrLn "Uniform buffers created and allocated."
+
             renderPass <- createRenderPass device swapchainImageFormat
             ioPutStrLn "Render pass created."
 
@@ -234,7 +242,17 @@ main =
             fillCommandBuffers renderPass graphicsPipeline swapchainExtent (zip commandBuffers swapchainFramebuffers) vertexBuffer indexBuffer (fromIntegral $ dimVal $ dim1 indices)
             ioPutStrLn "Command buffers filled."
 
-            let drawFrame' = drawFrame device swapchain graphicsQueue presentQueue commandBuffers
+            renderStartTime <-
+              liftIO $ readIORef renderStartTimeRef >>= \case
+                Just t -> return t
+                Nothing -> do
+                  time <- getTime Monotonic
+                  writeIORef renderStartTimeRef $ Just time
+                  return time
+
+            let
+              aspectRatio = fromIntegral (getField @"width" swapchainExtent) / fromIntegral (getField @"height" swapchainExtent)
+              drawFrame' = drawFrame device swapchain graphicsQueue presentQueue commandBuffers (snd <$> uniformBuffersWithMemory) aspectRatio renderStartTime
 
             ioPutStrLn "Window event loop starting."
             shouldRebuildSwapchain <- evalStateTWith 0 $ windowEventLoop window lastResizeTimeRef $ do
@@ -354,15 +372,15 @@ main =
         createVk $ handleRemFields @_ @'[]
       )
 
-    createPipelineLayout :: MonadIO io => VkDevice -> ResourceT io VkPipelineLayout
-    createPipelineLayout device =
+    createPipelineLayout :: MonadIO io => VkDevice -> VkDescriptorSetLayout -> ResourceT io VkPipelineLayout
+    createPipelineLayout device descriptorSetLayout =
       allocateAcquire_ $
       newPipelineLayout device $
       createVk $
       set @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &*
       set @"pNext" VK_NULL &*
-      set @"setLayoutCount" 0 &*
-      set @"pSetLayouts" VK_NULL &*
+      set @"setLayoutCount" 1 &*
+      setListRef @"pSetLayouts" [descriptorSetLayout] &*
       set @"pushConstantRangeCount" 0 &*
       set @"pPushConstantRanges" VK_NULL
 
@@ -536,6 +554,24 @@ main =
         )
       ]
 
+    createDescriptorSetLayout :: MonadUnliftIO io => VkDevice -> ResourceT io VkDescriptorSetLayout
+    createDescriptorSetLayout device =
+      allocateAcquire_ $
+      newDescriptorSetLayout device $
+      createVk $
+      set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"bindingCount" 1 &*
+      setListRef @"pBindings" [
+        createVk (
+          set @"binding" 0 &*
+          set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+          set @"descriptorCount" 1 &*
+          set @"stageFlags" VK_SHADER_STAGE_VERTEX_BIT &*
+          set @"pImmutableSamplers" VK_NULL
+        )
+      ]
+
     createGraphicsPipeline :: MonadUnliftIO io => VkDevice -> FilePath -> VkPipelineLayout -> VkRenderPass -> VkExtent2D -> ResourceT io VkPipeline
     createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent = runResourceT $ do
       vertShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
@@ -702,8 +738,8 @@ main =
             VK_SHARING_MODE_EXCLUSIVE
             (findMemoryType' $ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
 
-        with (mappedMemory device stagingBufferMemory 0 bufferSize) $ \ptr ->
-          liftIO $ poke (castPtr ptr) vertices
+        liftIO $ with (mappedMemory device stagingBufferMemory 0 bufferSize) $ \ptr ->
+          poke (castPtr ptr) vertices
 
         (vertexBuffer, vertexBufferMemory) <-
           lift $
@@ -720,6 +756,18 @@ main =
 
       where
         bufferSize = fromIntegral $ bSizeOf vertices
+        findMemoryType' = findMemoryType physDevMemProps
+
+    createUniformBuffer :: MonadIO io => VkDevice -> VkPhysicalDeviceMemoryProperties -> ResourceT io (VkBuffer, VkDeviceMemory)
+    createUniformBuffer device physDevMemProps =
+      createAllocatedBuffer
+        device
+        bufferSize
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+        VK_SHARING_MODE_EXCLUSIVE
+        (findMemoryType' $ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+      where
+        bufferSize = fromIntegral $ bSizeOf @UniformBufferObject undefined
         findMemoryType' = findMemoryType physDevMemProps
 
     createAllocatedBuffer :: MonadIO io => VkDevice -> VkDeviceSize -> VkBufferUsageFlags -> VkSharingMode -> (Word32 -> Word32) -> ResourceT io (VkBuffer, VkDeviceMemory)
@@ -846,8 +894,25 @@ main =
             )
           ]
 
-    drawFrame :: MonadIO io => VkDevice -> VkSwapchainKHR -> VkQueue -> VkQueue -> [VkCommandBuffer] -> VkFence -> VkSemaphore -> VkSemaphore -> io Bool
-    drawFrame device swapchain graphicsQueue presentQueue commandBuffers inFlightFence imageAvailableSemaphore renderFinishedSemaphore = do
+    updateUniformBufferMemory :: MonadIO io => VkDevice -> VkDeviceMemory -> Double -> TimeSpec -> io ()
+    updateUniformBufferMemory device uniformBufferMemory aspectRatio timeOffset = do
+      let
+        secondsOffset = (0.000000001 *) . fromInteger . toNanoSecs $ timeOffset
+        ubo =
+          UniformBufferObject {
+            uboModel = rotateZ (0.5 * secondsOffset * pi),
+            uboView = lookAt (vec3 0 0 1) (vec3 2 2 2) (vec3 0 0 0),
+            uboProj = perspective 0.1 10 (pi / 4) aspectRatio
+          }
+
+      liftIO $ with (mappedMemory device uniformBufferMemory 0 bufferSize) $ \ptr ->
+        poke (castPtr ptr) (scalar ubo)
+
+      where
+        bufferSize = fromIntegral $ bSizeOf @UniformBufferObject undefined
+
+    drawFrame :: MonadIO io => VkDevice -> VkSwapchainKHR -> VkQueue -> VkQueue -> [VkCommandBuffer] -> [VkDeviceMemory] -> Double -> TimeSpec -> VkFence -> VkSemaphore -> VkSemaphore -> io Bool
+    drawFrame device swapchain graphicsQueue presentQueue commandBuffers uniformBufferMemories aspectRatio renderStartTime inFlightFence imageAvailableSemaphore renderFinishedSemaphore = do
       waitForFences device [inFlightFence] VK_TRUE maxBound
       resetFences device [inFlightFence]
 
@@ -857,6 +922,9 @@ main =
         VK_ERROR_OUT_OF_DATE_KHR -> return True
         r | r `notElem` [VK_SUCCESS, VK_SUBOPTIMAL_KHR] -> liftIO $ throwIO $ VulkanException r "vkAcquireNextImageKHR failed."
         _ -> do
+          currentTime <- liftIO $ getTime Monotonic
+          updateUniformBufferMemory device (uniformBufferMemories !! fromIntegral nextImageIndex) aspectRatio (currentTime - renderStartTime)
+
           queueSubmit
             graphicsQueue
             [
@@ -919,6 +987,15 @@ vertexAttributeDescriptionsAt binding =
     set @"format" VK_FORMAT_R32G32B32_SFLOAT &*
     set @"offset" (fromIntegral $ sizeOf @Vec2f undefined)
   ]
+
+data UniformBufferObject =
+  UniformBufferObject {
+    uboModel :: Mat44d,
+    uboView :: Mat44d,
+    uboProj :: Mat44d
+  } deriving (Eq, Show, Generic)
+
+instance PrimBytes UniformBufferObject
 
 registerDebugCallback :: MonadUnliftIO io => VkInstance -> ResourceT io ()
 registerDebugCallback vulkanInstance = do
@@ -1074,6 +1151,9 @@ newRenderPass = newDeviceVk "vkCreateRenderPass" vkCreateRenderPass vkDestroyRen
 
 newPipelineLayout :: VkDevice -> VkPipelineLayoutCreateInfo -> Acquire VkPipelineLayout
 newPipelineLayout = newDeviceVk "vkCreatePipelineLayout" vkCreatePipelineLayout vkDestroyPipelineLayout
+
+newDescriptorSetLayout :: VkDevice -> VkDescriptorSetLayoutCreateInfo -> Acquire VkDescriptorSetLayout
+newDescriptorSetLayout = newDeviceVk "vkCreateDescriptorSetLayout" vkCreateDescriptorSetLayout vkDestroyDescriptorSetLayout
 
 -- Problem: It seems less than ideal to force all the pipelines to be destroyed together.
 -- This can be fixed by making a ResIO [(ReleaseKey, VkPipeline)].

@@ -29,8 +29,8 @@ let
           configureFlags = [ "-fuseNativeFFI-1-0" ];
         });
 
-        dimensions = relSourceOverrides.easytensor "dimensions" "1.0.1.0" super.dimensions;
-        easytensor = relSourceOverrides.easytensor "easytensor" "1.0.0.1" super.easytensor;
+        dimensions = relSourceOverrides.easytensor-fork "dimensions" "1.0.1.0" super.dimensions;
+        easytensor = relSourceOverrides.easytensor-fork "easytensor" "1.0.0.1" super.easytensor;
 
         bindings-GLFW = sourceOverrides.bindings-GLFW "3.2.1.0" super.bindings-GLFW;
 
