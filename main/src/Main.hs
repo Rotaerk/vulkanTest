@@ -213,9 +213,10 @@ main =
               swapchainImageFormat = getField @"format" swapchainSurfaceFormat
               swapchainSurfacePresentMode = chooseSwapchainSurfacePresentMode surfacePresentModes
               swapchainExtent = chooseSwapchainSurfaceExtent surfaceCapabilities (fromIntegral windowFramebufferWidth) (fromIntegral windowFramebufferHeight)
-              swapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
+              idealSwapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
+              aspectRatio = fromIntegral (getField @"width" swapchainExtent) / fromIntegral (getField @"height" swapchainExtent)
 
-            swapchain <- createSwapchain device surface surfaceCapabilities swapchainSurfaceFormat swapchainSurfacePresentMode swapchainExtent swapchainImageCount distinctQfis
+            swapchain <- createSwapchain device surface surfaceCapabilities swapchainSurfaceFormat swapchainSurfacePresentMode swapchainExtent idealSwapchainImageCount distinctQfis
             ioPutStrLn "Swapchain created."
 
             swapchainImages <- listSwapchainImages device swapchain
@@ -224,8 +225,23 @@ main =
             swapchainImageViews <- createSwapchainImageViews device swapchainImageFormat swapchainImages
             ioPutStrLn "Swapchain image views created."
 
-            uniformBuffersWithMemory <- forM swapchainImages . const $ createUniformBuffer device physicalDeviceMemProperties
+            let swapchainImageCount = length swapchainImages
+
+            uniformBuffersWithMemories <- replicateM swapchainImageCount $ createUniformBuffer device physicalDeviceMemProperties
             ioPutStrLn "Uniform buffers created and allocated."
+
+            let
+              uniformBuffers = fst <$> uniformBuffersWithMemories
+              uniformBufferMemories = snd <$> uniformBuffersWithMemories
+
+            descriptorPool <- createDescriptorPool device (fromIntegral swapchainImageCount)
+            ioPutStrLn "Descriptor pool created."
+
+            descriptorSets <- allocateDescriptorSets device descriptorPool False (replicate swapchainImageCount descriptorSetLayout)
+            ioPutStrLn "Descriptor sets allocated."
+
+            writeDescriptorSets device $ zip uniformBuffers descriptorSets
+            ioPutStrLn "Descriptor sets written to."
 
             renderPass <- createRenderPass device swapchainImageFormat
             ioPutStrLn "Render pass created."
@@ -236,10 +252,10 @@ main =
             swapchainFramebuffers <- createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews
             ioPutStrLn "Framebuffers created."
 
-            commandBuffers <- allocateCommandBuffers device commandPool (fromIntegral $ length swapchainFramebuffers)
+            commandBuffers <- allocateCommandBuffers device commandPool (lengthNum swapchainFramebuffers)
             ioPutStrLn "Command buffers allocated."
 
-            fillCommandBuffers renderPass graphicsPipeline swapchainExtent (zip commandBuffers swapchainFramebuffers) vertexBuffer indexBuffer (fromIntegral $ dimVal $ dim1 indices)
+            fillCommandBuffers renderPass graphicsPipeline pipelineLayout swapchainExtent vertexBuffer indexBuffer (fromIntegral $ dimVal $ dim1 indices) (zip3 commandBuffers swapchainFramebuffers descriptorSets)
             ioPutStrLn "Command buffers filled."
 
             renderStartTime <-
@@ -250,9 +266,7 @@ main =
                   writeIORef renderStartTimeRef $ Just time
                   return time
 
-            let
-              aspectRatio = fromIntegral (getField @"width" swapchainExtent) / fromIntegral (getField @"height" swapchainExtent)
-              drawFrame' = drawFrame device swapchain graphicsQueue presentQueue commandBuffers (snd <$> uniformBuffersWithMemory) aspectRatio renderStartTime
+            let drawFrame' = drawFrame device swapchain graphicsQueue presentQueue commandBuffers uniformBufferMemories aspectRatio renderStartTime
 
             ioPutStrLn "Window event loop starting."
             shouldRebuildSwapchain <- evalStateTWith 0 $ windowEventLoop window lastResizeTimeRef $ do
@@ -299,9 +313,9 @@ main =
         set @"apiVersion" VK_API_VERSION_1_0 &*
         set @"pNext" VK_NULL
       ) &*
-      set @"enabledExtensionCount" (fromIntegral $ length extensions) &*
+      set @"enabledExtensionCount" (lengthNum extensions) &*
       setListRef @"ppEnabledExtensionNames" extensions &*
-      set @"enabledLayerCount" (fromIntegral $ length validationLayers) &*
+      set @"enabledLayerCount" (lengthNum validationLayers) &*
       setStrListRef @"ppEnabledLayerNames" validationLayers
 
     createSurface :: MonadIO io => VkInstance -> GLFW.Window -> ResourceT io VkSurfaceKHR
@@ -353,7 +367,7 @@ main =
       set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
       set @"pNext" VK_NULL &*
       set @"flags" 0 &*
-      set @"queueCreateInfoCount" (fromIntegral $ length qfis) &*
+      set @"queueCreateInfoCount" (lengthNum qfis) &*
       setListRef @"pQueueCreateInfos" (
         qfis <&> \qfi ->
           createVk $
@@ -366,7 +380,7 @@ main =
       ) &*
       set @"enabledLayerCount" 0 &*
       set @"ppEnabledLayerNames" VK_NULL &*
-      set @"enabledExtensionCount" (fromIntegral $ length deviceExtensions) &*
+      set @"enabledExtensionCount" (lengthNum deviceExtensions) &*
       setListRef @"ppEnabledExtensionNames" deviceExtensions &*
       setVkRef @"pEnabledFeatures" (
         createVk $ handleRemFields @_ @'[]
@@ -554,7 +568,7 @@ main =
         )
       ]
 
-    createDescriptorSetLayout :: MonadUnliftIO io => VkDevice -> ResourceT io VkDescriptorSetLayout
+    createDescriptorSetLayout :: MonadIO io => VkDevice -> ResourceT io VkDescriptorSetLayout
     createDescriptorSetLayout device =
       allocateAcquire_ $
       newDescriptorSetLayout device $
@@ -571,6 +585,55 @@ main =
           set @"pImmutableSamplers" VK_NULL
         )
       ]
+
+    createDescriptorPool :: MonadIO io => VkDevice -> Word32 -> ResourceT io VkDescriptorPool
+    createDescriptorPool device descriptorCount =
+      allocateAcquire_ $
+      newDescriptorPool device $
+      createVk $
+      set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"poolSizeCount" 1 &*
+      setListRef @"pPoolSizes" [
+        createVk (
+          set @"type" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+          set @"descriptorCount" descriptorCount
+        )
+      ] &*
+      set @"maxSets" descriptorCount
+
+    allocateDescriptorSets :: MonadIO io => VkDevice -> VkDescriptorPool -> Bool -> [VkDescriptorSetLayout] -> ResourceT io [VkDescriptorSet]
+    allocateDescriptorSets device descriptorPool canFree layouts =
+      allocateAcquire_ $
+      allocatedDescriptorSets device canFree $
+      createVk $
+      set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"descriptorPool" descriptorPool &*
+      set @"descriptorSetCount" (lengthNum layouts) &*
+      setListRef @"pSetLayouts" layouts
+
+    writeDescriptorSets :: MonadIO io => VkDevice -> [(VkBuffer, VkDescriptorSet)] -> io ()
+    writeDescriptorSets device ubdss = updateDescriptorSets device writes []
+      where
+        writes =
+          ffor ubdss $ \(uniformBuffer, descriptorSet) ->
+            createVk @VkWriteDescriptorSet $
+            set @"sType" VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET &*
+            set @"pNext" VK_NULL &*
+            set @"dstSet" descriptorSet &*
+            set @"dstBinding" 0 &*
+            set @"dstArrayElement" 0 &*
+            set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+            set @"descriptorCount" 1 &*
+            setListRef @"pBufferInfo" [
+              createVk $
+              set @"buffer" uniformBuffer &*
+              set @"offset" 0 &*
+              set @"range" (fromIntegral $ bSizeOf @UniformBufferObject undefined)
+            ] &*
+            set @"pImageInfo" VK_NULL &*
+            set @"pTexelBufferView" VK_NULL
 
     createGraphicsPipeline :: MonadUnliftIO io => VkDevice -> FilePath -> VkPipelineLayout -> VkRenderPass -> VkExtent2D -> ResourceT io VkPipeline
     createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent = runResourceT $ do
@@ -602,7 +665,7 @@ main =
         createVk $
         set @"sType" VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO &*
         set @"pNext" VK_NULL &*
-        set @"stageCount" (fromIntegral $ length $ shaderStageCreateInfos) &*
+        set @"stageCount" (lengthNum shaderStageCreateInfos) &*
         setListRef @"pStages" shaderStageCreateInfos &*
         setVkRef @"pVertexInputState" (
           let
@@ -613,7 +676,7 @@ main =
             set @"pNext" VK_NULL &*
             set @"vertexBindingDescriptionCount" 1 &*
             setVkRef @"pVertexBindingDescriptions" (vertexBindingDescriptionAt 0 VK_VERTEX_INPUT_RATE_VERTEX) &*
-            set @"vertexAttributeDescriptionCount" (fromIntegral $ length vertexAttributeDescriptions) &*
+            set @"vertexAttributeDescriptionCount" (lengthNum vertexAttributeDescriptions) &*
             setListRef @"pVertexAttributeDescriptions" vertexAttributeDescriptions
         ) &*
         setVkRef @"pInputAssemblyState" (
@@ -857,14 +920,15 @@ main =
       set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
       set @"commandBufferCount" count
 
-    fillCommandBuffers :: MonadUnliftIO io => VkRenderPass -> VkPipeline -> VkExtent2D -> [(VkCommandBuffer, VkFramebuffer)] -> VkBuffer -> VkBuffer -> Word32 -> io ()
-    fillCommandBuffers renderPass graphicsPipeline swapchainExtent commandBuffersWithFramebuffers vertexBuffer indexBuffer indexCount =
-      forM_ commandBuffersWithFramebuffers $ \(commandBuffer, swapchainFramebuffer) ->
+    fillCommandBuffers :: MonadUnliftIO io => VkRenderPass -> VkPipeline -> VkPipelineLayout -> VkExtent2D -> VkBuffer -> VkBuffer -> Word32 -> [(VkCommandBuffer, VkFramebuffer, VkDescriptorSet)] -> io ()
+    fillCommandBuffers renderPass graphicsPipeline pipelineLayout swapchainExtent vertexBuffer indexBuffer indexCount commandBuffersWithInfo =
+      forM_ commandBuffersWithInfo $ \(commandBuffer, swapchainFramebuffer, descriptorSet) ->
         with_ (recordingCommandBuffer commandBuffer commandBufferBeginInfo) $ do
           cmdBeginRenderPass commandBuffer (renderPassBeginInfo swapchainFramebuffer) VK_SUBPASS_CONTENTS_INLINE
           liftIO $ vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
           cmdBindVertexBuffers commandBuffer 0 [(vertexBuffer, 0)]
           liftIO $ vkCmdBindIndexBuffer commandBuffer indexBuffer 0 VK_INDEX_TYPE_UINT16
+          cmdBindDescriptorSets commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS pipelineLayout 0 [descriptorSet] []
           liftIO $ vkCmdDrawIndexed commandBuffer indexCount 1 0 0 0
           liftIO $ vkCmdEndRenderPass commandBuffer
 
@@ -894,7 +958,7 @@ main =
             )
           ]
 
-    updateUniformBufferMemory :: MonadIO io => VkDevice -> VkDeviceMemory -> Double -> TimeSpec -> io ()
+    updateUniformBufferMemory :: MonadIO io => VkDevice -> VkDeviceMemory -> Float -> TimeSpec -> io ()
     updateUniformBufferMemory device uniformBufferMemory aspectRatio timeOffset = do
       let
         secondsOffset = (0.000000001 *) . fromInteger . toNanoSecs $ timeOffset
@@ -911,7 +975,7 @@ main =
       where
         bufferSize = fromIntegral $ bSizeOf @UniformBufferObject undefined
 
-    drawFrame :: MonadIO io => VkDevice -> VkSwapchainKHR -> VkQueue -> VkQueue -> [VkCommandBuffer] -> [VkDeviceMemory] -> Double -> TimeSpec -> VkFence -> VkSemaphore -> VkSemaphore -> io Bool
+    drawFrame :: MonadIO io => VkDevice -> VkSwapchainKHR -> VkQueue -> VkQueue -> [VkCommandBuffer] -> [VkDeviceMemory] -> Float -> TimeSpec -> VkFence -> VkSemaphore -> VkSemaphore -> io Bool
     drawFrame device swapchain graphicsQueue presentQueue commandBuffers uniformBufferMemories aspectRatio renderStartTime inFlightFence imageAvailableSemaphore renderFinishedSemaphore = do
       waitForFences device [inFlightFence] VK_TRUE maxBound
       resetFences device [inFlightFence]
@@ -990,9 +1054,9 @@ vertexAttributeDescriptionsAt binding =
 
 data UniformBufferObject =
   UniformBufferObject {
-    uboModel :: Mat44d,
-    uboView :: Mat44d,
-    uboProj :: Mat44d
+    uboModel :: Mat44f,
+    uboView :: Mat44f,
+    uboProj :: Mat44f
   } deriving (Eq, Show, Generic)
 
 instance PrimBytes UniformBufferObject
@@ -1155,6 +1219,9 @@ newPipelineLayout = newDeviceVk "vkCreatePipelineLayout" vkCreatePipelineLayout 
 newDescriptorSetLayout :: VkDevice -> VkDescriptorSetLayoutCreateInfo -> Acquire VkDescriptorSetLayout
 newDescriptorSetLayout = newDeviceVk "vkCreateDescriptorSetLayout" vkCreateDescriptorSetLayout vkDestroyDescriptorSetLayout
 
+newDescriptorPool :: VkDevice -> VkDescriptorPoolCreateInfo -> Acquire VkDescriptorPool
+newDescriptorPool = newDeviceVk "vkCreateDescriptorPool" vkCreateDescriptorPool vkDestroyDescriptorPool
+
 -- Problem: It seems less than ideal to force all the pipelines to be destroyed together.
 -- This can be fixed by making a ResIO [(ReleaseKey, VkPipeline)].
 newGraphicsPipelines :: VkDevice -> [VkGraphicsPipelineCreateInfo] -> Acquire [VkPipeline]
@@ -1225,11 +1292,33 @@ allocatedCommandBuffers device allocateInfo =
   )
   `mkAcquire`
   \commandBuffers ->
-    withArray commandBuffers $ \commandBuffersPtr ->
-      vkFreeCommandBuffers device commandPool (fromIntegral $ length commandBuffers) commandBuffersPtr
+    withArray commandBuffers $ vkFreeCommandBuffers device commandPool (fromIntegral commandBufferCount)
   where
     commandBufferCount = fromIntegral $ getField @"commandBufferCount" allocateInfo
     commandPool = getField @"commandPool" allocateInfo
+
+allocatedDescriptorSets :: VkDevice -> Bool -> VkDescriptorSetAllocateInfo -> Acquire [VkDescriptorSet]
+allocatedDescriptorSets device canFree allocateInfo =
+  (
+    withPtr allocateInfo $ \allocateInfoPtr ->
+      allocaArray descriptorSetCount $ \descriptorSetsPtr -> do
+        vkAllocateDescriptorSets device allocateInfoPtr descriptorSetsPtr &
+          onVkFailureThrow "vkAllocateDescriptorSets failed."
+        peekArray descriptorSetCount descriptorSetsPtr
+  )
+  `mkAcquire`
+  (
+    if canFree then
+      \descriptorSets ->
+        withArray descriptorSets $ \descriptorSetsPtr ->
+          vkFreeDescriptorSets device descriptorPool (fromIntegral descriptorSetCount) descriptorSetsPtr &
+            onVkFailureThrow "vkFreeDescriptorSets failed."
+    else
+      const $ return ()
+  )
+  where
+    descriptorSetCount = fromIntegral $ getField @"descriptorSetCount" allocateInfo
+    descriptorPool = getField @"descriptorPool" allocateInfo
 
 recordingCommandBuffer :: VkCommandBuffer -> VkCommandBufferBeginInfo -> Acquire ()
 recordingCommandBuffer commandBuffer beginInfo =
@@ -1244,6 +1333,13 @@ recordingCommandBuffer commandBuffer beginInfo =
       onVkFailureThrow "vkEndCommandBuffer failed."
   )
 
+updateDescriptorSets :: MonadIO io => VkDevice -> [VkWriteDescriptorSet] -> [VkCopyDescriptorSet] -> io ()
+updateDescriptorSets device writes copies =
+  liftIO $
+  withArray writes $ \writesPtr ->
+  withArray copies $ \copiesPtr ->
+    vkUpdateDescriptorSets device (lengthNum writes) writesPtr (lengthNum copies) copiesPtr
+
 cmdBeginRenderPass :: MonadIO io => VkCommandBuffer -> VkRenderPassBeginInfo -> VkSubpassContents -> io ()
 cmdBeginRenderPass commandBuffer beginInfo subpassContents =
   liftIO $ withPtr beginInfo $ \beginInfoPtr ->
@@ -1254,18 +1350,25 @@ cmdBindVertexBuffers commandBuffer firstBinding bindings =
   liftIO $
   withArray (fst <$> bindings) $ \buffersPtr ->
   withArray (snd <$> bindings) $ \offsetsPtr ->
-    vkCmdBindVertexBuffers commandBuffer firstBinding (fromIntegral $ length bindings) buffersPtr offsetsPtr
+    vkCmdBindVertexBuffers commandBuffer firstBinding (lengthNum bindings) buffersPtr offsetsPtr
+
+cmdBindDescriptorSets :: MonadIO io => VkCommandBuffer -> VkPipelineBindPoint -> VkPipelineLayout -> Word32 -> [VkDescriptorSet] -> [Word32] -> io ()
+cmdBindDescriptorSets commandBuffer bindPoint pipelineLayout firstSet descriptorSets dynamicOffsets =
+  liftIO $
+  withArray descriptorSets $ \descriptorSetsPtr ->
+  withArray dynamicOffsets $ \dynamicOffsetsPtr ->
+  vkCmdBindDescriptorSets commandBuffer bindPoint pipelineLayout firstSet (lengthNum descriptorSets) descriptorSetsPtr (lengthNum dynamicOffsets) dynamicOffsetsPtr
 
 cmdCopyBuffer :: MonadIO io => VkCommandBuffer -> VkBuffer -> VkBuffer -> [VkBufferCopy] -> io ()
 cmdCopyBuffer commandBuffer srcBuffer dstBuffer copyRegions =
   liftIO $
   withArray copyRegions $ \copyRegionsPtr ->
-    vkCmdCopyBuffer commandBuffer srcBuffer dstBuffer (fromIntegral $ length copyRegions) copyRegionsPtr
+    vkCmdCopyBuffer commandBuffer srcBuffer dstBuffer (lengthNum copyRegions) copyRegionsPtr
 
 queueSubmit :: MonadIO io => VkQueue -> [VkSubmitInfo] -> VkFence -> io ()
 queueSubmit queue submitInfos fence =
   liftIO $ withArray submitInfos $ \submitInfosPtr ->
-    vkQueueSubmit queue (fromIntegral $ length $ submitInfos) submitInfosPtr fence &
+    vkQueueSubmit queue (lengthNum submitInfos) submitInfosPtr fence &
       onVkFailureThrow "vkQueueSubmit failed."
 
 queuePresent :: MonadIO io => VkQueue -> VkPresentInfoKHR -> io VkResult
@@ -1276,12 +1379,12 @@ queuePresent queue presentInfo =
 waitForFences :: MonadIO io => VkDevice -> [VkFence] -> VkBool32 -> Word64 -> io ()
 waitForFences device fences shouldWaitAll timeout =
   liftIO $ withArray fences $ \fencesPtr ->
-    vkWaitForFences device (fromIntegral $ length fences) fencesPtr shouldWaitAll timeout & void
+    vkWaitForFences device (lengthNum fences) fencesPtr shouldWaitAll timeout & void
 
 resetFences :: MonadIO io => VkDevice -> [VkFence] -> io ()
 resetFences device fences =
   liftIO $ withArray fences $ \fencesPtr ->
-    vkResetFences device (fromIntegral $ length fences) fencesPtr & void
+    vkResetFences device (lengthNum fences) fencesPtr & void
 
 getDeviceQueue :: MonadIO io => VkDevice -> Word32 -> Word32 -> io VkQueue
 getDeviceQueue device queueFamilyIndex queueIndex =
@@ -1456,3 +1559,6 @@ evalStateTWith = flip evalStateT
 
 doWhileM :: Monad m => m Bool -> m ()
 doWhileM a = fix $ \loop -> a >>= bool (return ()) loop
+
+lengthNum :: (Foldable t, Num n) => t a -> n
+lengthNum = fromIntegral . length
