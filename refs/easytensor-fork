@@ -1,0 +1,7 @@
+{
+  scheme = "github";
+  owner = "rotaerk";
+  repo = "easytensor";
+  rev = "5d720ab5b19c0996f612018bac94de6462ba20d8";
+  sha256 = "1kn5vr65yic1vkgfp1a7xkr6dqlqk0gn1vwjw4hwj26ipakmfpmn";
+}
