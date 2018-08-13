@@ -60,11 +60,23 @@ let
       ''
     ) {};
 
+  textures =
+    pkgs.callPackage ({ runCommand }:
+      runCommand "${projectName}-textures" {
+        buildInputs = [];
+        src = ./textures;
+      }
+      ''
+        mkdir -p $out
+        cp $src/*.{jpg,png,bmp} $out
+      ''
+    ) {};
+
   fullBuild =
     pkgs.writeShellScriptBin projectName ''
       LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${pkgs.vulkan-validation-layers}/lib"
       XDG_DATA_DIRS="$XDG_DATA_DIRS:${pkgs.vulkan-validation-layers}/share"
-      exec ${main}/bin/vulkanTest --shaderspath='${shaders}' "$@"
+      exec ${main}/bin/vulkanTest --shaderspath='${shaders}' --texturespath='${textures}' "$@"
     '';
 in
-  { inherit pkgs haskellPackages main shaders fullBuild; }
+  { inherit pkgs haskellPackages main shaders textures fullBuild; }

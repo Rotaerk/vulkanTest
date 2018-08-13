@@ -55,7 +55,11 @@ import System.Console.CmdArgs.Implicit
 import System.FilePath
 import System.IO
 
-data CommandLineArguments = CommandLineArguments { claShadersPath :: String } deriving (Show, Data, Typeable)
+data CommandLineArguments =
+  CommandLineArguments {
+    claShadersPath :: String,
+    claTexturesPath :: String
+  } deriving (Show, Data, Typeable)
 
 (initialWindowWidth, initialWindowHeight) = (800, 600)
 
@@ -110,12 +114,16 @@ main =
     arguments <-
       cmdArgs $
       CommandLineArguments {
-        claShadersPath = def &= explicit &= name "shaderspath" &= typ "PATH" &= help "Path to the SPIR-V shader files."
+        claShadersPath = def &= explicit &= name "shaderspath" &= typ "PATH" &= help "Path to the SPIR-V shader files.",
+        claTexturesPath = def &= explicit &= name "texturespath" &= typ "PATH" &= help "Path to the texture files."
       }
       &= summary "Vulkan Test"
 
-    let shadersPath = claShadersPath arguments
+    let
+      shadersPath = claShadersPath arguments
+      texturesPath = claTexturesPath arguments
     putStrLn $ "Shaders path is: '" ++ shadersPath ++ "'."
+    putStrLn $ "Textures path is: '" ++ texturesPath ++ "'."
 
     case (xVertices, xIndices) of
       (XFrame vertices, XFrame indices) ->
