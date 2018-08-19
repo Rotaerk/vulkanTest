@@ -5,6 +5,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
@@ -12,6 +13,7 @@
 module Main where
 
 import Prelude hiding (init)
+import qualified Codec.Picture as JP
 import Control.Applicative
 import Control.Exception
 import Control.Monad
@@ -31,9 +33,11 @@ import Data.IORef
 import Data.List
 import Data.Maybe
 import qualified Data.Set as Set
+import qualified Data.Vector.Storable as V
 import Foreign.C.String
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Array
+import Foreign.Marshal.Utils hiding (with)
 import Foreign.Ptr
 import Foreign.Storable
 import GHC.Generics (Generic)
@@ -186,6 +190,9 @@ main =
 
           physicalDeviceMemProperties <- getPhysicalDeviceMemoryProperties physicalDevice
           ioPutStrLn "Physical device memory properties obtained."
+
+          (textureImage, textureImageMemory) <- createTextureImage device commandPool graphicsQueue physicalDeviceMemProperties texturesPath
+          ioPutStrLn "Texture image created."
 
           (vertexBuffer, vertexBufferMemory) <- prepareBuffer device commandPool graphicsQueue physicalDeviceMemProperties vertices VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
           ioPutStrLn "Vertex buffer prepared."
@@ -415,6 +422,58 @@ main =
       set @"pNext" VK_NULL &*
       set @"queueFamilyIndex" qfi &*
       set @"flags" 0
+
+    createTextureImage :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkPhysicalDeviceMemoryProperties -> FilePath -> ResourceT io (VkImage, VkDeviceMemory)
+    createTextureImage device commandPool submissionQueue physDevMemProps texturesPath = runResourceT $ do
+      (stagingBuffer, stagingBufferMemory, texWidth, texHeight) <- do
+        jpImage <-
+          liftIO $ JP.readImage (texturesPath </> textureFileName) >>= \case
+            Right (JP.ImageRGBA8 jpImage) -> return jpImage
+            Right di | jpImage <- JP.convertRGBA8 di -> return jpImage
+            Left errorMsg -> throwIOAppEx ("Failed to read '" ++ textureFileName ++ "': " ++ errorMsg)
+
+        let
+          texWidth = JP.imageWidth jpImage
+          texHeight = JP.imageHeight jpImage
+          imageDataSize = 4 * texWidth * texHeight
+
+        (stagingBuffer, stagingBufferMemory) <-
+          createAllocatedBuffer
+            device
+            (fromIntegral imageDataSize)
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+            VK_SHARING_MODE_EXCLUSIVE
+            (findMemoryType' $ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+
+        liftIO $
+          with (mappedMemory device stagingBufferMemory 0 (fromIntegral imageDataSize)) $ \stagingBufferPtr ->
+          V.unsafeWith (JP.imageData jpImage) $ \imageDataPtr ->
+            copyBytes stagingBufferPtr (castPtr imageDataPtr) imageDataSize
+
+        return (stagingBuffer, stagingBufferMemory, texWidth, texHeight)
+
+      (textureImage, textureImageMemory) <-
+        lift $
+        createAllocatedImage
+          device
+          (fromIntegral texWidth)
+          (fromIntegral texHeight)
+          VK_FORMAT_R8G8B8A8_UNORM
+          VK_IMAGE_TILING_OPTIMAL
+          (VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
+          VK_SHARING_MODE_EXCLUSIVE
+          (findMemoryType' $ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+
+      let transitionImageLayout' = transitionImageLayout device commandPool submissionQueue textureImage VK_FORMAT_R8G8B8A8_UNORM
+
+      transitionImageLayout' VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+      transitionImageLayout' VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+
+      return (textureImage, textureImageMemory)
+
+      where
+        textureFileName = "statue.jpg"
+        findMemoryType' = findMemoryType physDevMemProps
 
     createSemaphore :: MonadIO io => VkDevice -> ResourceT io VkSemaphore
     createSemaphore device =
@@ -869,6 +928,105 @@ main =
 
       return (buffer, bufferMemory)
 
+    createAllocatedImage :: MonadIO io => VkDevice -> Word32 -> Word32 -> VkFormat -> VkImageTiling -> VkImageUsageFlags -> VkSharingMode -> (Word32 -> Word32) -> ResourceT io (VkImage, VkDeviceMemory)
+    createAllocatedImage device width height format tiling usageFlags sharingMode memoryTypeIndexFromMemoryTypeBits = do
+      image <-
+        allocateAcquire_ $
+        newImage device $
+        createVk $
+        set @"sType" VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO &*
+        set @"pNext" VK_NULL &*
+        set @"imageType" VK_IMAGE_TYPE_2D &*
+        setVk @"extent" (
+          set @"width" width &*
+          set @"height" height &*
+          set @"depth" 1
+        ) &*
+        set @"mipLevels" 1 &*
+        set @"arrayLayers" 1 &*
+        set @"format" format &*
+        set @"tiling" tiling &*
+        set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+        set @"usage" usageFlags &*
+        set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+        set @"sharingMode" sharingMode &*
+        set @"pQueueFamilyIndices" VK_NULL
+
+      memReqs <- getImageMemoryRequirements device image
+
+      imageMemory <-
+        allocateAcquire_ $
+        allocatedMemory device $
+        createVk $
+        set @"sType" VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &*
+        set @"pNext" VK_NULL &*
+        set @"allocationSize" (getField @"size" memReqs) &*
+        set @"memoryTypeIndex" (memoryTypeIndexFromMemoryTypeBits $ getField @"memoryTypeBits" memReqs)
+
+      liftIO $ vkBindImageMemory device image imageMemory 0
+
+      return (image, imageMemory)
+
+    transitionImageLayout :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkImage -> VkFormat -> VkImageLayout -> VkImageLayout -> io ()
+    transitionImageLayout device commandPool submissionQueue image format oldLayout newLayout =
+      submitCommands device commandPool submissionQueue $ \commandBuffer ->
+        cmdPipelineBarrier commandBuffer srcStage dstStage 0 [] [] [imageBarrier]
+
+      where
+        imageBarrier =
+          createVk @VkImageMemoryBarrier $
+          set @"sType" VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER &*
+          set @"pNext" VK_NULL &*
+          set @"oldLayout" oldLayout &*
+          set @"newLayout" newLayout &*
+          set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+          set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+          set @"image" image &*
+          setVk @"subresourceRange" (
+            set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+            set @"baseMipLevel" 0 &*
+            set @"levelCount" 1 &*
+            set @"baseArrayLayer" 0 &*
+            set @"layerCount" 1
+          ) &*
+          set @"srcAccessMask" srcAccessMask &*
+          set @"dstAccessMask" dstAccessMask
+
+        (srcAccessMask :: VkAccessFlags, srcStage :: VkPipelineStageFlags, dstAccessMask :: VkAccessFlags, dstStage :: VkPipelineStageFlags) =
+          case (oldLayout, newLayout) of
+            (VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ->
+              (
+                0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT
+              )
+            (VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) ->
+              (
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+              )
+            _ ->
+              throwAppEx "Unimplemented layout transition."
+
+    copyBufferToImage :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkBuffer -> VkImage -> Word32 -> Word32 -> io ()
+    copyBufferToImage device commandPool submissionQueue buffer image width height =
+      submitCommands device commandPool submissionQueue $ \commandBuffer ->
+        cmdCopyBufferToImage commandBuffer buffer image VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL [copyRegion]
+
+      where
+        copyRegion =
+          createVk @VkBufferImageCopy $
+          set @"bufferOffset" 0 &*
+          set @"bufferRowLength" 0 &*
+          set @"bufferImageHeight" 0 &*
+          setVk @"imageSubresource" (
+            set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+            set @"mipLevel" 0 &*
+            set @"baseArrayLayer" 0 &*
+            set @"layerCount" 1
+          ) &*
+          setVk @"imageOffset" (set @"x" 0 &* set @"y" 0 &* set @"z" 0) &*
+          setVk @"imageExtent" (set @"width" width &* set @"height" height &* set @"depth" 1)
+
     findMemoryType :: VkPhysicalDeviceMemoryProperties -> VkMemoryPropertyFlags -> Word32 -> Word32
     findMemoryType memProperties propertyFlags typeFilter =
       fromMaybe (throwAppEx "Failed to find a suitable memory type.") $
@@ -879,30 +1037,32 @@ main =
         memoryTypes = getVec @"memoryTypes" memProperties
         isMatch i = testBit typeFilter i && propertyFlags == (propertyFlags .&. getField @"propertyFlags" (ixOff i memoryTypes))
 
-    copyBuffer :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkBuffer -> VkBuffer -> VkDeviceSize -> io ()
-    copyBuffer device commandPool submissionQueue srcBuffer dstBuffer bufferSize =
-      runResourceT $ do
-        [commandBuffer] <- allocateCommandBuffers device commandPool 1
+    submitCommands :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> (forall m. MonadIO m => VkCommandBuffer -> m a) -> io a
+    submitCommands device commandPool submissionQueue fillCommandBuffer = runResourceT $ do
+      [commandBuffer] <- allocateCommandBuffers device commandPool 1
 
-        with_ (recordingCommandBuffer commandBuffer commandBufferBeginInfo) $
-          cmdCopyBuffer commandBuffer srcBuffer dstBuffer [copyRegion]
+      result <- with_ (recordingCommandBuffer commandBuffer commandBufferBeginInfo) (fillCommandBuffer commandBuffer)
 
-        let
-          submitInfo =
-            createVk $
-            set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
-            set @"pNext" VK_NULL &*
-            set @"waitSemaphoreCount" 0 &*
-            set @"pWaitSemaphores" VK_NULL &*
-            set @"pWaitDstStageMask" VK_NULL &*
-            set @"commandBufferCount" 1 &*
-            setListRef @"pCommandBuffers" [commandBuffer] &*
-            set @"signalSemaphoreCount" 0 &*
-            set @"pSignalSemaphores" VK_NULL
+      queueSubmit
+        submissionQueue
+        [
+          createVk $
+          set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
+          set @"pNext" VK_NULL &*
+          set @"waitSemaphoreCount" 0 &*
+          set @"pWaitSemaphores" VK_NULL &*
+          set @"pWaitDstStageMask" VK_NULL &*
+          set @"commandBufferCount" 1 &*
+          setListRef @"pCommandBuffers" [commandBuffer] &*
+          set @"signalSemaphoreCount" 0 &*
+          set @"pSignalSemaphores" VK_NULL
+        ]
+        VK_NULL_HANDLE
 
-        queueSubmit submissionQueue [submitInfo] VK_NULL_HANDLE
-        liftIO $ vkQueueWaitIdle submissionQueue & onVkFailureThrow "vkQueueWaitIdle failed."
-      
+      liftIO $ vkQueueWaitIdle submissionQueue & onVkFailureThrow "vkQueueWaitIdle failed."
+
+      return result
+
       where
         commandBufferBeginInfo =
           createVk $
@@ -911,11 +1071,19 @@ main =
           set @"flags" VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT &*
           set @"pInheritanceInfo" VK_NULL
 
-        copyRegion =
-          createVk @VkBufferCopy $
-          set @"size" bufferSize &*
-          set @"srcOffset" 0 &*
-          set @"dstOffset" 0
+    copyBuffer :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkBuffer -> VkBuffer -> VkDeviceSize -> io ()
+    copyBuffer device commandPool submissionQueue srcBuffer dstBuffer bufferSize =
+      submitCommands device commandPool submissionQueue $ \commandBuffer ->
+        cmdCopyBuffer
+          commandBuffer
+          srcBuffer
+          dstBuffer
+          [
+            createVk @VkBufferCopy $
+            set @"size" bufferSize &*
+            set @"srcOffset" 0 &*
+            set @"dstOffset" 0
+          ]
 
     allocateCommandBuffers :: MonadIO io => VkDevice -> VkCommandPool -> Word32 -> ResourceT io [VkCommandBuffer]
     allocateCommandBuffers device commandPool count =
@@ -1266,6 +1434,9 @@ newFence = newDeviceVk "vkCreateFence" vkCreateFence vkDestroyFence
 newBuffer :: VkDevice -> VkBufferCreateInfo -> Acquire VkBuffer
 newBuffer = newDeviceVk "vkCreateBuffer" vkCreateBuffer vkDestroyBuffer
 
+newImage :: VkDevice -> VkImageCreateInfo -> Acquire VkImage
+newImage = newDeviceVk "vkCreateImage" vkCreateImage vkDestroyImage
+
 allocatedMemory :: VkDevice -> VkMemoryAllocateInfo -> Acquire VkDeviceMemory
 allocatedMemory device allocateInfo =
   (
@@ -1358,7 +1529,7 @@ cmdBindVertexBuffers commandBuffer firstBinding bindings =
   liftIO $
   withArray (fst <$> bindings) $ \buffersPtr ->
   withArray (snd <$> bindings) $ \offsetsPtr ->
-    vkCmdBindVertexBuffers commandBuffer firstBinding (lengthNum bindings) buffersPtr offsetsPtr
+  vkCmdBindVertexBuffers commandBuffer firstBinding (lengthNum bindings) buffersPtr offsetsPtr
 
 cmdBindDescriptorSets :: MonadIO io => VkCommandBuffer -> VkPipelineBindPoint -> VkPipelineLayout -> Word32 -> [VkDescriptorSet] -> [Word32] -> io ()
 cmdBindDescriptorSets commandBuffer bindPoint pipelineLayout firstSet descriptorSets dynamicOffsets =
@@ -1371,7 +1542,48 @@ cmdCopyBuffer :: MonadIO io => VkCommandBuffer -> VkBuffer -> VkBuffer -> [VkBuf
 cmdCopyBuffer commandBuffer srcBuffer dstBuffer copyRegions =
   liftIO $
   withArray copyRegions $ \copyRegionsPtr ->
-    vkCmdCopyBuffer commandBuffer srcBuffer dstBuffer (lengthNum copyRegions) copyRegionsPtr
+  vkCmdCopyBuffer commandBuffer srcBuffer dstBuffer (lengthNum copyRegions) copyRegionsPtr
+
+cmdCopyBufferToImage :: MonadIO io => VkCommandBuffer -> VkBuffer -> VkImage -> VkImageLayout -> [VkBufferImageCopy] -> io ()
+cmdCopyBufferToImage commandBuffer srcBuffer dstImage dstImageLayout copyRegions =
+  liftIO $
+  withArray copyRegions $ \copyRegionsPtr ->
+  vkCmdCopyBufferToImage commandBuffer srcBuffer dstImage dstImageLayout (lengthNum copyRegions) copyRegionsPtr
+
+cmdPipelineBarrier ::
+  MonadIO io =>
+  VkCommandBuffer ->
+  VkPipelineStageFlags ->
+  VkPipelineStageFlags ->
+  VkDependencyFlags ->
+  [VkMemoryBarrier] ->
+  [VkBufferMemoryBarrier] ->
+  [VkImageMemoryBarrier] ->
+  io ()
+cmdPipelineBarrier
+  commandBuffer
+  srcStageMask
+  dstStageMask
+  depFlags
+  memoryBarriers
+  bufferMemoryBarriers
+  imageMemoryBarriers
+  =
+  liftIO $
+  withArray memoryBarriers $ \memoryBarriersPtr ->
+  withArray bufferMemoryBarriers $ \bufferMemoryBarriersPtr ->
+  withArray imageMemoryBarriers $ \imageMemoryBarriersPtr ->
+  vkCmdPipelineBarrier
+    commandBuffer
+    srcStageMask
+    dstStageMask
+    depFlags
+    (lengthNum memoryBarriers)
+    memoryBarriersPtr
+    (lengthNum bufferMemoryBarriers)
+    bufferMemoryBarriersPtr
+    (lengthNum imageMemoryBarriers)
+    imageMemoryBarriersPtr
 
 queueSubmit :: MonadIO io => VkQueue -> [VkSubmitInfo] -> VkFence -> io ()
 queueSubmit queue submitInfos fence =
@@ -1501,6 +1713,12 @@ getBufferMemoryRequirements :: MonadIO io => VkDevice -> VkBuffer -> io VkMemory
 getBufferMemoryRequirements device buffer =
   liftIO $ alloca $ \memReqsPtr -> do
     vkGetBufferMemoryRequirements device buffer memReqsPtr
+    peek memReqsPtr
+
+getImageMemoryRequirements :: MonadIO io => VkDevice -> VkImage -> io VkMemoryRequirements
+getImageMemoryRequirements device buffer =
+  liftIO $ alloca $ \memReqsPtr -> do
+    vkGetImageMemoryRequirements device buffer memReqsPtr
     peek memReqsPtr
 
 getPhysicalDeviceMemoryProperties :: MonadIO io => VkPhysicalDevice -> io VkPhysicalDeviceMemoryProperties
