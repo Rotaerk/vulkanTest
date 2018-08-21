@@ -194,6 +194,12 @@ main =
           (textureImage, textureImageMemory) <- createTextureImage device commandPool graphicsQueue physicalDeviceMemProperties texturesPath
           ioPutStrLn "Texture image created."
 
+          textureImageView <- createImageView device VK_FORMAT_R8G8B8A8_UNORM textureImage
+          ioPutStrLn "Texture image view created."
+
+          textureSampler <- createTextureSampler device
+          ioPutStrLn "Texture sampler created."
+
           (vertexBuffer, vertexBufferMemory) <- prepareBuffer device commandPool graphicsQueue physicalDeviceMemProperties vertices VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
           ioPutStrLn "Vertex buffer prepared."
 
@@ -237,7 +243,7 @@ main =
             swapchainImages <- listSwapchainImages device swapchain
             ioPutStrLn "Swapchain images obtained."
 
-            swapchainImageViews <- createSwapchainImageViews device swapchainImageFormat swapchainImages
+            swapchainImageViews <- forM swapchainImages $ createImageView device swapchainImageFormat
             ioPutStrLn "Swapchain image views created."
 
             let swapchainImageCount = length swapchainImages
@@ -352,6 +358,10 @@ main =
         guard $ not . null $ surfaceFormats
         guard $ not . null $ surfacePresentModes
 
+        supportedFeatures <- liftIO $ getPhysicalDeviceFeatures physicalDevice
+
+        guard $ getField @"samplerAnisotropy" supportedFeatures == VK_TRUE
+
         return (physicalDevice, graphicsQfi, presentQfi)
       ) >>=
       maybe (throwIOAppEx "Failed to find a suitable physical device.") return
@@ -398,7 +408,8 @@ main =
       set @"enabledExtensionCount" (lengthNum deviceExtensions) &*
       setListRef @"ppEnabledExtensionNames" deviceExtensions &*
       setVkRef @"pEnabledFeatures" (
-        createVk $ handleRemFields @_ @'[]
+        createVk $
+        set @"samplerAnisotropy" VK_TRUE
       )
 
     createPipelineLayout :: MonadIO io => VkDevice -> VkDescriptorSetLayout -> ResourceT io VkPipelineLayout
@@ -474,6 +485,53 @@ main =
       where
         textureFileName = "statue.jpg"
         findMemoryType' = findMemoryType physDevMemProps
+
+    createImageView :: MonadIO io => VkDevice -> VkFormat -> VkImage -> ResourceT io VkImageView
+    createImageView device imageFormat image =
+      allocateAcquire_ $
+      newVkImageView device $
+      createVk $
+      set @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"image" image &*
+      set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
+      set @"format" imageFormat &*
+      setVk @"components" (
+        set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
+        set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
+        set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
+        set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
+      ) &*
+      setVk @"subresourceRange" (
+        set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+        set @"baseMipLevel" 0 &*
+        set @"levelCount" 1 &*
+        set @"baseArrayLayer" 0 &*
+        set @"layerCount" 1
+      )
+
+    createTextureSampler :: MonadIO io => VkDevice -> ResourceT io VkSampler
+    createTextureSampler device =
+      allocateAcquire_ $
+      newSampler device $
+      createVk $
+      set @"sType" VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"magFilter" VK_FILTER_LINEAR &*
+      set @"minFilter" VK_FILTER_LINEAR &*
+      set @"addressModeU" VK_SAMPLER_ADDRESS_MODE_REPEAT &*
+      set @"addressModeV" VK_SAMPLER_ADDRESS_MODE_REPEAT &*
+      set @"addressModeW" VK_SAMPLER_ADDRESS_MODE_REPEAT &*
+      set @"anisotropyEnable" VK_TRUE &*
+      set @"maxAnisotropy" 16 &*
+      set @"borderColor" VK_BORDER_COLOR_INT_OPAQUE_BLACK &*
+      set @"unnormalizedCoordinates" VK_FALSE &*
+      set @"compareEnable" VK_FALSE &*
+      set @"compareOp" VK_COMPARE_OP_ALWAYS &*
+      set @"mipmapMode" VK_SAMPLER_MIPMAP_MODE_LINEAR &*
+      set @"maxLod" 0 &*
+      set @"minLod" 0 &*
+      set @"mipLodBias" 0
 
     createSemaphore :: MonadIO io => VkDevice -> ResourceT io VkSemaphore
     createSemaphore device =
@@ -562,31 +620,6 @@ main =
       set @"presentMode" surfacePresentMode &*
       set @"clipped" VK_TRUE &*
       set @"oldSwapchain" VK_NULL
-
-    createSwapchainImageViews :: MonadIO io => VkDevice -> VkFormat -> [VkImage] -> ResourceT io [VkImageView]
-    createSwapchainImageViews device imageFormat images =
-      allocateAcquire_ $
-      forM images $ \image ->
-      newVkImageView device $
-      createVk $
-      set @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &*
-      set @"pNext" VK_NULL &*
-      set @"image" image &*
-      set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
-      set @"format" imageFormat &*
-      setVk @"components" (
-        set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
-        set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
-        set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
-        set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
-      ) &*
-      setVk @"subresourceRange" (
-        set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
-        set @"baseMipLevel" 0 &*
-        set @"levelCount" 1 &*
-        set @"baseArrayLayer" 0 &*
-        set @"layerCount" 1
-      )
 
     createRenderPass :: MonadIO io => VkDevice -> VkFormat -> ResourceT io VkRenderPass
     createRenderPass device imageFormat =
@@ -1437,6 +1470,9 @@ newBuffer = newDeviceVk "vkCreateBuffer" vkCreateBuffer vkDestroyBuffer
 newImage :: VkDevice -> VkImageCreateInfo -> Acquire VkImage
 newImage = newDeviceVk "vkCreateImage" vkCreateImage vkDestroyImage
 
+newSampler :: VkDevice -> VkSamplerCreateInfo -> Acquire VkSampler
+newSampler = newDeviceVk "vkCreateSampler" vkCreateSampler vkDestroySampler
+
 allocatedMemory :: VkDevice -> VkMemoryAllocateInfo -> Acquire VkDeviceMemory
 allocatedMemory device allocateInfo =
   (
@@ -1726,6 +1762,12 @@ getPhysicalDeviceMemoryProperties physicalDevice =
   liftIO $ alloca $ \memPropsPtr -> do
     vkGetPhysicalDeviceMemoryProperties physicalDevice memPropsPtr
     peek memPropsPtr
+
+getPhysicalDeviceFeatures :: MonadIO io => VkPhysicalDevice -> io VkPhysicalDeviceFeatures
+getPhysicalDeviceFeatures physicalDevice =
+  liftIO $ alloca $ \featuresPtr -> do
+    vkGetPhysicalDeviceFeatures physicalDevice featuresPtr
+    peek featuresPtr
 
 windowEventLoop :: MonadIO io => GLFW.Window -> IORef (Maybe TimeSpec) -> io Bool -> io Bool
 windowEventLoop window lastResizeTimeRef body = fix $ \loop ->
