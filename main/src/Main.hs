@@ -23,6 +23,7 @@ import Control.Monad.Trans.Class
 import Control.Monad.Trans.Maybe
 import Control.Monad.Trans.Resource
 import Control.Monad.Trans.State.Lazy
+import qualified Control.Monad.ST as ST
 import Data.Acquire
 import Data.Bits
 import Data.Bool
@@ -52,6 +53,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
 import Graphics.Vulkan.Marshal.Proc
 import Numeric.DataFrame
+import qualified Numeric.DataFrame.ST as ST
 import Numeric.Dim
 import Numeric.PrimBytes
 import System.Clock
@@ -99,10 +101,10 @@ xVertices :: DataFrame Vertex '[XN 3]
 xVertices =
   fromJust $
   fromList (D @3) $ scalar <$> [
-    Vertex (vec2 (-0.5) (-0.5)) (vec3 1 0 0),
-    Vertex (vec2 0.5 (-0.5)) (vec3 0 1 0),
-    Vertex (vec2 0.5 0.5) (vec3 0 0 1),
-    Vertex (vec2 (-0.5) 0.5) (vec3 1 1 1)
+    Vertex (vec2 (-0.5) (-0.5)) (vec3 1 0 0) (vec2 1 0),
+    Vertex (vec2 0.5 (-0.5)) (vec3 0 1 0) (vec2 0 0),
+    Vertex (vec2 0.5 0.5) (vec3 0 0 1) (vec2 0 1),
+    Vertex (vec2 (-0.5) 0.5) (vec3 1 1 1) (vec2 1 1)
   ]
 
 xIndices :: DataFrame Word16 '[XN 3]
@@ -261,7 +263,7 @@ main =
             descriptorSets <- allocateDescriptorSets device descriptorPool False (replicate swapchainImageCount descriptorSetLayout)
             ioPutStrLn "Descriptor sets allocated."
 
-            writeDescriptorSets device $ zip uniformBuffers descriptorSets
+            writeDescriptorSets device textureImageView textureSampler $ zip uniformBuffers descriptorSets
             ioPutStrLn "Descriptor sets written to."
 
             renderPass <- createRenderPass device swapchainImageFormat
@@ -436,7 +438,7 @@ main =
 
     createTextureImage :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkPhysicalDeviceMemoryProperties -> FilePath -> ResourceT io (VkImage, VkDeviceMemory)
     createTextureImage device commandPool submissionQueue physDevMemProps texturesPath = runResourceT $ do
-      (stagingBuffer, stagingBufferMemory, texWidth, texHeight) <- do
+      (stagingBuffer, stagingBufferMemory, textureWidth, textureHeight) <- do
         jpImage <-
           liftIO $ JP.readImage (texturesPath </> textureFileName) >>= \case
             Right (JP.ImageRGBA8 jpImage) -> return jpImage
@@ -444,9 +446,9 @@ main =
             Left errorMsg -> throwIOAppEx ("Failed to read '" ++ textureFileName ++ "': " ++ errorMsg)
 
         let
-          texWidth = JP.imageWidth jpImage
-          texHeight = JP.imageHeight jpImage
-          imageDataSize = 4 * texWidth * texHeight
+          textureWidth = JP.imageWidth jpImage
+          textureHeight = JP.imageHeight jpImage
+          imageDataSize = 4 * textureWidth * textureHeight
 
         (stagingBuffer, stagingBufferMemory) <-
           createAllocatedBuffer
@@ -459,16 +461,16 @@ main =
         liftIO $
           with (mappedMemory device stagingBufferMemory 0 (fromIntegral imageDataSize)) $ \stagingBufferPtr ->
           V.unsafeWith (JP.imageData jpImage) $ \imageDataPtr ->
-            copyBytes stagingBufferPtr (castPtr imageDataPtr) imageDataSize
+          copyBytes stagingBufferPtr (castPtr imageDataPtr) imageDataSize
 
-        return (stagingBuffer, stagingBufferMemory, texWidth, texHeight)
+        return (stagingBuffer, stagingBufferMemory, textureWidth, textureHeight)
 
       (textureImage, textureImageMemory) <-
         lift $
         createAllocatedImage
           device
-          (fromIntegral texWidth)
-          (fromIntegral texHeight)
+          (fromIntegral textureWidth)
+          (fromIntegral textureHeight)
           VK_FORMAT_R8G8B8A8_UNORM
           VK_IMAGE_TILING_OPTIMAL
           (VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
@@ -478,6 +480,7 @@ main =
       let transitionImageLayout' = transitionImageLayout device commandPool submissionQueue textureImage VK_FORMAT_R8G8B8A8_UNORM
 
       transitionImageLayout' VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+      copyBufferToImage device commandPool submissionQueue stagingBuffer textureImage (fromIntegral textureWidth) (fromIntegral textureHeight)
       transitionImageLayout' VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
 
       return (textureImage, textureImageMemory)
@@ -675,16 +678,23 @@ main =
       createVk $
       set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO &*
       set @"pNext" VK_NULL &*
-      set @"bindingCount" 1 &*
-      setListRef @"pBindings" [
-        createVk (
-          set @"binding" 0 &*
-          set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
-          set @"descriptorCount" 1 &*
-          set @"stageFlags" VK_SHADER_STAGE_VERTEX_BIT &*
-          set @"pImmutableSamplers" VK_NULL
-        )
-      ]
+      set @"bindingCount" (lengthNum bindings) &*
+      setListRef @"pBindings" bindings
+      where
+        bindings =
+          createVk @VkDescriptorSetLayoutBinding <$> [
+            set @"binding" 0 &*
+            set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+            set @"descriptorCount" 1 &*
+            set @"stageFlags" VK_SHADER_STAGE_VERTEX_BIT &*
+            set @"pImmutableSamplers" VK_NULL,
+
+            set @"binding" 1 &*
+            set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
+            set @"descriptorCount" 1 &*
+            set @"stageFlags" VK_SHADER_STAGE_FRAGMENT_BIT &*
+            set @"pImmutableSamplers" VK_NULL
+          ]
 
     createDescriptorPool :: MonadIO io => VkDevice -> Word32 -> ResourceT io VkDescriptorPool
     createDescriptorPool device descriptorCount =
@@ -693,14 +703,18 @@ main =
       createVk $
       set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO &*
       set @"pNext" VK_NULL &*
-      set @"poolSizeCount" 1 &*
-      setListRef @"pPoolSizes" [
-        createVk (
-          set @"type" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
-          set @"descriptorCount" descriptorCount
-        )
-      ] &*
+      set @"poolSizeCount" (lengthNum poolSizes) &*
+      setListRef @"pPoolSizes" poolSizes &*
       set @"maxSets" descriptorCount
+      where
+        poolSizes =
+          createVk @VkDescriptorPoolSize <$> [
+            set @"type" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+            set @"descriptorCount" descriptorCount,
+
+            set @"type" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
+            set @"descriptorCount" descriptorCount
+          ]
 
     allocateDescriptorSets :: MonadIO io => VkDevice -> VkDescriptorPool -> Bool -> [VkDescriptorSetLayout] -> ResourceT io [VkDescriptorSet]
     allocateDescriptorSets device descriptorPool canFree layouts =
@@ -713,27 +727,44 @@ main =
       set @"descriptorSetCount" (lengthNum layouts) &*
       setListRef @"pSetLayouts" layouts
 
-    writeDescriptorSets :: MonadIO io => VkDevice -> [(VkBuffer, VkDescriptorSet)] -> io ()
-    writeDescriptorSets device ubdss = updateDescriptorSets device writes []
+    writeDescriptorSets :: MonadIO io => VkDevice -> VkImageView -> VkSampler -> [(VkBuffer, VkDescriptorSet)] -> io ()
+    writeDescriptorSets device textureImageView textureSampler ubdss = updateDescriptorSets device writes []
       where
         writes =
-          ffor ubdss $ \(uniformBuffer, descriptorSet) ->
-            createVk @VkWriteDescriptorSet $
-            set @"sType" VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET &*
-            set @"pNext" VK_NULL &*
-            set @"dstSet" descriptorSet &*
-            set @"dstBinding" 0 &*
-            set @"dstArrayElement" 0 &*
-            set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
-            set @"descriptorCount" 1 &*
-            setListRef @"pBufferInfo" [
-              createVk $
-              set @"buffer" uniformBuffer &*
-              set @"offset" 0 &*
-              set @"range" (fromIntegral $ bSizeOf @UniformBufferObject undefined)
-            ] &*
-            set @"pImageInfo" VK_NULL &*
-            set @"pTexelBufferView" VK_NULL
+          ubdss >>= \(uniformBuffer, descriptorSet) ->
+            createVk @VkWriteDescriptorSet <$> [
+              set @"sType" VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET &*
+              set @"pNext" VK_NULL &*
+              set @"dstSet" descriptorSet &*
+              set @"dstBinding" 0 &*
+              set @"dstArrayElement" 0 &*
+              set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+              set @"descriptorCount" 1 &*
+              setListRef @"pBufferInfo" [
+                createVk $
+                set @"buffer" uniformBuffer &*
+                set @"offset" 0 &*
+                set @"range" (fromIntegral $ bSizeOf @UniformBufferObject undefined)
+              ] &*
+              set @"pImageInfo" VK_NULL &*
+              set @"pTexelBufferView" VK_NULL,
+
+              set @"sType" VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET &*
+              set @"pNext" VK_NULL &*
+              set @"dstSet" descriptorSet &*
+              set @"dstBinding" 1 &*
+              set @"dstArrayElement" 0 &*
+              set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
+              set @"descriptorCount" 1 &*
+              set @"pBufferInfo" VK_NULL &*
+              setListRef @"pImageInfo" [
+                createVk $
+                set @"imageLayout" VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &*
+                set @"imageView" textureImageView &*
+                set @"sampler" textureSampler
+              ] &*
+              set @"pTexelBufferView" VK_NULL
+            ]
 
     createGraphicsPipeline :: MonadUnliftIO io => VkDevice -> FilePath -> VkPipelineLayout -> VkRenderPass -> VkExtent2D -> ResourceT io VkPipeline
     createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent = runResourceT $ do
@@ -821,7 +852,7 @@ main =
           set @"polygonMode" VK_POLYGON_MODE_FILL &*
           set @"lineWidth" 1 &*
           set @"cullMode" VK_CULL_MODE_BACK_BIT &*
-          set @"frontFace" VK_FRONT_FACE_CLOCKWISE &*
+          set @"frontFace" VK_FRONT_FACE_COUNTER_CLOCKWISE &*
           set @"depthBiasEnable" VK_FALSE &*
           set @"depthBiasConstantFactor" 0 &*
           set @"depthBiasClamp" 0 &*
@@ -1175,7 +1206,11 @@ main =
           UniformBufferObject {
             uboModel = rotateZ (0.5 * secondsOffset * pi),
             uboView = lookAt (vec3 0 0 1) (vec3 2 2 2) (vec3 0 0 0),
-            uboProj = perspective 0.1 10 (pi / 4) aspectRatio
+            uboProj = ST.runST $ do
+              m <- ST.unsafeThawDataFrame $ perspective 0.1 10 (pi / 4) aspectRatio
+              y <- ST.readDataFrameOff m 5
+              ST.writeDataFrameOff m 5 (-y)
+              ST.unsafeFreezeDataFrame m
           }
 
       liftIO $ with (mappedMemory device uniformBufferMemory 0 bufferSize) $ \ptr ->
@@ -1235,7 +1270,8 @@ main =
 data Vertex =
   Vertex {
     vtxPos :: Vec2f,
-    vtxColor :: Vec3f
+    vtxColor :: Vec3f,
+    vtxTexCoord :: Vec2f
   } deriving (Eq, Show, Generic)
 
 instance PrimBytes Vertex
@@ -1258,8 +1294,16 @@ vertexAttributeDescriptionsAt binding =
     set @"binding" binding &*
     set @"location" 1 &*
     set @"format" VK_FORMAT_R32G32B32_SFLOAT &*
-    set @"offset" (fromIntegral $ sizeOf @Vec2f undefined)
+    set @"offset" offset1,
+
+    set @"binding" binding &*
+    set @"location" 2 &*
+    set @"format" VK_FORMAT_R32G32_SFLOAT &*
+    set @"offset" offset2
   ]
+  where
+    offset1 = fromIntegral (sizeOf @Vec2f undefined)
+    offset2 = offset1 + fromIntegral (sizeOf @Vec3f undefined)
 
 data UniformBufferObject =
   UniformBufferObject {
