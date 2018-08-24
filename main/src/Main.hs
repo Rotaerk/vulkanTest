@@ -101,17 +101,23 @@ xVertices :: DataFrame Vertex '[XN 3]
 xVertices =
   fromJust $
   fromList (D @3) $ scalar <$> [
-    Vertex (vec2 (-0.5) (-0.5)) (vec3 1 0 0) (vec2 1 0),
-    Vertex (vec2 0.5 (-0.5)) (vec3 0 1 0) (vec2 0 0),
-    Vertex (vec2 0.5 0.5) (vec3 0 0 1) (vec2 0 1),
-    Vertex (vec2 (-0.5) 0.5) (vec3 1 1 1) (vec2 1 1)
+    Vertex (vec3 (-0.5) (-0.5) 0) (vec3 1 0 0) (vec2 1 0),
+    Vertex (vec3 0.5 (-0.5) 0) (vec3 0 1 0) (vec2 0 0),
+    Vertex (vec3 0.5 0.5 0) (vec3 0 0 1) (vec2 0 1),
+    Vertex (vec3 (-0.5) 0.5 0) (vec3 1 1 1) (vec2 1 1),
+
+    Vertex (vec3 (-0.5) (-0.5) (-0.5)) (vec3 1 0 0) (vec2 1 0),
+    Vertex (vec3 0.5 (-0.5) (-0.5)) (vec3 0 1 0) (vec2 0 0),
+    Vertex (vec3 0.5 0.5 (-0.5)) (vec3 0 0 1) (vec2 0 1),
+    Vertex (vec3 (-0.5) 0.5 (-0.5)) (vec3 1 1 1) (vec2 1 1)
   ]
 
 xIndices :: DataFrame Word16 '[XN 3]
 xIndices =
   fromJust $
   fromList (D @3) [
-    0, 1, 2, 2, 3, 0
+    0, 1, 2, 2, 3, 0,
+    4, 5, 6, 6, 7, 4
   ]
 
 main :: IO ()
@@ -190,22 +196,24 @@ main =
           commandPool <- createCommandPool device graphicsQfi
           ioPutStrLn "Command pool created."
 
-          physicalDeviceMemProperties <- getPhysicalDeviceMemoryProperties physicalDevice
+          physDevMemProps <- getPhysicalDeviceMemoryProperties physicalDevice
           ioPutStrLn "Physical device memory properties obtained."
 
-          (textureImage, textureImageMemory) <- createTextureImage device commandPool graphicsQueue physicalDeviceMemProperties texturesPath
+          let findMemoryType' = findMemoryType physDevMemProps
+
+          (textureImage, textureImageMemory) <- createTextureImage device commandPool graphicsQueue physDevMemProps texturesPath
           ioPutStrLn "Texture image created."
 
-          textureImageView <- createImageView device VK_FORMAT_R8G8B8A8_UNORM textureImage
+          textureImageView <- createImageView device VK_FORMAT_R8G8B8A8_UNORM VK_IMAGE_ASPECT_COLOR_BIT textureImage
           ioPutStrLn "Texture image view created."
 
           textureSampler <- createTextureSampler device
           ioPutStrLn "Texture sampler created."
 
-          (vertexBuffer, vertexBufferMemory) <- prepareBuffer device commandPool graphicsQueue physicalDeviceMemProperties vertices VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+          (vertexBuffer, vertexBufferMemory) <- prepareBuffer device commandPool graphicsQueue physDevMemProps vertices VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
           ioPutStrLn "Vertex buffer prepared."
 
-          (indexBuffer, indexBufferMemory) <- prepareBuffer device commandPool graphicsQueue physicalDeviceMemProperties indices VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+          (indexBuffer, indexBufferMemory) <- prepareBuffer device commandPool graphicsQueue physDevMemProps indices VK_BUFFER_USAGE_INDEX_BUFFER_BIT
           ioPutStrLn "Index buffer prepared."
 
           imageAvailableSemaphores <- replicateM maxFramesInFlight $ createSemaphore device
@@ -236,8 +244,9 @@ main =
               swapchainImageFormat = getField @"format" swapchainSurfaceFormat
               swapchainSurfacePresentMode = chooseSwapchainSurfacePresentMode surfacePresentModes
               swapchainExtent = chooseSwapchainSurfaceExtent surfaceCapabilities (fromIntegral windowFramebufferWidth) (fromIntegral windowFramebufferHeight)
+              (swapchainWidth, swapchainHeight) = (getField @"width" swapchainExtent, getField @"height" swapchainExtent)
               idealSwapchainImageCount = chooseSwapchainImageCount surfaceCapabilities
-              aspectRatio = fromIntegral (getField @"width" swapchainExtent) / fromIntegral (getField @"height" swapchainExtent)
+              aspectRatio = fromIntegral swapchainWidth / fromIntegral swapchainHeight
 
             swapchain <- createSwapchain device surface surfaceCapabilities swapchainSurfaceFormat swapchainSurfacePresentMode swapchainExtent idealSwapchainImageCount distinctQfis
             ioPutStrLn "Swapchain created."
@@ -245,12 +254,12 @@ main =
             swapchainImages <- listSwapchainImages device swapchain
             ioPutStrLn "Swapchain images obtained."
 
-            swapchainImageViews <- forM swapchainImages $ createImageView device swapchainImageFormat
+            swapchainImageViews <- forM swapchainImages $ createImageView device swapchainImageFormat VK_IMAGE_ASPECT_COLOR_BIT
             ioPutStrLn "Swapchain image views created."
 
             let swapchainImageCount = length swapchainImages
 
-            uniformBuffersWithMemories <- replicateM swapchainImageCount $ createUniformBuffer device physicalDeviceMemProperties
+            uniformBuffersWithMemories <- replicateM swapchainImageCount $ createUniformBuffer device physDevMemProps
             ioPutStrLn "Uniform buffers created and allocated."
 
             let
@@ -266,13 +275,33 @@ main =
             writeDescriptorSets device textureImageView textureSampler $ zip uniformBuffers descriptorSets
             ioPutStrLn "Descriptor sets written to."
 
-            renderPass <- createRenderPass device swapchainImageFormat
+            depthFormat <- findDepthFormat physicalDevice
+            ioPutStrLn "Depth format found."
+
+            renderPass <- createRenderPass device swapchainImageFormat depthFormat
             ioPutStrLn "Render pass created."
 
             graphicsPipeline <- createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent
             ioPutStrLn "Graphics pipeline created."
 
-            swapchainFramebuffers <- createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews
+            (depthImage, depthImageMemory) <-
+              createAllocatedImage
+                device
+                (fromIntegral swapchainWidth)
+                (fromIntegral swapchainHeight)
+                depthFormat
+                VK_IMAGE_TILING_OPTIMAL
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                VK_SHARING_MODE_EXCLUSIVE
+                (findMemoryType' VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+            ioPutStrLn "Depth image created."
+
+            transitionImageLayout device commandPool graphicsQueue depthImage depthFormat VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+
+            depthImageView <- createImageView device depthFormat VK_IMAGE_ASPECT_DEPTH_BIT depthImage
+            ioPutStrLn "Depth image view created."
+
+            swapchainFramebuffers <- createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews depthImageView
             ioPutStrLn "Framebuffers created."
 
             commandBuffers <- allocateCommandBuffers device commandPool (lengthNum swapchainFramebuffers)
@@ -436,6 +465,34 @@ main =
       set @"queueFamilyIndex" qfi &*
       set @"flags" 0
 
+    getFirstFormatWithFeatures :: MonadIO io => VkPhysicalDevice -> VkImageTiling -> VkFormatFeatureFlags -> [VkFormat] -> io (Maybe VkFormat)
+    getFirstFormatWithFeatures physicalDevice tiling features =
+      firstJustM (\format -> runMaybeT $ do
+        guardM $ (features ==) . (features .&.) . propsFeaturesField <$> getPhysicalDeviceFormatProperties physicalDevice format
+        return format
+      )
+      where
+        propsFeaturesField =
+          case tiling of
+            VK_IMAGE_TILING_LINEAR -> getField @"linearTilingFeatures"
+            VK_IMAGE_TILING_OPTIMAL -> getField @"optimalTilingFeatures"
+
+    findDepthFormat :: MonadIO io => VkPhysicalDevice -> io VkFormat
+    findDepthFormat physicalDevice =
+      getFirstFormatWithFeatures
+        physicalDevice
+        VK_IMAGE_TILING_OPTIMAL
+        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+        [VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT]
+      >>=
+      maybe (throwIOAppEx "Failed to find a format that could be used as a depth/stencil attachment.") return
+
+    hasStencilComponent :: VkFormat -> Bool
+    hasStencilComponent VK_FORMAT_D32_SFLOAT = False
+    hasStencilComponent VK_FORMAT_D32_SFLOAT_S8_UINT = True
+    hasStencilComponent VK_FORMAT_D24_UNORM_S8_UINT = True
+    hasStencilComponent _ = throwAppEx "Unsupported depth/stencil format."
+
     createTextureImage :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkPhysicalDeviceMemoryProperties -> FilePath -> ResourceT io (VkImage, VkDeviceMemory)
     createTextureImage device commandPool submissionQueue physDevMemProps texturesPath = runResourceT $ do
       (stagingBuffer, stagingBufferMemory, textureWidth, textureHeight) <- do
@@ -475,7 +532,7 @@ main =
           VK_IMAGE_TILING_OPTIMAL
           (VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
           VK_SHARING_MODE_EXCLUSIVE
-          (findMemoryType' $ VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+          (findMemoryType' VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 
       let transitionImageLayout' = transitionImageLayout device commandPool submissionQueue textureImage VK_FORMAT_R8G8B8A8_UNORM
 
@@ -489,8 +546,8 @@ main =
         textureFileName = "statue.jpg"
         findMemoryType' = findMemoryType physDevMemProps
 
-    createImageView :: MonadIO io => VkDevice -> VkFormat -> VkImage -> ResourceT io VkImageView
-    createImageView device imageFormat image =
+    createImageView :: MonadIO io => VkDevice -> VkFormat -> VkImageAspectFlags -> VkImage -> ResourceT io VkImageView
+    createImageView device imageFormat aspectFlags image =
       allocateAcquire_ $
       newVkImageView device $
       createVk $
@@ -506,7 +563,7 @@ main =
         set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
       ) &*
       setVk @"subresourceRange" (
-        set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+        set @"aspectMask" aspectFlags &*
         set @"baseMipLevel" 0 &*
         set @"levelCount" 1 &*
         set @"baseArrayLayer" 0 &*
@@ -624,26 +681,15 @@ main =
       set @"clipped" VK_TRUE &*
       set @"oldSwapchain" VK_NULL
 
-    createRenderPass :: MonadIO io => VkDevice -> VkFormat -> ResourceT io VkRenderPass
-    createRenderPass device imageFormat =
+    createRenderPass :: MonadIO io => VkDevice -> VkFormat -> VkFormat -> ResourceT io VkRenderPass
+    createRenderPass device imageFormat depthFormat =
       allocateAcquire_ $
       newRenderPass device $
       createVk $
       set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO &*
       set @"pNext" VK_NULL &*
-      set @"attachmentCount" 1 &*
-      setListRef @"pAttachments" [
-        createVk (
-          set @"format" imageFormat &*
-          set @"samples" VK_SAMPLE_COUNT_1_BIT &*
-          set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
-          set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
-          set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
-          set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
-          set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
-          set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-        )
-      ] &*
+      set @"attachmentCount" (lengthNum attachments) &*
+      setListRef @"pAttachments" attachments &*
       set @"subpassCount" 1 &*
       setListRef @"pSubpasses" [
         createVk (
@@ -655,6 +701,11 @@ main =
               set @"layout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
             )
           ] &*
+          setVkRef @"pDepthStencilAttachment" (
+            createVk $
+            set @"attachment" 1 &*
+            set @"layout" VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+          ) &*
           set @"pInputAttachments" VK_NULL &*
           set @"pPreserveAttachments" VK_NULL
         )
@@ -670,6 +721,28 @@ main =
           set @"dstAccessMask" (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
         )
       ]
+
+      where
+        attachments =
+          createVk @VkAttachmentDescription <$> [
+            set @"format" imageFormat &*
+            set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+            set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
+            set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
+            set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
+            set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+            set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+            set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+
+            set @"format" depthFormat &*
+            set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+            set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
+            set @"storeOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+            set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
+            set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+            set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+            set @"finalLayout" VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+          ]
 
     createDescriptorSetLayout :: MonadIO io => VkDevice -> ResourceT io VkDescriptorSetLayout
     createDescriptorSetLayout device =
@@ -869,7 +942,36 @@ main =
           set @"alphaToCoverageEnable" VK_FALSE &*
           set @"alphaToOneEnable" VK_FALSE
         ) &*
-        set @"pDepthStencilState" VK_NULL &*
+        setVkRef @"pDepthStencilState" (
+          createVk $
+          set @"sType" VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO &*
+          set @"pNext" VK_NULL &*
+          set @"depthTestEnable" VK_TRUE &*
+          set @"depthWriteEnable" VK_TRUE &*
+          set @"depthCompareOp" VK_COMPARE_OP_LESS &*
+          set @"depthBoundsTestEnable" VK_FALSE &*
+          set @"minDepthBounds" 0 &*
+          set @"maxDepthBounds" 1 &*
+          set @"stencilTestEnable" VK_FALSE &*
+          setVk @"front" (
+            set @"failOp" VK_STENCIL_OP_KEEP &*
+            set @"passOp" VK_STENCIL_OP_KEEP &*
+            set @"depthFailOp" VK_STENCIL_OP_KEEP &*
+            set @"compareOp" VK_COMPARE_OP_NEVER &*
+            set @"compareMask" 0 &*
+            set @"writeMask" 0 &*
+            set @"reference" 0
+          ) &*
+          setVk @"back" (
+            set @"failOp" VK_STENCIL_OP_KEEP &*
+            set @"passOp" VK_STENCIL_OP_KEEP &*
+            set @"depthFailOp" VK_STENCIL_OP_KEEP &*
+            set @"compareOp" VK_COMPARE_OP_NEVER &*
+            set @"compareMask" 0 &*
+            set @"writeMask" 0 &*
+            set @"reference" 0
+          )
+        ) &*
         setVkRef @"pColorBlendState" (
           createVk $
           set @"sType" VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO &*
@@ -898,17 +1000,17 @@ main =
         set @"basePipelineHandle" VK_NULL_HANDLE &*
         set @"basePipelineIndex" (-1)
 
-    createSwapchainFramebuffers :: MonadIO io => VkDevice -> VkRenderPass -> VkExtent2D -> [VkImageView] -> ResourceT io [VkFramebuffer]
-    createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews =
+    createSwapchainFramebuffers :: MonadIO io => VkDevice -> VkRenderPass -> VkExtent2D -> [VkImageView] -> VkImageView -> ResourceT io [VkFramebuffer]
+    createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews depthImageView =
       allocateAcquire_ $
-      forM swapchainImageViews $ \imageView ->
+      forM swapchainImageViews $ \swapchainImageView ->
       newFramebuffer device $
       createVk $
       set @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO &*
       set @"pNext" VK_NULL &*
       set @"renderPass" renderPass &*
-      set @"attachmentCount" 1 &*
-      setListRef @"pAttachments" [imageView] &*
+      set @"attachmentCount" 2 &*
+      setListRef @"pAttachments" [swapchainImageView, depthImageView] &*
       set @"width" (getField @"width" swapchainExtent) &*
       set @"height" (getField @"height" swapchainExtent) &*
       set @"layers" 1
@@ -1047,7 +1149,7 @@ main =
           set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
           set @"image" image &*
           setVk @"subresourceRange" (
-            set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+            set @"aspectMask" aspectMask &*
             set @"baseMipLevel" 0 &*
             set @"levelCount" 1 &*
             set @"baseArrayLayer" 0 &*
@@ -1055,6 +1157,17 @@ main =
           ) &*
           set @"srcAccessMask" srcAccessMask &*
           set @"dstAccessMask" dstAccessMask
+
+        aspectMask =
+          case newLayout of
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ->
+              VK_IMAGE_ASPECT_DEPTH_BIT .|. (
+                if hasStencilComponent format then
+                  VK_IMAGE_ASPECT_STENCIL_BIT
+                else
+                  0
+              )
+            _ -> VK_IMAGE_ASPECT_COLOR_BIT
 
         (srcAccessMask :: VkAccessFlags, srcStage :: VkPipelineStageFlags, dstAccessMask :: VkAccessFlags, dstStage :: VkPipelineStageFlags) =
           case (oldLayout, newLayout) of
@@ -1067,6 +1180,11 @@ main =
               (
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+              )
+            (VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) ->
+              (
+                0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT .|. VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT), VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
               )
             _ ->
               throwAppEx "Unimplemented layout transition."
@@ -1191,10 +1309,20 @@ main =
             setVk @"offset" (set @"x" 0 &* set @"y" 0) &*
             set @"extent" swapchainExtent
           ) &*
-          set @"clearValueCount" 1 &*
-          setListRef @"pClearValues" [
+          set @"clearValueCount" (lengthNum clearValues) &*
+          setListRef @"pClearValues" clearValues
+
+        clearValues =
+          [
             createVk (
               setVk @"color" (setVec @"float32" $ vec4 0 0 0 1)
+            ),
+
+            createVk (
+              setVk @"depthStencil" (
+                set @"depth" 1 &*
+                set @"stencil" 0
+              )
             )
           ]
 
@@ -1206,11 +1334,7 @@ main =
           UniformBufferObject {
             uboModel = rotateZ (0.5 * secondsOffset * pi),
             uboView = lookAt (vec3 0 0 1) (vec3 2 2 2) (vec3 0 0 0),
-            uboProj = ST.runST $ do
-              m <- ST.unsafeThawDataFrame $ perspective 0.1 10 (pi / 4) aspectRatio
-              y <- ST.readDataFrameOff m 5
-              ST.writeDataFrameOff m 5 (-y)
-              ST.unsafeFreezeDataFrame m
+            uboProj = glToVk %* perspective 0.1 10 (pi / 4) aspectRatio
           }
 
       liftIO $ with (mappedMemory device uniformBufferMemory 0 bufferSize) $ \ptr ->
@@ -1218,6 +1342,11 @@ main =
 
       where
         bufferSize = fromIntegral $ bSizeOf @UniformBufferObject undefined
+        glToVk = mat44f
+          1 0    0   0
+          0 (-1) 0   0
+          0 0    0.5 0.5
+          0 0    0   1
 
     drawFrame :: MonadIO io => VkDevice -> VkSwapchainKHR -> VkQueue -> VkQueue -> [VkCommandBuffer] -> [VkDeviceMemory] -> Float -> TimeSpec -> VkFence -> VkSemaphore -> VkSemaphore -> io Bool
     drawFrame device swapchain graphicsQueue presentQueue commandBuffers uniformBufferMemories aspectRatio renderStartTime inFlightFence imageAvailableSemaphore renderFinishedSemaphore = do
@@ -1269,7 +1398,7 @@ main =
 
 data Vertex =
   Vertex {
-    vtxPos :: Vec2f,
+    vtxPos :: Vec3f,
     vtxColor :: Vec3f,
     vtxTexCoord :: Vec2f
   } deriving (Eq, Show, Generic)
@@ -1288,7 +1417,7 @@ vertexAttributeDescriptionsAt binding =
   createVk @VkVertexInputAttributeDescription <$> [
     set @"binding" binding &*
     set @"location" 0 &*
-    set @"format" VK_FORMAT_R32G32_SFLOAT &*
+    set @"format" VK_FORMAT_R32G32B32_SFLOAT &*
     set @"offset" 0,
 
     set @"binding" binding &*
@@ -1302,8 +1431,8 @@ vertexAttributeDescriptionsAt binding =
     set @"offset" offset2
   ]
   where
-    offset1 = fromIntegral (sizeOf @Vec2f undefined)
-    offset2 = offset1 + fromIntegral (sizeOf @Vec3f undefined)
+    offset1 = fromIntegral (sizeOf $ vtxPos undefined)
+    offset2 = offset1 + fromIntegral (sizeOf $ vtxColor undefined)
 
 data UniformBufferObject =
   UniformBufferObject {
@@ -1813,6 +1942,12 @@ getPhysicalDeviceFeatures physicalDevice =
     vkGetPhysicalDeviceFeatures physicalDevice featuresPtr
     peek featuresPtr
 
+getPhysicalDeviceFormatProperties :: MonadIO io => VkPhysicalDevice -> VkFormat -> io VkFormatProperties
+getPhysicalDeviceFormatProperties physicalDevice format =
+  liftIO $ alloca $ \formatPropsPtr -> do
+    vkGetPhysicalDeviceFormatProperties physicalDevice format formatPropsPtr
+    peek formatPropsPtr
+
 windowEventLoop :: MonadIO io => GLFW.Window -> IORef (Maybe TimeSpec) -> io Bool -> io Bool
 windowEventLoop window lastResizeTimeRef body = fix $ \loop ->
   liftIO (GLFW.windowShouldClose window) >>= \case
@@ -1874,3 +2009,35 @@ doWhileM a = fix $ \loop -> a >>= bool (return ()) loop
 
 lengthNum :: (Foldable t, Num n) => t a -> n
 lengthNum = fromIntegral . length
+
+{-# INLINE mat44f #-}
+mat44f ::
+  Scf -> Scf -> Scf -> Scf ->
+  Scf -> Scf -> Scf -> Scf ->
+  Scf -> Scf -> Scf -> Scf ->
+  Scf -> Scf -> Scf -> Scf ->
+  Mat44f
+mat44f
+  _11 _12 _13 _14
+  _21 _22 _23 _24
+  _31 _32 _33 _34
+  _41 _42 _43 _44
+  = ST.runST $ do
+    df <- ST.newDataFrame
+    ST.writeDataFrameOff df 0 _11
+    ST.writeDataFrameOff df 1 _21
+    ST.writeDataFrameOff df 2 _31
+    ST.writeDataFrameOff df 3 _41
+    ST.writeDataFrameOff df 4 _12
+    ST.writeDataFrameOff df 5 _22
+    ST.writeDataFrameOff df 6 _32
+    ST.writeDataFrameOff df 7 _42
+    ST.writeDataFrameOff df 8 _13
+    ST.writeDataFrameOff df 9 _23
+    ST.writeDataFrameOff df 10 _33
+    ST.writeDataFrameOff df 11 _43
+    ST.writeDataFrameOff df 12 _14
+    ST.writeDataFrameOff df 13 _24
+    ST.writeDataFrameOff df 14 _34
+    ST.writeDataFrameOff df 15 _44
+    ST.unsafeFreezeDataFrame df
