@@ -1,2 +1,5 @@
 #!/usr/bin/env bash
-exec dist/build/vulkanTest/vulkanTest --shaderspath=$(nix-build --no-out-link ../vulkanTest.nix -A shaders) --texturespath=$(nix-build --no-out-link ../vulkanTest.nix -A textures)
+exec dist/build/vulkanTest/vulkanTest \
+  --shaderspath=$(nix-build --no-out-link ../vulkanTest.nix -A shaders) \
+  --texturespath=$(nix-build --no-out-link ../vulkanTest.nix -A textures) \
+  --modelspath=$(nix-build --no-out-link ../vulkanTest.nix -A models)

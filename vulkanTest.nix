@@ -72,11 +72,23 @@ let
       ''
     ) {};
 
+  models =
+    pkgs.callPackage ({ runCommand }:
+      runCommand "${projectName}-models" {
+        buildInputs = [];
+        src = ./models;
+      }
+      ''
+        mkdir -p $out
+        cp $src/*.obj $out
+      ''
+    ) {};
+
   fullBuild =
     pkgs.writeShellScriptBin projectName ''
       LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${pkgs.vulkan-validation-layers}/lib"
       XDG_DATA_DIRS="$XDG_DATA_DIRS:${pkgs.vulkan-validation-layers}/share"
-      exec ${main}/bin/vulkanTest --shaderspath='${shaders}' --texturespath='${textures}' "$@"
+      exec ${main}/bin/vulkanTest --shaderspath='${shaders}' --texturespath='${textures}' --modelspath='${models}' "$@"
     '';
 in
-  { inherit pkgs haskellPackages main shaders textures fullBuild; }
+  { inherit pkgs haskellPackages main shaders textures models fullBuild; }
