@@ -33,6 +33,7 @@ executable vulkanTest
     transformers,
     vector,
     vulkan-api,
+    wavefront,
 
     base
   default-language: Haskell2010

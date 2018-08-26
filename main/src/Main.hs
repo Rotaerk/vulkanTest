@@ -14,6 +14,7 @@ module Main where
 
 import Prelude hiding (init)
 import qualified Codec.Picture as JP
+import qualified Codec.Wavefront as WF
 import Control.Applicative
 import Control.Exception
 import Control.Monad
@@ -34,7 +35,8 @@ import Data.IORef
 import Data.List
 import Data.Maybe
 import qualified Data.Set as Set
-import qualified Data.Vector.Storable as V
+import qualified Data.Vector as V
+import qualified Data.Vector.Storable as VS
 import Foreign.C.String
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Array
@@ -70,6 +72,9 @@ data CommandLineArguments =
 
 (initialWindowWidth, initialWindowHeight) = (800, 600)
 
+modelFileName = "chalet.obj"
+textureFileName = "chalet.jpg"
+
 extensions :: [CString]
 extensions =
   [
@@ -98,29 +103,6 @@ validationLayers =
 maxFramesInFlight :: Int
 maxFramesInFlight = 2
 
-xVertices :: DataFrame Vertex '[XN 3]
-xVertices =
-  fromJust $
-  fromList (D @3) $ scalar <$> [
-    Vertex (vec3 (-0.5) (-0.5) 0) (vec3 1 0 0) (vec2 1 0),
-    Vertex (vec3 0.5 (-0.5) 0) (vec3 0 1 0) (vec2 0 0),
-    Vertex (vec3 0.5 0.5 0) (vec3 0 0 1) (vec2 0 1),
-    Vertex (vec3 (-0.5) 0.5 0) (vec3 1 1 1) (vec2 1 1),
-
-    Vertex (vec3 (-0.5) (-0.5) (-0.5)) (vec3 1 0 0) (vec2 1 0),
-    Vertex (vec3 0.5 (-0.5) (-0.5)) (vec3 0 1 0) (vec2 0 0),
-    Vertex (vec3 0.5 0.5 (-0.5)) (vec3 0 0 1) (vec2 0 1),
-    Vertex (vec3 (-0.5) 0.5 (-0.5)) (vec3 1 1 1) (vec2 1 1)
-  ]
-
-xIndices :: DataFrame Word16 '[XN 3]
-xIndices =
-  fromJust $
-  fromList (D @3) [
-    0, 1, 2, 2, 3, 0,
-    4, 5, 6, 6, 7, 4
-  ]
-
 main :: IO ()
 main =
   do
@@ -141,9 +123,12 @@ main =
     putStrLn $ "Textures path is: '" ++ texturesPath ++ "'."
     putStrLn $ "Models path is: '" ++ modelsPath ++ "'."
 
-    case (xVertices, xIndices) of
+    putStrLn $ "Loading model..."
+    loadModel modelsPath >>= \case
       (XFrame vertices, XFrame indices) ->
         runResourceT $ do
+          ioPutStrLn "Model loaded."
+
           -- Before initializing, probably should setErrorCallback
           initializeGLFW
           ioPutStrLn "GLFW initialized."
@@ -521,7 +506,7 @@ main =
 
         liftIO $
           with (mappedMemory device stagingBufferMemory 0 (fromIntegral imageDataSize)) $ \stagingBufferPtr ->
-          V.unsafeWith (JP.imageData jpImage) $ \imageDataPtr ->
+          VS.unsafeWith (JP.imageData jpImage) $ \imageDataPtr ->
           copyBytes stagingBufferPtr (castPtr imageDataPtr) imageDataSize
 
         return (stagingBuffer, stagingBufferMemory, textureWidth, textureHeight)
@@ -547,8 +532,51 @@ main =
       return (textureImage, textureImageMemory)
 
       where
-        textureFileName = "statue.jpg"
         findMemoryType' = findMemoryType physDevMemProps
+
+    loadModel :: MonadIO io => FilePath -> io (DataFrame Vertex '[XN 3], DataFrame Word32 '[XN 3])
+    loadModel modelsPath = do
+      WF.WavefrontOBJ vPositions vTexCoords _ _ _ vFaceElements _ <-
+        WF.fromFile (modelsPath </> modelFileName) >>= either
+          (\errorMsg -> throwIOAppEx $ "Failed to read '" ++ modelFileName ++ "': " ++ errorMsg)
+          return
+
+      let
+        faceIndexLists =
+          fmap (
+            (\(WF.Face idx0 idx1 idx2 idxs) ->
+              fmap (\(WF.FaceIndex posIdx (Just texCoordIdx) _) -> (posIdx, texCoordIdx)) $
+              idx0:idx1:idx2:idxs
+            ) .
+            WF.elValue
+          ) .
+          V.toList $
+          vFaceElements
+
+        uniqueFaceIndices = Set.fromList . join $ faceIndexLists
+
+        vertices :: DataFrame Vertex '[XN 3]
+        vertices =
+          fromJust .
+          fromList (D @3) .
+          fmap (\(posIdx, texCoordIdx) ->
+            let
+              (WF.Location x y z _, WF.TexCoord r s _) = (vPositions V.! (posIdx - 1), vTexCoords V.! (texCoordIdx - 1))
+            in
+              scalar $ Vertex (vec3 x y z) (vec3 1 1 1) (vec2 r (1 - s))
+          ) .
+          Set.toList $
+          uniqueFaceIndices
+
+        indices :: DataFrame Word32 '[XN 3]
+        indices =
+          fromJust .
+          fromList (D @3) .
+          intercalate [0xFFFFFFFF] .
+          (fmap . fmap) (fromIntegral . fromJust . (`Set.lookupIndex` uniqueFaceIndices)) $
+          faceIndexLists
+
+      return (vertices, indices)
 
     createImageView :: MonadIO io => VkDevice -> VkFormat -> VkImageAspectFlags -> VkImage -> ResourceT io VkImageView
     createImageView device imageFormat aspectFlags image =
@@ -891,8 +919,8 @@ main =
           createVk $
           set @"sType" VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO &*
           set @"pNext" VK_NULL &*
-          set @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &*
-          set @"primitiveRestartEnable" VK_FALSE
+          set @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &*
+          set @"primitiveRestartEnable" VK_TRUE
         ) &*
         setVkRef @"pViewportState" (
           createVk $
@@ -906,7 +934,7 @@ main =
               set @"width" (fromIntegral . getField @"width" $ swapchainExtent) &*
               set @"height" (fromIntegral . getField @"height" $ swapchainExtent) &*
               set @"minDepth" 0 &*
-              set @"maxDepth" 0
+              set @"maxDepth" 1
             )
           ] &*
           set @"scissorCount" 1 &*
@@ -1289,7 +1317,7 @@ main =
           cmdBeginRenderPass commandBuffer (renderPassBeginInfo swapchainFramebuffer) VK_SUBPASS_CONTENTS_INLINE
           liftIO $ vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
           cmdBindVertexBuffers commandBuffer 0 [(vertexBuffer, 0)]
-          liftIO $ vkCmdBindIndexBuffer commandBuffer indexBuffer 0 VK_INDEX_TYPE_UINT16
+          liftIO $ vkCmdBindIndexBuffer commandBuffer indexBuffer 0 VK_INDEX_TYPE_UINT32
           cmdBindDescriptorSets commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS pipelineLayout 0 [descriptorSet] []
           liftIO $ vkCmdDrawIndexed commandBuffer indexCount 1 0 0 0
           liftIO $ vkCmdEndRenderPass commandBuffer
