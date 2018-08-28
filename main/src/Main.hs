@@ -18,7 +18,7 @@ import qualified Codec.Wavefront as WF
 import Control.Applicative
 import Control.Exception
 import Control.Monad
-import Control.Monad.Extra (firstJustM, findM, unlessM)
+import Control.Monad.Extra (firstJustM, findM, unlessM, whenM)
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Maybe
@@ -35,6 +35,7 @@ import Data.IORef
 import Data.List
 import Data.Maybe
 import qualified Data.Set as Set
+import Data.Tuple.Extra (both)
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable as VS
 import Foreign.C.String
@@ -190,13 +191,16 @@ main =
 
           let findMemoryType' = findMemoryType physDevMemProps
 
-          (textureImage, textureImageMemory) <- createTextureImage device commandPool graphicsQueue physDevMemProps texturesPath
+          (textureImage, textureImageMemory, textureWidth, textureHeight, textureNumMipLevels) <- createTextureImage device commandPool graphicsQueue physDevMemProps texturesPath
           ioPutStrLn "Texture image created."
 
-          textureImageView <- createImageView device VK_FORMAT_R8G8B8A8_UNORM VK_IMAGE_ASPECT_COLOR_BIT textureImage
+          generateMipmaps device physicalDevice commandPool graphicsQueue textureWidth textureHeight textureNumMipLevels VK_FORMAT_R8G8B8A8_UNORM textureImage
+          ioPutStrLn "Mipmaps generated."
+
+          textureImageView <- createImageView device VK_FORMAT_R8G8B8A8_UNORM VK_IMAGE_ASPECT_COLOR_BIT textureNumMipLevels textureImage
           ioPutStrLn "Texture image view created."
 
-          textureSampler <- createTextureSampler device
+          textureSampler <- createTextureSampler device textureNumMipLevels
           ioPutStrLn "Texture sampler created."
 
           (vertexBuffer, vertexBufferMemory) <- prepareBuffer device commandPool graphicsQueue physDevMemProps vertices VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
@@ -243,7 +247,7 @@ main =
             swapchainImages <- listSwapchainImages device swapchain
             ioPutStrLn "Swapchain images obtained."
 
-            swapchainImageViews <- forM swapchainImages $ createImageView device swapchainImageFormat VK_IMAGE_ASPECT_COLOR_BIT
+            swapchainImageViews <- forM swapchainImages $ createImageView device swapchainImageFormat VK_IMAGE_ASPECT_COLOR_BIT 1
             ioPutStrLn "Swapchain image views created."
 
             let swapchainImageCount = length swapchainImages
@@ -278,6 +282,7 @@ main =
                 device
                 (fromIntegral swapchainWidth)
                 (fromIntegral swapchainHeight)
+                1
                 depthFormat
                 VK_IMAGE_TILING_OPTIMAL
                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
@@ -285,9 +290,9 @@ main =
                 (findMemoryType' VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
             ioPutStrLn "Depth image created."
 
-            transitionImageLayout device commandPool graphicsQueue depthImage depthFormat VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+            transitionImageLayout device commandPool graphicsQueue depthImage depthFormat 1 VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
 
-            depthImageView <- createImageView device depthFormat VK_IMAGE_ASPECT_DEPTH_BIT depthImage
+            depthImageView <- createImageView device depthFormat VK_IMAGE_ASPECT_DEPTH_BIT 1 depthImage
             ioPutStrLn "Depth image view created."
 
             swapchainFramebuffers <- createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews depthImageView
@@ -482,57 +487,160 @@ main =
     hasStencilComponent VK_FORMAT_D24_UNORM_S8_UINT = True
     hasStencilComponent _ = throwAppEx "Unsupported depth/stencil format."
 
-    createTextureImage :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkPhysicalDeviceMemoryProperties -> FilePath -> ResourceT io (VkImage, VkDeviceMemory)
+    createTextureImage :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkPhysicalDeviceMemoryProperties -> FilePath -> ResourceT io (VkImage, VkDeviceMemory, Word32, Word32, Word32)
     createTextureImage device commandPool submissionQueue physDevMemProps texturesPath = runResourceT $ do
-      (stagingBuffer, stagingBufferMemory, textureWidth, textureHeight) <- do
-        jpImage <-
-          liftIO $ JP.readImage (texturesPath </> textureFileName) >>= \case
-            Right (JP.ImageRGBA8 jpImage) -> return jpImage
-            Right di | jpImage <- JP.convertRGBA8 di -> return jpImage
-            Left errorMsg -> throwIOAppEx ("Failed to read '" ++ textureFileName ++ "': " ++ errorMsg)
+      jpImage <-
+        liftIO $ JP.readImage (texturesPath </> textureFileName) >>= \case
+          Right (JP.ImageRGBA8 jpImage) -> return jpImage
+          Right di | jpImage <- JP.convertRGBA8 di -> return jpImage
+          Left errorMsg -> throwIOAppEx ("Failed to read '" ++ textureFileName ++ "': " ++ errorMsg)
 
-        let
-          textureWidth = JP.imageWidth jpImage
-          textureHeight = JP.imageHeight jpImage
-          imageDataSize = 4 * textureWidth * textureHeight
+      let
+        (width :: Word32, height :: Word32) = both fromIntegral (JP.imageWidth jpImage, JP.imageHeight jpImage)
+        (imageDataSize :: VkDeviceSize) = fromIntegral $ 4 * width * height
 
-        (stagingBuffer, stagingBufferMemory) <-
-          createAllocatedBuffer
-            device
-            (fromIntegral imageDataSize)
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT
-            VK_SHARING_MODE_EXCLUSIVE
-            (findMemoryType' $ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+      (stagingBuffer, stagingBufferMemory) <-
+        createAllocatedBuffer
+          device
+          imageDataSize
+          VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+          VK_SHARING_MODE_EXCLUSIVE
+          (findMemoryType' $ VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
 
-        liftIO $
-          with (mappedMemory device stagingBufferMemory 0 (fromIntegral imageDataSize)) $ \stagingBufferPtr ->
-          VS.unsafeWith (JP.imageData jpImage) $ \imageDataPtr ->
-          copyBytes stagingBufferPtr (castPtr imageDataPtr) imageDataSize
+      liftIO $
+        with (mappedMemory device stagingBufferMemory 0 imageDataSize) $ \stagingBufferPtr ->
+        VS.unsafeWith (JP.imageData jpImage) $ \imageDataPtr ->
+        copyBytes stagingBufferPtr (castPtr imageDataPtr) (fromIntegral imageDataSize)
 
-        return (stagingBuffer, stagingBufferMemory, textureWidth, textureHeight)
+      let numMipLevels = floor . logBase 2 . fromIntegral $ max width height
 
       (textureImage, textureImageMemory) <-
         lift $
         createAllocatedImage
           device
-          (fromIntegral textureWidth)
-          (fromIntegral textureHeight)
+          width
+          height
+          numMipLevels
           VK_FORMAT_R8G8B8A8_UNORM
           VK_IMAGE_TILING_OPTIMAL
-          (VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
+          (VK_IMAGE_USAGE_TRANSFER_SRC_BIT .|. VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
           VK_SHARING_MODE_EXCLUSIVE
           (findMemoryType' VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 
-      let transitionImageLayout' = transitionImageLayout device commandPool submissionQueue textureImage VK_FORMAT_R8G8B8A8_UNORM
+      transitionImageLayout device commandPool submissionQueue textureImage VK_FORMAT_R8G8B8A8_UNORM numMipLevels VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+      copyBufferToImage device commandPool submissionQueue stagingBuffer textureImage width height
 
-      transitionImageLayout' VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-      copyBufferToImage device commandPool submissionQueue stagingBuffer textureImage (fromIntegral textureWidth) (fromIntegral textureHeight)
-      transitionImageLayout' VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-
-      return (textureImage, textureImageMemory)
+      return (textureImage, textureImageMemory, width, height, numMipLevels)
 
       where
         findMemoryType' = findMemoryType physDevMemProps
+
+    generateMipmaps :: MonadUnliftIO io => VkDevice -> VkPhysicalDevice -> VkCommandPool -> VkQueue -> Word32 -> Word32 -> Word32 -> VkFormat -> VkImage -> io ()
+    generateMipmaps device physicalDevice commandPool submissionQueue textureWidth textureHeight numMipLevels textureImageFormat textureImage = do
+      whenM
+        (
+          (0 ==) .
+          (VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT .&.) .
+          getField @"optimalTilingFeatures" <$>
+          getPhysicalDeviceFormatProperties physicalDevice textureImageFormat
+        )
+        (throwIOAppEx "Texture image format does not support linear blitting!")
+
+      submitCommands device commandPool submissionQueue $ \commandBuffer -> do
+        forM_ xfers $ \((srcMipLevel, srcWidth, srcHeight), (dstMipLevel, dstWidth, dstHeight)) -> do
+
+          let srcFixedBarrierSettings = fixedBarrierSettingsFor srcMipLevel
+
+          cmdPipelineBarrier commandBuffer VK_PIPELINE_STAGE_TRANSFER_BIT VK_PIPELINE_STAGE_TRANSFER_BIT 0 [] []
+            [
+              createVk $
+              srcFixedBarrierSettings &*
+              set @"oldLayout" VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &*
+              set @"newLayout" VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &*
+              set @"srcAccessMask" VK_ACCESS_TRANSFER_WRITE_BIT &*
+              set @"dstAccessMask" VK_ACCESS_TRANSFER_READ_BIT
+            ]
+
+          cmdBlitImage
+            commandBuffer
+            textureImage VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+            textureImage VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+            VK_FILTER_LINEAR
+            [blit srcMipLevel srcWidth srcHeight dstMipLevel dstWidth dstHeight]
+
+          cmdPipelineBarrier commandBuffer VK_PIPELINE_STAGE_TRANSFER_BIT VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT 0 [] []
+            [
+              createVk $
+              srcFixedBarrierSettings &*
+              set @"oldLayout" VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &*
+              set @"newLayout" VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &*
+              set @"srcAccessMask" VK_ACCESS_TRANSFER_READ_BIT &*
+              set @"dstAccessMask" VK_ACCESS_SHADER_READ_BIT
+            ]
+
+        cmdPipelineBarrier commandBuffer VK_PIPELINE_STAGE_TRANSFER_BIT VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT 0 [] []
+          [
+            createVk $
+            fixedBarrierSettingsFor (numMipLevels - 1) &*
+            set @"oldLayout" VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &*
+            set @"newLayout" VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &*
+            set @"srcAccessMask" VK_ACCESS_TRANSFER_WRITE_BIT &*
+            set @"dstAccessMask" VK_ACCESS_SHADER_READ_BIT
+          ]
+
+      where
+        limDivBy2 :: Word32 -> Word32
+        limDivBy2 x = if x > 1 then x `div` 2 else 1
+
+        srcs :: [(Word32, Word32, Word32)]
+        srcs = iterate (\(i,w,h) -> (i+1, limDivBy2 w, limDivBy2 h)) (0, textureWidth, textureHeight)
+
+        dsts :: [(Word32, Word32, Word32)]
+        dsts = tail srcs
+
+        xfers :: [((Word32, Word32, Word32), (Word32, Word32, Word32))]
+        xfers = take (fromIntegral numMipLevels - 1) $ zip srcs dsts
+
+        fixedBarrierSettingsFor :: Word32 -> CreateVkStruct VkImageMemoryBarrier ["sType", "pNext", "image", "srcQueueFamilyIndex", "dstQueueFamilyIndex", "subresourceRange"] ()
+        fixedBarrierSettingsFor mipLevel =
+          set @"sType" VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER &*
+          set @"pNext" VK_NULL &*
+          set @"image" textureImage &*
+          set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+          set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+          setVk @"subresourceRange" (
+            set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+            set @"baseMipLevel" mipLevel &*
+            set @"levelCount" 1 &*
+            set @"baseArrayLayer" 0 &*
+            set @"layerCount" 1
+          )
+
+        blit :: Word32 -> Word32 -> Word32 -> Word32 -> Word32 -> Word32 -> VkImageBlit
+        blit srcMipLevel srcWidth srcHeight dstMipLevel dstWidth dstHeight =
+          createVk $
+          setVec @"srcOffsets" (
+            vec2
+              (createVk $ set @"x" 0 &* set @"y" 0 &* set @"z" 0)
+              (createVk $ set @"x" (fromIntegral srcWidth) &* set @"y" (fromIntegral srcHeight) &* set @"z" 1)
+          ) &*
+          setVk @"srcSubresource" (
+            set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+            set @"mipLevel" srcMipLevel &*
+            set @"baseArrayLayer" 0 &*
+            set @"layerCount" 1
+          ) &*
+          setVec @"dstOffsets" (
+            vec2
+              (createVk $ set @"x" 0 &* set @"y" 0 &* set @"z" 0)
+              (createVk $ set @"x" (fromIntegral dstWidth) &* set @"y" (fromIntegral dstHeight) &* set @"z" 1)
+          ) &*
+          setVk @"dstSubresource" (
+            set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+            set @"mipLevel" dstMipLevel &*
+            set @"baseArrayLayer" 0 &*
+            set @"layerCount" 1
+          )
 
     loadModel :: MonadIO io => FilePath -> io (DataFrame Vertex '[XN 3], DataFrame Word32 '[XN 3])
     loadModel modelsPath = do
@@ -578,8 +686,8 @@ main =
 
       return (vertices, indices)
 
-    createImageView :: MonadIO io => VkDevice -> VkFormat -> VkImageAspectFlags -> VkImage -> ResourceT io VkImageView
-    createImageView device imageFormat aspectFlags image =
+    createImageView :: MonadIO io => VkDevice -> VkFormat -> VkImageAspectFlags -> Word32 -> VkImage -> ResourceT io VkImageView
+    createImageView device imageFormat aspectFlags numMipLevels image =
       allocateAcquire_ $
       newVkImageView device $
       createVk $
@@ -597,13 +705,13 @@ main =
       setVk @"subresourceRange" (
         set @"aspectMask" aspectFlags &*
         set @"baseMipLevel" 0 &*
-        set @"levelCount" 1 &*
+        set @"levelCount" numMipLevels &*
         set @"baseArrayLayer" 0 &*
         set @"layerCount" 1
       )
 
-    createTextureSampler :: MonadIO io => VkDevice -> ResourceT io VkSampler
-    createTextureSampler device =
+    createTextureSampler :: MonadIO io => VkDevice -> Word32 -> ResourceT io VkSampler
+    createTextureSampler device numMipLevels =
       allocateAcquire_ $
       newSampler device $
       createVk $
@@ -621,8 +729,8 @@ main =
       set @"compareEnable" VK_FALSE &*
       set @"compareOp" VK_COMPARE_OP_ALWAYS &*
       set @"mipmapMode" VK_SAMPLER_MIPMAP_MODE_LINEAR &*
-      set @"maxLod" 0 &*
       set @"minLod" 0 &*
+      set @"maxLod" (fromIntegral numMipLevels) &*
       set @"mipLodBias" 0
 
     createSemaphore :: MonadIO io => VkDevice -> ResourceT io VkSemaphore
@@ -1126,8 +1234,8 @@ main =
 
       return (buffer, bufferMemory)
 
-    createAllocatedImage :: MonadIO io => VkDevice -> Word32 -> Word32 -> VkFormat -> VkImageTiling -> VkImageUsageFlags -> VkSharingMode -> (Word32 -> Word32) -> ResourceT io (VkImage, VkDeviceMemory)
-    createAllocatedImage device width height format tiling usageFlags sharingMode memoryTypeIndexFromMemoryTypeBits = do
+    createAllocatedImage :: MonadIO io => VkDevice -> Word32 -> Word32 -> Word32 -> VkFormat -> VkImageTiling -> VkImageUsageFlags -> VkSharingMode -> (Word32 -> Word32) -> ResourceT io (VkImage, VkDeviceMemory)
+    createAllocatedImage device width height numMipLevels format tiling usageFlags sharingMode memoryTypeIndexFromMemoryTypeBits = do
       image <-
         allocateAcquire_ $
         newImage device $
@@ -1140,7 +1248,7 @@ main =
           set @"height" height &*
           set @"depth" 1
         ) &*
-        set @"mipLevels" 1 &*
+        set @"mipLevels" numMipLevels &*
         set @"arrayLayers" 1 &*
         set @"format" format &*
         set @"tiling" tiling &*
@@ -1165,8 +1273,8 @@ main =
 
       return (image, imageMemory)
 
-    transitionImageLayout :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkImage -> VkFormat -> VkImageLayout -> VkImageLayout -> io ()
-    transitionImageLayout device commandPool submissionQueue image format oldLayout newLayout =
+    transitionImageLayout :: MonadUnliftIO io => VkDevice -> VkCommandPool -> VkQueue -> VkImage -> VkFormat -> Word32 -> VkImageLayout -> VkImageLayout -> io ()
+    transitionImageLayout device commandPool submissionQueue image format numMipLevels oldLayout newLayout =
       submitCommands device commandPool submissionQueue $ \commandBuffer ->
         cmdPipelineBarrier commandBuffer srcStage dstStage 0 [] [] [imageBarrier]
 
@@ -1183,7 +1291,7 @@ main =
           setVk @"subresourceRange" (
             set @"aspectMask" aspectMask &*
             set @"baseMipLevel" 0 &*
-            set @"levelCount" 1 &*
+            set @"levelCount" numMipLevels &*
             set @"baseArrayLayer" 0 &*
             set @"layerCount" 1
           ) &*
@@ -1790,6 +1898,12 @@ cmdCopyBufferToImage commandBuffer srcBuffer dstImage dstImageLayout copyRegions
   liftIO $
   withArray copyRegions $ \copyRegionsPtr ->
   vkCmdCopyBufferToImage commandBuffer srcBuffer dstImage dstImageLayout (lengthNum copyRegions) copyRegionsPtr
+
+cmdBlitImage :: MonadIO io => VkCommandBuffer -> VkImage -> VkImageLayout -> VkImage -> VkImageLayout -> VkFilter -> [VkImageBlit] -> io ()
+cmdBlitImage commandBuffer srcImage srcImageLayout dstImage dstImageLayout filter blitRegions =
+  liftIO $
+  withArray blitRegions $ \blitRegionsPtr ->
+  vkCmdBlitImage commandBuffer srcImage srcImageLayout dstImage dstImageLayout (lengthNum blitRegions) blitRegionsPtr filter
 
 cmdPipelineBarrier ::
   MonadIO io =>
