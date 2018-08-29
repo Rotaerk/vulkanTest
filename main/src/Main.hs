@@ -166,6 +166,9 @@ main =
             getFirstSuitablePhysicalDeviceAndProperties vulkanInstance surface
           ioPutStrLn "Suitable physical device found."
 
+          msaaSamples <- getMaxUsableSampleCount physicalDevice
+          ioPutStrLn "Max usable sample count identified."
+
           let distinctQfis = distinct [graphicsQfi, presentQfi]
 
           device <- createDevice physicalDevice distinctQfis
@@ -271,11 +274,30 @@ main =
             depthFormat <- findDepthFormat physicalDevice
             ioPutStrLn "Depth format found."
 
-            renderPass <- createRenderPass device swapchainImageFormat depthFormat
+            renderPass <- createRenderPass device swapchainImageFormat depthFormat msaaSamples
             ioPutStrLn "Render pass created."
 
-            graphicsPipeline <- createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent
+            graphicsPipeline <- createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent msaaSamples
             ioPutStrLn "Graphics pipeline created."
+
+            (colorImage, colorImageMemory) <-
+              createAllocatedImage
+                device
+                (fromIntegral swapchainWidth)
+                (fromIntegral swapchainHeight)
+                1
+                msaaSamples
+                swapchainImageFormat
+                VK_IMAGE_TILING_OPTIMAL
+                (VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT .|. VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+                VK_SHARING_MODE_EXCLUSIVE
+                (findMemoryType' VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+            ioPutStrLn "Color image created."
+
+            transitionImageLayout device commandPool graphicsQueue colorImage swapchainImageFormat 1 VK_IMAGE_LAYOUT_UNDEFINED VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+
+            colorImageView <- createImageView device swapchainImageFormat VK_IMAGE_ASPECT_COLOR_BIT 1 colorImage
+            ioPutStrLn "Color image view created."
 
             (depthImage, depthImageMemory) <-
               createAllocatedImage
@@ -283,6 +305,7 @@ main =
                 (fromIntegral swapchainWidth)
                 (fromIntegral swapchainHeight)
                 1
+                msaaSamples
                 depthFormat
                 VK_IMAGE_TILING_OPTIMAL
                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
@@ -295,7 +318,7 @@ main =
             depthImageView <- createImageView device depthFormat VK_IMAGE_ASPECT_DEPTH_BIT 1 depthImage
             ioPutStrLn "Depth image view created."
 
-            swapchainFramebuffers <- createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews depthImageView
+            swapchainFramebuffers <- createSwapchainFramebuffers device renderPass swapchainExtent colorImageView swapchainImageViews depthImageView
             ioPutStrLn "Framebuffers created."
 
             commandBuffers <- allocateCommandBuffers device commandPool (lengthNum swapchainFramebuffers)
@@ -409,6 +432,25 @@ main =
 
       return (graphicsQfi, presentQfi)
 
+    getMaxUsableSampleCount :: MonadIO io => VkPhysicalDevice -> io VkSampleCountFlagBits
+    getMaxUsableSampleCount physicalDevice = do
+      limits <- getField @"limits" <$> getPhysicalDeviceProperties physicalDevice
+      let
+        sampleCounts :: VkSampleCountFlags
+        sampleCounts = min (getField @"framebufferColorSampleCounts" limits) (getField @"framebufferDepthSampleCounts" limits)
+      return $
+        fromMaybe VK_SAMPLE_COUNT_1_BIT .
+        fmap snd .
+        find ((0 /=) . (sampleCounts .&.) . fst) $
+        [
+          (VK_SAMPLE_COUNT_64_BIT, VK_SAMPLE_COUNT_64_BIT),
+          (VK_SAMPLE_COUNT_32_BIT, VK_SAMPLE_COUNT_32_BIT),
+          (VK_SAMPLE_COUNT_16_BIT, VK_SAMPLE_COUNT_16_BIT),
+          (VK_SAMPLE_COUNT_8_BIT, VK_SAMPLE_COUNT_8_BIT),
+          (VK_SAMPLE_COUNT_4_BIT, VK_SAMPLE_COUNT_4_BIT),
+          (VK_SAMPLE_COUNT_2_BIT, VK_SAMPLE_COUNT_2_BIT)
+        ]
+
     createDevice :: MonadIO io => VkPhysicalDevice -> [Word32] -> ResourceT io VkDevice
     createDevice physicalDevice qfis =
       allocateAcquire_ $
@@ -521,6 +563,7 @@ main =
           width
           height
           numMipLevels
+          VK_SAMPLE_COUNT_1_BIT
           VK_FORMAT_R8G8B8A8_UNORM
           VK_IMAGE_TILING_OPTIMAL
           (VK_IMAGE_USAGE_TRANSFER_SRC_BIT .|. VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
@@ -821,8 +864,8 @@ main =
       set @"clipped" VK_TRUE &*
       set @"oldSwapchain" VK_NULL
 
-    createRenderPass :: MonadIO io => VkDevice -> VkFormat -> VkFormat -> ResourceT io VkRenderPass
-    createRenderPass device imageFormat depthFormat =
+    createRenderPass :: MonadIO io => VkDevice -> VkFormat -> VkFormat -> VkSampleCountFlagBits -> ResourceT io VkRenderPass
+    createRenderPass device imageFormat depthFormat sampleCount =
       allocateAcquire_ $
       newRenderPass device $
       createVk $
@@ -846,6 +889,12 @@ main =
             set @"attachment" 1 &*
             set @"layout" VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
           ) &*
+          setListRef @"pResolveAttachments" [
+            createVk (
+              set @"attachment" 2 &*
+              set @"layout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+            )
+          ] &*
           set @"pInputAttachments" VK_NULL &*
           set @"pPreserveAttachments" VK_NULL
         )
@@ -866,22 +915,31 @@ main =
         attachments =
           createVk @VkAttachmentDescription <$> [
             set @"format" imageFormat &*
-            set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+            set @"samples" sampleCount &*
             set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
             set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
             set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
             set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
             set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
-            set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            set @"finalLayout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 
             set @"format" depthFormat &*
-            set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+            set @"samples" sampleCount &*
             set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
             set @"storeOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
             set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
             set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
             set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
-            set @"finalLayout" VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+            set @"finalLayout" VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+
+            set @"format" imageFormat &*
+            set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+            set @"loadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
+            set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
+            set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
+            set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+            set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+            set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
           ]
 
     createDescriptorSetLayout :: MonadIO io => VkDevice -> ResourceT io VkDescriptorSetLayout
@@ -979,8 +1037,8 @@ main =
               set @"pTexelBufferView" VK_NULL
             ]
 
-    createGraphicsPipeline :: MonadUnliftIO io => VkDevice -> FilePath -> VkPipelineLayout -> VkRenderPass -> VkExtent2D -> ResourceT io VkPipeline
-    createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent = runResourceT $ do
+    createGraphicsPipeline :: MonadUnliftIO io => VkDevice -> FilePath -> VkPipelineLayout -> VkRenderPass -> VkExtent2D -> VkSampleCountFlagBits -> ResourceT io VkPipeline
+    createGraphicsPipeline device shadersPath pipelineLayout renderPass swapchainExtent sampleCount = runResourceT $ do
       vertShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.vert.spv")
       ioPutStrLn "Vertex shader module created."
       fragShaderModule <- createShaderModuleFromFile device (shadersPath </> "shader.frag.spv")
@@ -1076,7 +1134,7 @@ main =
           set @"sType" VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO &*
           set @"pNext" VK_NULL &*
           set @"sampleShadingEnable" VK_FALSE &*
-          set @"rasterizationSamples" VK_SAMPLE_COUNT_1_BIT &*
+          set @"rasterizationSamples" sampleCount &*
           set @"minSampleShading" 1 &*
           set @"pSampleMask" VK_NULL &*
           set @"alphaToCoverageEnable" VK_FALSE &*
@@ -1140,20 +1198,23 @@ main =
         set @"basePipelineHandle" VK_NULL_HANDLE &*
         set @"basePipelineIndex" (-1)
 
-    createSwapchainFramebuffers :: MonadIO io => VkDevice -> VkRenderPass -> VkExtent2D -> [VkImageView] -> VkImageView -> ResourceT io [VkFramebuffer]
-    createSwapchainFramebuffers device renderPass swapchainExtent swapchainImageViews depthImageView =
+    createSwapchainFramebuffers :: MonadIO io => VkDevice -> VkRenderPass -> VkExtent2D -> VkImageView -> [VkImageView] -> VkImageView -> ResourceT io [VkFramebuffer]
+    createSwapchainFramebuffers device renderPass swapchainExtent colorImageView swapchainImageViews depthImageView =
       allocateAcquire_ $
       forM swapchainImageViews $ \swapchainImageView ->
-      newFramebuffer device $
-      createVk $
-      set @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO &*
-      set @"pNext" VK_NULL &*
-      set @"renderPass" renderPass &*
-      set @"attachmentCount" 2 &*
-      setListRef @"pAttachments" [swapchainImageView, depthImageView] &*
-      set @"width" (getField @"width" swapchainExtent) &*
-      set @"height" (getField @"height" swapchainExtent) &*
-      set @"layers" 1
+      let
+        attachments = [colorImageView, depthImageView, swapchainImageView]
+      in
+        newFramebuffer device $
+        createVk $
+        set @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO &*
+        set @"pNext" VK_NULL &*
+        set @"renderPass" renderPass &*
+        set @"attachmentCount" (lengthNum attachments) &*
+        setListRef @"pAttachments" attachments &*
+        set @"width" (getField @"width" swapchainExtent) &*
+        set @"height" (getField @"height" swapchainExtent) &*
+        set @"layers" 1
 
     prepareBuffer ::
       (MonadUnliftIO io, Storable vs, PrimBytes vs) =>
@@ -1234,8 +1295,8 @@ main =
 
       return (buffer, bufferMemory)
 
-    createAllocatedImage :: MonadIO io => VkDevice -> Word32 -> Word32 -> Word32 -> VkFormat -> VkImageTiling -> VkImageUsageFlags -> VkSharingMode -> (Word32 -> Word32) -> ResourceT io (VkImage, VkDeviceMemory)
-    createAllocatedImage device width height numMipLevels format tiling usageFlags sharingMode memoryTypeIndexFromMemoryTypeBits = do
+    createAllocatedImage :: MonadIO io => VkDevice -> Word32 -> Word32 -> Word32 -> VkSampleCountFlagBits -> VkFormat -> VkImageTiling -> VkImageUsageFlags -> VkSharingMode -> (Word32 -> Word32) -> ResourceT io (VkImage, VkDeviceMemory)
+    createAllocatedImage device width height numMipLevels numSamples format tiling usageFlags sharingMode memoryTypeIndexFromMemoryTypeBits = do
       image <-
         allocateAcquire_ $
         newImage device $
@@ -1254,7 +1315,7 @@ main =
         set @"tiling" tiling &*
         set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
         set @"usage" usageFlags &*
-        set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+        set @"samples" numSamples &*
         set @"sharingMode" sharingMode &*
         set @"pQueueFamilyIndices" VK_NULL
 
@@ -1325,6 +1386,11 @@ main =
               (
                 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                 (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT .|. VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT), VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+              )
+            (VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) ->
+              (
+                0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
               )
             _ ->
               throwAppEx "Unimplemented layout transition."
@@ -2087,6 +2153,12 @@ getPhysicalDeviceFeatures physicalDevice =
   liftIO $ alloca $ \featuresPtr -> do
     vkGetPhysicalDeviceFeatures physicalDevice featuresPtr
     peek featuresPtr
+
+getPhysicalDeviceProperties :: MonadIO io => VkPhysicalDevice -> io VkPhysicalDeviceProperties
+getPhysicalDeviceProperties physicalDevice =
+  liftIO $ alloca $ \propertiesPtr -> do
+    vkGetPhysicalDeviceProperties physicalDevice propertiesPtr
+    peek propertiesPtr
 
 getPhysicalDeviceFormatProperties :: MonadIO io => VkPhysicalDevice -> VkFormat -> io VkFormatProperties
 getPhysicalDeviceFormatProperties physicalDevice format =
