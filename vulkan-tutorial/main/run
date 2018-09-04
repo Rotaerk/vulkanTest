@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+exec dist/build/vulkan-tutorial/vulkan-tutorial \
+  --shaderspath=$(nix-build --no-out-link ../vulkan-tutorial.nix -A shaders) \
+  --texturespath=$(nix-build --no-out-link ../vulkan-tutorial.nix -A textures) \
+  --modelspath=$(nix-build --no-out-link ../vulkan-tutorial.nix -A models)

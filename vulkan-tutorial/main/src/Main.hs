@@ -114,7 +114,7 @@ main =
         claTexturesPath = def &= explicit &= name "texturespath" &= typ "PATH" &= help "Path to the texture files.",
         claModelsPath = def &= explicit &= name "modelspath" &= typ "PATH" &= help "Path to the model files."
       }
-      &= summary "Vulkan Test"
+      &= summary "Vulkan-Tutorial.com Implementation"
 
     let
       shadersPath = claShadersPath arguments
@@ -375,7 +375,7 @@ main =
       setVkRef @"pApplicationInfo" (
         createVk $
         set @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO &*
-        setStrRef @"pApplicationName" "Hello Triangle" &*
+        setStrRef @"pApplicationName" "Vulkan-Tutorial.com Implementation" &*
         set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
         setStrRef @"pEngineName" "No Engine" &*
         set @"engineVersion" (_VK_MAKE_VERSION 1 0 0) &*

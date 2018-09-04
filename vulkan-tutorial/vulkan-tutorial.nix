@@ -1,7 +1,7 @@
 { refsWithLocalSource ? [] }:
 
 let
-  projectName = "vulkanTest";
+  projectName = "vulkan-tutorial";
   enableProfiling = true;
 
   refs = import ./refs.nix;
@@ -88,7 +88,7 @@ let
     pkgs.writeShellScriptBin projectName ''
       LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${pkgs.vulkan-validation-layers}/lib"
       XDG_DATA_DIRS="$XDG_DATA_DIRS:${pkgs.vulkan-validation-layers}/share"
-      exec ${main}/bin/vulkanTest --shaderspath='${shaders}' --texturespath='${textures}' --modelspath='${models}' "$@"
+      exec ${main}/bin/vulkan-tutorial --shaderspath='${shaders}' --texturespath='${textures}' --modelspath='${models}' "$@"
     '';
 in
   { inherit pkgs haskellPackages main shaders textures models fullBuild; }
