@@ -2,6 +2,6 @@
   scheme = "github";
   owner = "achirkin";
   repo = "easytensor";
-  rev = "52607837b60660730be60880fda04825129d90e1";
-  sha256 = "1211a94igr19fr3ddpia0aqq6mk1lggch7ns4h4y7g26kbvqmj5s";
+  rev = "75dc180c08ceb2321a6eca526a45739da34f646c";
+  sha256 = "1jbdspjx47qab1jvhmyszmjjzh98bz2825c53i0mmnhgk7g6icvr";
 }
