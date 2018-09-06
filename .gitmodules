@@ -1,0 +1,6 @@
+[submodule "sandbox/vulkan"]
+	path = sandbox/vulkan
+	url = https://github.com/achirkin/vulkan
+[submodule "sandbox/easytensor"]
+	path = sandbox/easytensor
+	url = https://github.com/achirkin/easytensor

@@ -1,0 +1,6 @@
+packages:
+  sandbox/sandbox.cabal
+  vulkan/vulkan-api/vulkan-api.cabal
+  easytensor/dimensions/dimensions.cabal
+  easytensor/easytensor/easytensor.cabal
+  easytensor/easytensor-vulkan/easytensor-vulkan.cabal
