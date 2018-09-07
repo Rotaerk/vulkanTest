@@ -21,7 +21,11 @@ executable sandbox
     dimensions,
     easytensor,
     easytensor-vulkan,
+    extra,
     GLFW-b,
+    reflection,
+    resourcet,
+    transformers,
     vulkan-api,
 
     base >=4.11 && <4.12

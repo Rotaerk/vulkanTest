@@ -7,8 +7,11 @@ let
     hs.ghc
     hs.cabal-install
     hs.ghcid
+    vulkan-tools
   ];
   libraries = [
+    vulkan-loader
+    vulkan-validation-layers
     libGL
     xorg.libX11
     xorg.libXcursor
