@@ -16,8 +16,9 @@ cabal-version:       >=1.10
 executable sandbox
   hs-source-dirs: src
   main-is: Main.hs
-  ghc-options: -Wall -threaded
+  ghc-options: -threaded -Wall -Wno-name-shadowing
   build-depends:
+    array,
     dimensions,
     easytensor,
     easytensor-vulkan,

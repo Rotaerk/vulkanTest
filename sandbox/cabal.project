@@ -4,3 +4,6 @@ packages:
   easytensor/dimensions/dimensions.cabal
   easytensor/easytensor/easytensor.cabal
   easytensor/easytensor-vulkan/easytensor-vulkan.cabal
+
+package vulkan-api
+  flags: +useNativeFFI-1-0

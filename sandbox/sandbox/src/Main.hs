@@ -1,6 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
@@ -15,11 +16,15 @@ import Control.Monad.Extra
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Resource
 import Data.Acquire
+import Data.Array.Base
+import Data.Array.MArray
+import Data.Array.Storable
 import Data.Function
-import Data.Maybe
---import Data.Reflection
+import Data.Proxy
+import Data.Reflection
 import Foreign.C.String
 import Foreign.Marshal.Alloc
+import Foreign.Ptr
 import Foreign.Storable
 
 import qualified Graphics.UI.GLFW as GLFW
@@ -30,7 +35,7 @@ import Graphics.Vulkan.Ext.VK_EXT_debug_report
 --import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
---import Graphics.Vulkan.Marshal.Create.DataFrame
+import Graphics.Vulkan.Marshal.Create.DataFrame
 
 main :: IO ()
 main =
@@ -52,16 +57,14 @@ resourceMain :: ResourceT IO ()
 resourceMain = do
   allocateAcquire_ initializedGLFW
 
-  window <- allocateAcquire_ $ newVulkanGLFWWindow 800 600 "Vulkan Sandbox"
+  --window <- allocateAcquire_ $ newVulkanGLFWWindow 800 600 "Vulkan Sandbox"
 
   glfwExtensions <- liftIO $ GLFW.getRequiredInstanceExtensions
 
   let allExtensions = glfwExtensions ++ extensions
 
   vulkanInstance <-
-    allocateAcquire_ $
-    newVkInstanceFrom_ $
-    createVk $
+    allocateAcquire_ . newVk vulkanInstanceResource . createVk $
     set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
     set @"pNext" VK_NULL &*
     setVkRef @"pApplicationInfo" (
@@ -78,6 +81,32 @@ resourceMain = do
     setStrListRef @"ppEnabledLayerNames" validationLayers &*
     set @"enabledExtensionCount" (lengthNum allExtensions) &*
     setListRef @"ppEnabledExtensionNames" allExtensions
+
+  physicalDevices <- getVkArray (physicalDevicesOfInstance vulkanInstance)
+
+  liftIO $ forAssocsM_ physicalDevices $ \index physicalDevice -> do
+    properties <- getVk (propertiesOfPhysicalDevice physicalDevice)
+    putStrLn $ "Device #" ++ show index ++ ":"
+    let
+      apiVersion = getField @"apiVersion" properties
+      driverVersion = getField @"driverVersion" properties
+      vendorId = getField @"vendorID" properties
+      deviceId = getField @"deviceID" properties
+      deviceType = getField @"deviceType" properties
+      deviceName = getStringField @"deviceName" properties
+      pipelineCacheUUID = getVec @"pipelineCacheUUID" properties
+      limits = getField @"limits" properties
+      sparseProperties = getField @"sparseProperties" properties
+    putStrLn $ "API Version: " ++ show (_VK_VERSION_MAJOR apiVersion) ++ "." ++ show (_VK_VERSION_MINOR apiVersion) ++ "." ++ show (_VK_VERSION_PATCH apiVersion)
+    putStrLn $ "Driver Version: " ++ show driverVersion
+    putStrLn $ "Vendor ID: " ++ show vendorId
+    putStrLn $ "Device ID: " ++ show deviceId
+    putStrLn $ "Device Type: " ++ show deviceType
+    putStrLn $ "Device Name: " ++ deviceName
+    putStrLn $ "Pipeline Cache UUID: " ++ show pipelineCacheUUID
+    putStrLn $ "Limits: " ++ show limits
+    putStrLn $ "Sparse Properties: " ++ show sparseProperties
+    putStrLn ""
 
   return ()
 
@@ -160,15 +189,16 @@ onVkFailureThrow functionName successResults vkAction = do
   unless (result `elem` successResults) $ throwIO (VulkanException functionName result)
   return result
 
-newVkWithResult ::
-  (Storable vk, VulkanMarshal ci) =>
-  String ->
-  (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
-  (vk -> Ptr VkAllocationCallbacks -> IO()) ->
-  [VkResult] ->
-  ci ->
-  Acquire (VkResult, vk)
-newVkWithResult functionName create destroy successResults createInfo =
+data VulkanResource vk ci =
+  VulkanResource {
+    vkrCreate :: Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult,
+    vkrDestroy :: vk -> Ptr VkAllocationCallbacks -> IO (),
+    vkrCreateName :: String,
+    vkrSuccessResults :: [VkResult]
+  }
+
+newVkWithResult :: (Storable vk, VulkanMarshal ci) => VulkanResource vk ci -> ci -> Acquire (VkResult, vk)
+newVkWithResult (VulkanResource create destroy functionName successResults) createInfo =
   (
     withPtr createInfo $ \createInfoPtr ->
     alloca $ \vkPtr -> do
@@ -178,12 +208,58 @@ newVkWithResult functionName create destroy successResults createInfo =
   `mkAcquire`
   \(_, vk) -> destroy vk VK_NULL
 
-newVkInstanceFrom :: VkInstanceCreateInfo -> Acquire (VkResult, VkInstance)
-newVkInstanceFrom = newVkWithResult "vkCreateInstance" vkCreateInstance vkDestroyInstance [VK_SUCCESS]
+newVk :: (Storable vk, VulkanMarshal ci) => VulkanResource vk ci -> ci -> Acquire vk
+newVk vr ci = snd <$> newVkWithResult vr ci
 
-newVkInstanceFrom_ :: VkInstanceCreateInfo -> Acquire VkInstance
-newVkInstanceFrom_ = fmap snd . newVkInstanceFrom
--- Vulkan helpers<
+vulkanInstanceResource :: VulkanResource VkInstance VkInstanceCreateInfo
+vulkanInstanceResource = VulkanResource vkCreateInstance vkDestroyInstance "vkCreateInstance" [VK_SUCCESS]
+
+data VulkanGetter vk =
+  VulkanGetter {
+    vkgGet :: Ptr vk -> IO ()
+  }
+
+getVk :: (MonadIO io, Storable vk) => VulkanGetter vk -> io vk
+getVk (VulkanGetter get) =
+  liftIO $
+  alloca $ \ptr -> do
+    get ptr
+    peek ptr
+
+featuresOfPhysicalDevice :: VkPhysicalDevice -> VulkanGetter VkPhysicalDeviceFeatures
+featuresOfPhysicalDevice physicalDevice = VulkanGetter (vkGetPhysicalDeviceFeatures physicalDevice)
+
+propertiesOfPhysicalDevice :: VkPhysicalDevice -> VulkanGetter VkPhysicalDeviceProperties
+propertiesOfPhysicalDevice physicalDevice = VulkanGetter (vkGetPhysicalDeviceProperties physicalDevice)
+
+data VulkanArrayFiller vk =
+  VulkanArrayFiller {
+    vkafFillArray :: Ptr Word32 -> Ptr vk -> IO VkResult,
+    vkafName :: String,
+    vkafSuccessResults :: [VkResult]
+  }
+
+-- VK_INCOMPLETE should never be returned, since we're checking for available count first.
+-- Thus, don't treat it as a success result.
+getVkArrayWithResult :: (MonadIO io, Storable vk) => VulkanArrayFiller vk -> io (VkResult, StorableArray Word32 vk)
+getVkArrayWithResult (VulkanArrayFiller fillArray functionName successResults) =
+  liftIO $
+  alloca $ \countPtr -> do
+    let fillArray' ptr = fillArray countPtr ptr & onVkFailureThrow functionName successResults
+    getCountResult <- fillArray' VK_NULL
+    count <- peek countPtr
+    array <- newArray_ (0, count-1)
+    if count > 0 then do
+      fillArrayResult <- withStorableArray array fillArray'
+      return (fillArrayResult, array)
+    else do
+      return (getCountResult, array)
+
+getVkArray :: (MonadIO io, Storable vk) => VulkanArrayFiller vk -> io (StorableArray Word32 vk)
+getVkArray = fmap snd . getVkArrayWithResult
+
+physicalDevicesOfInstance :: VkInstance -> VulkanArrayFiller VkPhysicalDevice
+physicalDevicesOfInstance inst = VulkanArrayFiller (vkEnumeratePhysicalDevices inst) "vkEnumeratePhysicalDevices" [VK_SUCCESS]
 
 -- ResourceT helpers>
 allocate_ :: MonadResource m => IO a -> (a -> IO ()) -> m a
@@ -207,4 +283,24 @@ lengthNum :: (Foldable t, Num n) => t a -> n
 lengthNum = fromIntegral . length
 {-# INLINE lengthNum #-}
 
+reflection :: forall t r. Reifies t r => r
+reflection = reflect (Proxy :: Proxy t)
+
+mapAssocsM_ :: (Monad m, MArray a e m, Ix i) => (i -> e -> m b) -> a i e -> m ()
+mapAssocsM_ f array = do
+  bounds <- getBounds array
+  let
+    index' = index bounds
+    unsafeRead' = unsafeRead array
+  forM_ (range bounds) $ \i ->
+    unsafeRead' (index' i) >>= f i
+
+forAssocsM_ :: (Monad m, MArray a e m, Ix i) => a i e -> (i -> e -> m b) -> m ()
+forAssocsM_ = flip mapAssocsM_
+
+mapElemsM_ :: (Monad m, MArray a e m, Ix i) => (e -> m b) -> a i e -> m ()
+mapElemsM_ f = mapAssocsM_ (const f)
+
+forElemsM_ :: (Monad m, MArray a e m, Ix i) => a i e -> (e -> m b) -> m ()
+forElemsM_ = flip mapElemsM_
 -- Other helpers<
