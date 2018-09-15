@@ -82,11 +82,11 @@ resourceMain = do
     set @"enabledExtensionCount" (lengthNum allExtensions) &*
     setListRef @"ppEnabledExtensionNames" allExtensions
 
-  physicalDevices <- getVkArray (physicalDevicesOfInstance vulkanInstance)
+  physicalDevices <- getVkArray (vktEnumeratePhysicalDevices vulkanInstance)
 
-  liftIO $ forAssocsM_ physicalDevices $ \index physicalDevice -> do
-    properties <- getVk (propertiesOfPhysicalDevice physicalDevice)
-    putStrLn $ "Device #" ++ show index ++ ":"
+  liftIO $ forAssocsM_ physicalDevices $ \pdIndex physicalDevice -> do
+    properties <- getVk (vkGetPhysicalDeviceProperties physicalDevice)
+    putStrLn $ "Device #" ++ show pdIndex ++ ":"
     let
       apiVersion = getField @"apiVersion" properties
       driverVersion = getField @"driverVersion" properties
@@ -107,6 +107,23 @@ resourceMain = do
     putStrLn $ "Limits: " ++ show limits
     putStrLn $ "Sparse Properties: " ++ show sparseProperties
     putStrLn ""
+
+    queueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
+
+    forAssocsM_ queueFamilyPropertiesArray $ \qfpIndex queueFamilyProperties -> do
+      putStrLn $ "Queue Family #" ++ show qfpIndex ++ ":"
+      let
+        queueCount = getField @"queueCount" queueFamilyProperties
+        queueFlags = getField @"queueFlags" queueFamilyProperties
+        minImageTransferGranularity = getField @"minImageTransferGranularity" queueFamilyProperties
+      putStrLn $ "Queue Count: " ++ show queueCount
+      putStrLn $ "Queue Flags: " ++ show queueFlags
+      putStrLn $ "Min Image Transfer Granularity: " ++ show minImageTransferGranularity
+      putStrLn ""
+
+    putStrLn ""
+
+    return ()
 
   return ()
 
@@ -214,52 +231,41 @@ newVk vr ci = snd <$> newVkWithResult vr ci
 vulkanInstanceResource :: VulkanResource VkInstance VkInstanceCreateInfo
 vulkanInstanceResource = VulkanResource vkCreateInstance vkDestroyInstance "vkCreateInstance" [VK_SUCCESS]
 
-data VulkanGetter vk =
-  VulkanGetter {
-    vkgGet :: Ptr vk -> IO ()
-  }
+type VulkanGetter vk = Ptr vk -> IO ()
 
 getVk :: (MonadIO io, Storable vk) => VulkanGetter vk -> io vk
-getVk (VulkanGetter get) =
+getVk get =
   liftIO $
   alloca $ \ptr -> do
     get ptr
     peek ptr
 
-featuresOfPhysicalDevice :: VkPhysicalDevice -> VulkanGetter VkPhysicalDeviceFeatures
-featuresOfPhysicalDevice physicalDevice = VulkanGetter (vkGetPhysicalDeviceFeatures physicalDevice)
+type VulkanArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
 
-propertiesOfPhysicalDevice :: VkPhysicalDevice -> VulkanGetter VkPhysicalDeviceProperties
-propertiesOfPhysicalDevice physicalDevice = VulkanGetter (vkGetPhysicalDeviceProperties physicalDevice)
-
-data VulkanArrayFiller vk =
-  VulkanArrayFiller {
-    vkafFillArray :: Ptr Word32 -> Ptr vk -> IO VkResult,
-    vkafName :: String,
-    vkafSuccessResults :: [VkResult]
-  }
-
--- VK_INCOMPLETE should never be returned, since we're checking for available count first.
--- Thus, don't treat it as a success result.
-getVkArrayWithResult :: (MonadIO io, Storable vk) => VulkanArrayFiller vk -> io (VkResult, StorableArray Word32 vk)
-getVkArrayWithResult (VulkanArrayFiller fillArray functionName successResults) =
+getVkArrayWithResult :: (MonadIO io, Storable vk) => VulkanArrayFiller vk r -> io (r, StorableArray Word32 vk)
+getVkArrayWithResult fillArray =
   liftIO $
   alloca $ \countPtr -> do
-    let fillArray' ptr = fillArray countPtr ptr & onVkFailureThrow functionName successResults
+    let fillArray' ptr = fillArray countPtr ptr
     getCountResult <- fillArray' VK_NULL
     count <- peek countPtr
     array <- newArray_ (0, count-1)
     if count > 0 then do
       fillArrayResult <- withStorableArray array fillArray'
       return (fillArrayResult, array)
-    else do
+    else
       return (getCountResult, array)
 
-getVkArray :: (MonadIO io, Storable vk) => VulkanArrayFiller vk -> io (StorableArray Word32 vk)
+getVkArray :: (MonadIO io, Storable vk) => VulkanArrayFiller vk r -> io (StorableArray Word32 vk)
 getVkArray = fmap snd . getVkArrayWithResult
 
-physicalDevicesOfInstance :: VkInstance -> VulkanArrayFiller VkPhysicalDevice
-physicalDevicesOfInstance inst = VulkanArrayFiller (vkEnumeratePhysicalDevices inst) "vkEnumeratePhysicalDevices" [VK_SUCCESS]
+-- When a VulkanArrayFiller is used with getVkArray[WithResult], VK_INCOMPLETE should never be returned, since
+-- getVkArray[WithResult] is checking for available count first. Thus, don't provide it as a success result.
+onArrayFillerFailureThrow :: String -> [VkResult] -> VulkanArrayFiller vk VkResult -> VulkanArrayFiller vk VkResult
+onArrayFillerFailureThrow functionName successResults fillArray countPtr arrayPtr = fillArray countPtr arrayPtr & onVkFailureThrow functionName successResults
+
+vktEnumeratePhysicalDevices :: VkInstance -> VulkanArrayFiller VkPhysicalDevice VkResult
+vktEnumeratePhysicalDevices = onArrayFillerFailureThrow "vkEnumeratePhysicalDevices" [VK_SUCCESS] . vkEnumeratePhysicalDevices
 
 -- ResourceT helpers>
 allocate_ :: MonadResource m => IO a -> (a -> IO ()) -> m a
