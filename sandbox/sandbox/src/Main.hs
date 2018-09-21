@@ -19,6 +19,7 @@ import Data.Acquire
 import Data.Array.Base
 import Data.Array.MArray
 import Data.Array.Storable
+import Data.Bits
 import Data.Function
 import Data.Proxy
 import Data.Reflection
@@ -36,6 +37,8 @@ import Graphics.Vulkan.Ext.VK_EXT_debug_report
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
+
+import qualified Numeric.DataFrame as DF
 
 main :: IO ()
 main =
@@ -122,6 +125,20 @@ resourceMain = do
       putStrLn ""
 
     putStrLn ""
+
+    memoryProperties <- getVk (vkGetPhysicalDeviceMemoryProperties physicalDevice)
+
+    let
+      memoryTypeCount = getField @"memoryTypeCount" memoryProperties
+      memoryTypes = take (fromIntegral memoryTypeCount) . DF.toList $ getVec @"memoryTypes" memoryProperties
+      memoryHeapCount = getField @"memoryHeapCount" memoryProperties
+      memoryHeaps = take (fromIntegral memoryHeapCount) . DF.toList $ getVec @"memoryHeaps" memoryProperties
+    putStrLn $ "Memory Type Count: " ++ show memoryTypeCount
+    putStrLn $ "Memory Types: " ++ show memoryTypes
+    putStrLn $ "Memory Heap Count: " ++ show memoryHeapCount
+    putStrLn $ "Memory Heaps: " ++ show memoryHeaps
+
+    putStrLn $ "Total Local Device Memory: " ++ show (totalLocalPhysicalDeviceMemorySize memoryProperties)
 
     return ()
 
@@ -266,6 +283,14 @@ onArrayFillerFailureThrow functionName successResults fillArray countPtr arrayPt
 
 vktEnumeratePhysicalDevices :: VkInstance -> VulkanArrayFiller VkPhysicalDevice VkResult
 vktEnumeratePhysicalDevices = onArrayFillerFailureThrow "vkEnumeratePhysicalDevices" [VK_SUCCESS] . vkEnumeratePhysicalDevices
+
+totalLocalPhysicalDeviceMemorySize :: VkPhysicalDeviceMemoryProperties -> VkDeviceSize
+totalLocalPhysicalDeviceMemorySize memoryProperties = sum . fmap (getField @"size") . filter isDeviceLocal $ memoryHeaps
+  where
+    isDeviceLocal = (0 /=) . (VK_MEMORY_HEAP_DEVICE_LOCAL_BIT .&.) . getField @"flags"
+    memoryHeapCount = getField @"memoryHeapCount" memoryProperties
+    memoryHeaps = take (fromIntegral memoryHeapCount) . fmap DF.unScalar . DF.toList . getVec @"memoryHeaps" $ memoryProperties
+-- Vulkan helpers<
 
 -- ResourceT helpers>
 allocate_ :: MonadResource m => IO a -> (a -> IO ()) -> m a
