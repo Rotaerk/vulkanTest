@@ -20,9 +20,11 @@ import Data.Array.Base
 import Data.Array.MArray
 import Data.Array.Storable
 import Data.Bits
+import Data.Foldable
 import Data.Function
 import Data.Proxy
 import Data.Reflection
+import Data.Tuple.Extra
 import Foreign.C.String
 import Foreign.Marshal.Alloc
 import Foreign.Ptr
@@ -85,62 +87,22 @@ resourceMain = do
     set @"enabledExtensionCount" (lengthNum allExtensions) &*
     setListRef @"ppEnabledExtensionNames" allExtensions
 
-  physicalDevices <- getVkArray (vktEnumeratePhysicalDevices vulkanInstance)
+  (physicalDevice, properties, memoryProperties) <-
+    liftIO $
+    fmap (
+      maximumBy . mconcat $ [
+        prefer [VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU] `on` getField @"deviceType" . snd3,
+        compare `on` pdmpDeviceLocalMemorySize . thd3
+      ]
+    ) $
+    mapElemsM (\physicalDevice ->
+      liftM2 (physicalDevice,,)
+        (getVk . vkGetPhysicalDeviceProperties $ physicalDevice)
+        (getVk . vkGetPhysicalDeviceMemoryProperties $ physicalDevice)
+    ) =<<
+    getVkArray (vktEnumeratePhysicalDevices vulkanInstance)
 
-  liftIO $ forAssocsM_ physicalDevices $ \pdIndex physicalDevice -> do
-    properties <- getVk (vkGetPhysicalDeviceProperties physicalDevice)
-    putStrLn $ "Device #" ++ show pdIndex ++ ":"
-    let
-      apiVersion = getField @"apiVersion" properties
-      driverVersion = getField @"driverVersion" properties
-      vendorId = getField @"vendorID" properties
-      deviceId = getField @"deviceID" properties
-      deviceType = getField @"deviceType" properties
-      deviceName = getStringField @"deviceName" properties
-      pipelineCacheUUID = getVec @"pipelineCacheUUID" properties
-      limits = getField @"limits" properties
-      sparseProperties = getField @"sparseProperties" properties
-    putStrLn $ "API Version: " ++ show (_VK_VERSION_MAJOR apiVersion) ++ "." ++ show (_VK_VERSION_MINOR apiVersion) ++ "." ++ show (_VK_VERSION_PATCH apiVersion)
-    putStrLn $ "Driver Version: " ++ show driverVersion
-    putStrLn $ "Vendor ID: " ++ show vendorId
-    putStrLn $ "Device ID: " ++ show deviceId
-    putStrLn $ "Device Type: " ++ show deviceType
-    putStrLn $ "Device Name: " ++ deviceName
-    putStrLn $ "Pipeline Cache UUID: " ++ show pipelineCacheUUID
-    putStrLn $ "Limits: " ++ show limits
-    putStrLn $ "Sparse Properties: " ++ show sparseProperties
-    putStrLn ""
-
-    queueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
-
-    forAssocsM_ queueFamilyPropertiesArray $ \qfpIndex queueFamilyProperties -> do
-      putStrLn $ "Queue Family #" ++ show qfpIndex ++ ":"
-      let
-        queueCount = getField @"queueCount" queueFamilyProperties
-        queueFlags = getField @"queueFlags" queueFamilyProperties
-        minImageTransferGranularity = getField @"minImageTransferGranularity" queueFamilyProperties
-      putStrLn $ "Queue Count: " ++ show queueCount
-      putStrLn $ "Queue Flags: " ++ show queueFlags
-      putStrLn $ "Min Image Transfer Granularity: " ++ show minImageTransferGranularity
-      putStrLn ""
-
-    putStrLn ""
-
-    memoryProperties <- getVk (vkGetPhysicalDeviceMemoryProperties physicalDevice)
-
-    let
-      memoryTypeCount = getField @"memoryTypeCount" memoryProperties
-      memoryTypes = take (fromIntegral memoryTypeCount) . DF.toList $ getVec @"memoryTypes" memoryProperties
-      memoryHeapCount = getField @"memoryHeapCount" memoryProperties
-      memoryHeaps = take (fromIntegral memoryHeapCount) . DF.toList $ getVec @"memoryHeaps" memoryProperties
-    putStrLn $ "Memory Type Count: " ++ show memoryTypeCount
-    putStrLn $ "Memory Types: " ++ show memoryTypes
-    putStrLn $ "Memory Heap Count: " ++ show memoryHeapCount
-    putStrLn $ "Memory Heaps: " ++ show memoryHeaps
-
-    putStrLn $ "Total Local Device Memory: " ++ show (totalLocalPhysicalDeviceMemorySize memoryProperties)
-
-    return ()
+  liftIO $ putStrLn $ getStringField @"deviceName" properties
 
   return ()
 
@@ -284,8 +246,8 @@ onArrayFillerFailureThrow functionName successResults fillArray countPtr arrayPt
 vktEnumeratePhysicalDevices :: VkInstance -> VulkanArrayFiller VkPhysicalDevice VkResult
 vktEnumeratePhysicalDevices = onArrayFillerFailureThrow "vkEnumeratePhysicalDevices" [VK_SUCCESS] . vkEnumeratePhysicalDevices
 
-totalLocalPhysicalDeviceMemorySize :: VkPhysicalDeviceMemoryProperties -> VkDeviceSize
-totalLocalPhysicalDeviceMemorySize memoryProperties = sum . fmap (getField @"size") . filter isDeviceLocal $ memoryHeaps
+pdmpDeviceLocalMemorySize :: VkPhysicalDeviceMemoryProperties -> VkDeviceSize
+pdmpDeviceLocalMemorySize memoryProperties = sum . fmap (getField @"size") . filter isDeviceLocal $ memoryHeaps
   where
     isDeviceLocal = (0 /=) . (VK_MEMORY_HEAP_DEVICE_LOCAL_BIT .&.) . getField @"flags"
     memoryHeapCount = getField @"memoryHeapCount" memoryProperties
@@ -317,6 +279,24 @@ lengthNum = fromIntegral . length
 reflection :: forall t r. Reifies t r => r
 reflection = reflect (Proxy :: Proxy t)
 
+mapAssocsM :: (Monad m, MArray a e m, Ix i) => (i -> e -> m b) -> a i e -> m [b]
+mapAssocsM f array = do
+  bounds <- getBounds array
+  let
+    index' = index bounds
+    unsafeRead' = unsafeRead array
+  forM (range bounds) $ \i ->
+    unsafeRead' (index' i) >>= f i
+
+forAssocsM :: (Monad m, MArray a e m, Ix i) => a i e -> (i -> e -> m b) -> m [b]
+forAssocsM = flip mapAssocsM
+
+mapElemsM :: (Monad m, MArray a e m, Ix i) => (e -> m b) -> a i e -> m [b]
+mapElemsM f = mapAssocsM (const f)
+
+forElemsM :: (Monad m, MArray a e m, Ix i) => a i e -> (e -> m b) -> m [b]
+forElemsM = flip mapElemsM
+
 mapAssocsM_ :: (Monad m, MArray a e m, Ix i) => (i -> e -> m b) -> a i e -> m ()
 mapAssocsM_ f array = do
   bounds <- getBounds array
@@ -334,4 +314,39 @@ mapElemsM_ f = mapAssocsM_ (const f)
 
 forElemsM_ :: (Monad m, MArray a e m, Ix i) => a i e -> (e -> m b) -> m ()
 forElemsM_ = flip mapElemsM_
+
+foldlAssocsM :: forall a i e m b. (Monad m, MArray a e m, Ix i) => (b -> i -> e -> m b) -> b -> a i e -> m b
+foldlAssocsM f z array = do
+  bounds <- getBounds array
+  let
+    index' = index bounds
+    unsafeRead' = unsafeRead array
+    step b i = do
+      e <- unsafeRead' (index' i)
+      f b i e
+  foldlM step z (range bounds)
+
+foldlElemsM :: forall a i e m b. (Monad m, MArray a e m, Ix i) => (b -> e -> m b) -> b -> a i e -> m b
+foldlElemsM f = foldlAssocsM (\b _ e -> f b e)
+
+foldrAssocsM :: forall a i e m b. (Monad m, MArray a e m, Ix i) => (i -> e -> b -> m b) -> b -> a i e -> m b
+foldrAssocsM f z array = do
+  bounds <- getBounds array
+  let
+    index' = index bounds
+    unsafeRead' = unsafeRead array
+    step i b = do
+      e <- unsafeRead' (index' i)
+      f i e b
+  foldrM step z (range bounds)
+
+foldrElemsM :: forall a i e m b. (Monad m, MArray a e m, Ix i) => (e -> b -> m b) -> b -> a i e -> m b
+foldrElemsM f = foldrAssocsM (\_ e b -> f e b)
+
+prefer :: Eq a => [a] -> a -> a -> Ordering
+prefer [] _ _ = EQ
+prefer (x:xs) a b
+  | a == x = if a == b then EQ else GT
+  | b == x = LT
+  | otherwise = prefer xs a b
 -- Other helpers<
