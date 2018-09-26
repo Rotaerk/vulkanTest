@@ -20,8 +20,11 @@ import Data.Array.Base
 import Data.Array.MArray
 import Data.Array.Storable
 import Data.Bits
+import Data.Bool
 import Data.Foldable
 import Data.Function
+import Data.Functor
+import Data.List
 import Data.Proxy
 import Data.Reflection
 import Data.Tuple.Extra
@@ -35,7 +38,7 @@ import qualified Graphics.UI.GLFW as GLFW
 import Graphics.Vulkan
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Ext.VK_EXT_debug_report
---import Graphics.Vulkan.Ext.VK_KHR_surface
+import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
@@ -61,8 +64,6 @@ main =
 resourceMain :: ResourceT IO ()
 resourceMain = do
   allocateAcquire_ initializedGLFW
-
-  --window <- allocateAcquire_ $ newVulkanGLFWWindow 800 600 "Vulkan Sandbox"
 
   glfwExtensions <- liftIO $ GLFW.getRequiredInstanceExtensions
 
@@ -102,7 +103,45 @@ resourceMain = do
     ) =<<
     getVkArray (vktEnumeratePhysicalDevices vulkanInstance)
 
-  liftIO $ putStrLn $ getStringField @"deviceName" properties
+  window <- allocateAcquire_ $ newVulkanGLFWWindow 800 600 "Vulkan Sandbox"
+
+  surface <- allocateAcquire_ $ newVulkanGLFWWindowSurface vulkanInstance window
+
+  queueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
+
+  [graphicsQfi, computeQfi, transferQfi, presentQfi] <-
+    liftIO $
+    bestQueueFamilyIndexComboIn queueFamilyPropertiesArray
+      [
+        (
+          return . (zeroBits /=) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags" . snd,
+          preferWhereM [
+            return . (zeroBits ==) . (VK_QUEUE_COMPUTE_BIT .&.) . getField @"queueFlags" . snd
+          ]
+        ),
+        (
+          return . (zeroBits /=) . (VK_QUEUE_COMPUTE_BIT .&.) . getField @"queueFlags" . snd,
+          preferWhereM [
+            return . (zeroBits ==) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags" . snd
+          ]
+        ),
+        (
+          return . (zeroBits /=) . (VK_QUEUE_TRANSFER_BIT .&.) . getField @"queueFlags" . snd,
+          preferWhereM [
+            return . (zeroBits ==) . ((VK_QUEUE_GRAPHICS_BIT .|. VK_QUEUE_COMPUTE_BIT) .&.) . getField @"queueFlags" . snd
+          ]
+        ),
+        (
+          (\(qfi, _) -> (VK_TRUE ==) <$> getVk (vktGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface)),
+          \_ _ -> return EQ
+        )
+      ]
+
+  liftIO $ do
+    putStrLn $ "Graphics QFI: " ++ show graphicsQfi
+    putStrLn $ "Computer QFI: " ++ show computeQfi
+    putStrLn $ "Transfer QFI: " ++ show transferQfi
+    putStrLn $ "Present QFI: " ++ show presentQfi
 
   return ()
 
@@ -166,6 +205,16 @@ newVulkanGLFWWindow width height title =
     whenNothingM (GLFW.createWindow width height title Nothing Nothing) (throwIO $ GLFWException "createWindow")
   `mkAcquire`
   GLFW.destroyWindow
+
+newVulkanGLFWWindowSurface :: VkInstance -> GLFW.Window -> Acquire VkSurfaceKHR
+newVulkanGLFWWindowSurface vulkanInstance window =
+  (
+    alloca $ \surfacePtr -> do
+      void $ GLFW.createWindowSurface vulkanInstance window nullPtr surfacePtr & onVkFailureThrow "GLFW.createWindowSurface" [VK_SUCCESS]
+      peek surfacePtr
+  )
+  `mkAcquire`
+  \surface -> vkDestroySurfaceKHR vulkanInstance surface VK_NULL
 -- GLFW helpers<
 
 -- Vulkan helpers>
@@ -210,14 +259,26 @@ newVk vr ci = snd <$> newVkWithResult vr ci
 vulkanInstanceResource :: VulkanResource VkInstance VkInstanceCreateInfo
 vulkanInstanceResource = VulkanResource vkCreateInstance vkDestroyInstance "vkCreateInstance" [VK_SUCCESS]
 
-type VulkanGetter vk = Ptr vk -> IO ()
+type VulkanGetter vk r = Ptr vk -> IO r
 
-getVk :: (MonadIO io, Storable vk) => VulkanGetter vk -> io vk
-getVk get =
+getVkWithResult :: (MonadIO io, Storable vk) => VulkanGetter vk r -> io (r, vk)
+getVkWithResult get =
   liftIO $
   alloca $ \ptr -> do
-    get ptr
-    peek ptr
+    result <- get ptr
+    value <- peek ptr
+    return (result, value)
+
+getVk :: (MonadIO io, Storable vk) => VulkanGetter vk r -> io vk
+getVk = fmap snd . getVkWithResult
+
+onGetterFailureThrow :: String -> [VkResult] -> VulkanGetter vk VkResult -> VulkanGetter vk VkResult
+onGetterFailureThrow functionName successResults get ptr = get ptr & onVkFailureThrow functionName successResults
+
+vktGetPhysicalDeviceSurfaceSupportKHR :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> VulkanGetter VkBool32 VkResult
+vktGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface =
+  vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface &
+    onGetterFailureThrow "vkGetPhysicalDeviceSurfaceSupportKHR" [VK_SUCCESS]
 
 type VulkanArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
 
@@ -252,6 +313,38 @@ pdmpDeviceLocalMemorySize memoryProperties = sum . fmap (getField @"size") . fil
     isDeviceLocal = (0 /=) . (VK_MEMORY_HEAP_DEVICE_LOCAL_BIT .&.) . getField @"flags"
     memoryHeapCount = getField @"memoryHeapCount" memoryProperties
     memoryHeaps = take (fromIntegral memoryHeapCount) . fmap DF.unScalar . DF.toList . getVec @"memoryHeaps" $ memoryProperties
+
+comboWithFewestDistinct :: Eq a => [[a]] -> [a]
+comboWithFewestDistinct = minimumBy (compare `on` length . nub) . sequence
+
+type QF i = (i, VkQueueFamilyProperties)
+type QFIPredicateM i = PredicateM IO (QF i)
+type QFICompareM i = CompareM IO (QF i)
+
+bestQueueFamilyIndices :: forall i. Ix i => QFIPredicateM i -> QFICompareM i -> StorableArray i VkQueueFamilyProperties -> IO [i]
+bestQueueFamilyIndices isCandidate compareQfps = (fmap . fmap) fst . foldrAssocsM step []
+  where
+    step :: i -> VkQueueFamilyProperties -> [QF i] -> IO [QF i]
+    step qfi qfp best@(bqf:_) = do
+      let qf = (qfi,qfp)
+      c <- isCandidate qf
+      if c then
+        compareQfps qf bqf <&> \case
+          LT -> best
+          EQ -> qf:best
+          GT -> [qf]
+      else
+        return best
+    step qfi qfp [] = let qf = (qfi,qfp) in bool [] [qf] <$> isCandidate qf
+
+bestQueueFamilyIndicesIn :: forall i. Ix i => StorableArray i VkQueueFamilyProperties -> QFIPredicateM i -> QFICompareM i -> IO [i]
+bestQueueFamilyIndicesIn a p c = bestQueueFamilyIndices p c a
+
+bestQueueFamilyIndexCombo :: Ix i => [(QFIPredicateM i, QFICompareM i)] -> StorableArray i VkQueueFamilyProperties -> IO [i]
+bestQueueFamilyIndexCombo criteriaList = fmap comboWithFewestDistinct . forM criteriaList . uncurry . bestQueueFamilyIndicesIn
+
+bestQueueFamilyIndexComboIn :: Ix i => StorableArray i VkQueueFamilyProperties -> [(QFIPredicateM i, QFICompareM i)] -> IO [i]
+bestQueueFamilyIndexComboIn a cs = bestQueueFamilyIndexCombo cs a
 -- Vulkan helpers<
 
 -- ResourceT helpers>
@@ -343,10 +436,31 @@ foldrAssocsM f z array = do
 foldrElemsM :: forall a i e m b. (Monad m, MArray a e m, Ix i) => (e -> b -> m b) -> b -> a i e -> m b
 foldrElemsM f = foldrAssocsM (\_ e b -> f e b)
 
-prefer :: Eq a => [a] -> a -> a -> Ordering
-prefer [] _ _ = EQ
-prefer (x:xs) a b
-  | a == x = if a == b then EQ else GT
-  | b == x = LT
-  | otherwise = prefer xs a b
+type Predicate a = a -> Bool
+type PredicateM m a = a -> m Bool
+type Compare a = a -> a -> Ordering
+type CompareM m a = a -> a -> m Ordering
+
+preferWhere :: [Predicate a] -> Compare a
+preferWhere [] _ _ = EQ
+preferWhere (p:ps) a b
+  | p a = if p b then EQ else GT
+  | p b = LT
+  | otherwise = preferWhere ps a b
+
+prefer :: Eq a => [a] -> Compare a
+prefer = preferWhere . fmap (==)
+
+preferWhereM :: Monad m => [PredicateM m a] -> CompareM m a
+preferWhereM [] _ _ = return EQ
+preferWhereM (p:ps) a b = do
+  pa <- p a
+  pb <- p b
+  if pa then
+    return $ if pb then EQ else GT
+  else if pb then
+    return LT
+  else
+    preferWhereM ps a b
+
 -- Other helpers<
