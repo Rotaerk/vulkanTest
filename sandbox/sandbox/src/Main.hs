@@ -126,7 +126,7 @@ resourceMain = do
           ]
         ),
         (
-          return . (zeroBits /=) . (VK_QUEUE_TRANSFER_BIT .&.) . getField @"queueFlags" . snd,
+          return . (zeroBits /=) . ((VK_QUEUE_GRAPHICS_BIT .|. VK_QUEUE_COMPUTE_BIT .|. VK_QUEUE_TRANSFER_BIT) .&.) . getField @"queueFlags" . snd,
           preferWhereM [
             return . (zeroBits ==) . ((VK_QUEUE_GRAPHICS_BIT .|. VK_QUEUE_COMPUTE_BIT) .&.) . getField @"queueFlags" . snd
           ]
