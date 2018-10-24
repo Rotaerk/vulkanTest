@@ -53,7 +53,7 @@ main =
       putStrLn $ displayException e
   )
   `catch` (
-    \(e :: VulkanException) ->
+    \(e :: VkaException) ->
       putStrLn $ displayException e
   )
   `catch` (
@@ -64,8 +64,9 @@ main =
 resourceMain :: ResourceT IO ()
 resourceMain = do
   allocateAcquire_ initializedGLFW
+  ioPutStrLn "GLFW initialized."
 
-  glfwExtensions <- liftIO $ GLFW.getRequiredInstanceExtensions
+  glfwExtensions <- liftIO GLFW.getRequiredInstanceExtensions
 
   let allExtensions = glfwExtensions ++ extensions
 
@@ -87,8 +88,9 @@ resourceMain = do
     setStrListRef @"ppEnabledLayerNames" validationLayers &*
     set @"enabledExtensionCount" (lengthNum allExtensions) &*
     setListRef @"ppEnabledExtensionNames" allExtensions
+  ioPutStrLn "Vulkan instance created."
 
-  (physicalDevice, properties, memoryProperties) <-
+  (physicalDevice, physicalDeviceProperties, physicalDeviceMemoryProperties) <-
     liftIO $
     fmap (
       maximumBy . mconcat $ [
@@ -101,17 +103,20 @@ resourceMain = do
         (getVk . vkGetPhysicalDeviceProperties $ physicalDevice)
         (getVk . vkGetPhysicalDeviceMemoryProperties $ physicalDevice)
     ) =<<
-    getVkArray (vktEnumeratePhysicalDevices vulkanInstance)
+    getVkArray (vkaEnumeratePhysicalDevices vulkanInstance)
+  ioPutStrLn "Physical device selected."
 
   window <- allocateAcquire_ $ newVulkanGLFWWindow 800 600 "Vulkan Sandbox"
+  ioPutStrLn "Window created."
 
-  surface <- allocateAcquire_ $ newVulkanGLFWWindowSurface vulkanInstance window
+  windowSurface <- allocateAcquire_ $ newVulkanGLFWWindowSurface vulkanInstance window
+  ioPutStrLn "Window surface created."
 
-  queueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
+  physicalDeviceQueueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
 
   [graphicsQfi, computeQfi, transferQfi, presentQfi] <-
     liftIO $
-    bestQueueFamilyIndexComboIn queueFamilyPropertiesArray
+    bestQueueFamilyIndexComboIn physicalDeviceQueueFamilyPropertiesArray
       [
         (
           return . (zeroBits /=) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags" . snd,
@@ -132,7 +137,7 @@ resourceMain = do
           ]
         ),
         (
-          (\(qfi, _) -> (VK_TRUE ==) <$> getVk (vktGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface)),
+          (\(qfi, _) -> (VK_TRUE ==) <$> getVk (vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi windowSurface)),
           \_ _ -> return EQ
         )
       ]
@@ -218,32 +223,32 @@ newVulkanGLFWWindowSurface vulkanInstance window =
 -- GLFW helpers<
 
 -- Vulkan helpers>
-data VulkanException =
-  VulkanException {
+data VkaException =
+  VkaException {
     vkexFunctionName :: String,
     vkexResult :: VkResult
   } deriving (Eq, Show, Read)
 
-instance Exception VulkanException where
-  displayException (VulkanException functionName result) =
+instance Exception VkaException where
+  displayException (VkaException functionName result) =
     functionName ++ " failed with: " ++ show result
 
 onVkFailureThrow :: String -> [VkResult] -> IO VkResult -> IO VkResult
 onVkFailureThrow functionName successResults vkAction = do
   result <- vkAction
-  unless (result `elem` successResults) $ throwIO (VulkanException functionName result)
+  unless (result `elem` successResults) $ throwIO (VkaException functionName result)
   return result
 
-data VulkanResource vk ci =
-  VulkanResource {
+data VkaResource vk ci =
+  VkaResource {
     vkrCreate :: Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult,
     vkrDestroy :: vk -> Ptr VkAllocationCallbacks -> IO (),
     vkrCreateName :: String,
     vkrSuccessResults :: [VkResult]
   }
 
-newVkWithResult :: (Storable vk, VulkanMarshal ci) => VulkanResource vk ci -> ci -> Acquire (VkResult, vk)
-newVkWithResult (VulkanResource create destroy functionName successResults) createInfo =
+newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource vk ci -> ci -> Acquire (VkResult, vk)
+newVkWithResult (VkaResource create destroy functionName successResults) createInfo =
   (
     withPtr createInfo $ \createInfoPtr ->
     alloca $ \vkPtr -> do
@@ -253,15 +258,15 @@ newVkWithResult (VulkanResource create destroy functionName successResults) crea
   `mkAcquire`
   \(_, vk) -> destroy vk VK_NULL
 
-newVk :: (Storable vk, VulkanMarshal ci) => VulkanResource vk ci -> ci -> Acquire vk
+newVk :: (Storable vk, VulkanMarshal ci) => VkaResource vk ci -> ci -> Acquire vk
 newVk vr ci = snd <$> newVkWithResult vr ci
 
-vulkanInstanceResource :: VulkanResource VkInstance VkInstanceCreateInfo
-vulkanInstanceResource = VulkanResource vkCreateInstance vkDestroyInstance "vkCreateInstance" [VK_SUCCESS]
+vulkanInstanceResource :: VkaResource VkInstance VkInstanceCreateInfo
+vulkanInstanceResource = VkaResource vkCreateInstance vkDestroyInstance "vkCreateInstance" [VK_SUCCESS]
 
-type VulkanGetter vk r = Ptr vk -> IO r
+type VkaGetter vk r = Ptr vk -> IO r
 
-getVkWithResult :: (MonadIO io, Storable vk) => VulkanGetter vk r -> io (r, vk)
+getVkWithResult :: (MonadIO io, Storable vk) => VkaGetter vk r -> io (r, vk)
 getVkWithResult get =
   liftIO $
   alloca $ \ptr -> do
@@ -269,20 +274,20 @@ getVkWithResult get =
     value <- peek ptr
     return (result, value)
 
-getVk :: (MonadIO io, Storable vk) => VulkanGetter vk r -> io vk
+getVk :: (MonadIO io, Storable vk) => VkaGetter vk r -> io vk
 getVk = fmap snd . getVkWithResult
 
-onGetterFailureThrow :: String -> [VkResult] -> VulkanGetter vk VkResult -> VulkanGetter vk VkResult
+onGetterFailureThrow :: String -> [VkResult] -> VkaGetter vk VkResult -> VkaGetter vk VkResult
 onGetterFailureThrow functionName successResults get ptr = get ptr & onVkFailureThrow functionName successResults
 
-vktGetPhysicalDeviceSurfaceSupportKHR :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> VulkanGetter VkBool32 VkResult
-vktGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface =
+vkaGetPhysicalDeviceSurfaceSupportKHR :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> VkaGetter VkBool32 VkResult
+vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface =
   vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface &
     onGetterFailureThrow "vkGetPhysicalDeviceSurfaceSupportKHR" [VK_SUCCESS]
 
-type VulkanArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
+type VkaArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
 
-getVkArrayWithResult :: (MonadIO io, Storable vk) => VulkanArrayFiller vk r -> io (r, StorableArray Word32 vk)
+getVkArrayWithResult :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (r, StorableArray Word32 vk)
 getVkArrayWithResult fillArray =
   liftIO $
   alloca $ \countPtr -> do
@@ -296,16 +301,16 @@ getVkArrayWithResult fillArray =
     else
       return (getCountResult, array)
 
-getVkArray :: (MonadIO io, Storable vk) => VulkanArrayFiller vk r -> io (StorableArray Word32 vk)
+getVkArray :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (StorableArray Word32 vk)
 getVkArray = fmap snd . getVkArrayWithResult
 
--- When a VulkanArrayFiller is used with getVkArray[WithResult], VK_INCOMPLETE should never be returned, since
+-- When a VkaArrayFiller is used with getVkArray[WithResult], VK_INCOMPLETE should never be returned, since
 -- getVkArray[WithResult] is checking for available count first. Thus, don't provide it as a success result.
-onArrayFillerFailureThrow :: String -> [VkResult] -> VulkanArrayFiller vk VkResult -> VulkanArrayFiller vk VkResult
+onArrayFillerFailureThrow :: String -> [VkResult] -> VkaArrayFiller vk VkResult -> VkaArrayFiller vk VkResult
 onArrayFillerFailureThrow functionName successResults fillArray countPtr arrayPtr = fillArray countPtr arrayPtr & onVkFailureThrow functionName successResults
 
-vktEnumeratePhysicalDevices :: VkInstance -> VulkanArrayFiller VkPhysicalDevice VkResult
-vktEnumeratePhysicalDevices = onArrayFillerFailureThrow "vkEnumeratePhysicalDevices" [VK_SUCCESS] . vkEnumeratePhysicalDevices
+vkaEnumeratePhysicalDevices :: VkInstance -> VkaArrayFiller VkPhysicalDevice VkResult
+vkaEnumeratePhysicalDevices = onArrayFillerFailureThrow "vkEnumeratePhysicalDevices" [VK_SUCCESS] . vkEnumeratePhysicalDevices
 
 pdmpDeviceLocalMemorySize :: VkPhysicalDeviceMemoryProperties -> VkDeviceSize
 pdmpDeviceLocalMemorySize memoryProperties = sum . fmap (getField @"size") . filter isDeviceLocal $ memoryHeaps
@@ -462,5 +467,8 @@ preferWhereM (p:ps) a b = do
     return LT
   else
     preferWhereM ps a b
+
+ioPutStrLn :: MonadIO io => String -> io ()
+ioPutStrLn = liftIO . putStrLn
 
 -- Other helpers<
