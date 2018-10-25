@@ -27,6 +27,7 @@ import Data.Functor
 import Data.List
 import Data.Proxy
 import Data.Reflection
+import qualified Data.Set as Set
 import Data.Tuple.Extra
 import Foreign.C.String
 import Foreign.Marshal.Alloc
@@ -63,6 +64,10 @@ main =
 
 resourceMain :: ResourceT IO ()
 resourceMain = do
+  liftIO . GLFW.setErrorCallback . Just $ \errorCode errorMessage ->
+    putStr $ "GLFW error callback: " ++ show errorCode ++ " - " ++ errorMessage
+  ioPutStrLn "GLFW error callback set."
+
   allocateAcquire_ initializedGLFW
   ioPutStrLn "GLFW initialized."
 
@@ -90,6 +95,22 @@ resourceMain = do
     setListRef @"ppEnabledExtensionNames" allExtensions
   ioPutStrLn "Vulkan instance created."
 
+#ifndef NDEBUG
+  vkaRegisterDebugCallback vulkanInstance
+    (
+      VK_DEBUG_REPORT_ERROR_BIT_EXT .|.
+      VK_DEBUG_REPORT_WARNING_BIT_EXT .|.
+      VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT .|.
+      VK_DEBUG_REPORT_INFORMATION_BIT_EXT .|.
+      VK_DEBUG_REPORT_DEBUG_BIT_EXT
+    ) $
+    \flags objectType object location messageCode layerPrefixPtr messagePtr userDataPtr -> do
+      message <- peekCString messagePtr
+      putStrLn $ "Validation layer: " ++ message
+      return VK_FALSE
+  ioPutStrLn "Vulkan debug callback registered."
+#endif
+
   (physicalDevice, physicalDeviceProperties, physicalDeviceMemoryProperties) <-
     liftIO $
     fmap (
@@ -114,7 +135,7 @@ resourceMain = do
 
   physicalDeviceQueueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
 
-  [graphicsQfi, computeQfi, transferQfi, presentQfi] <-
+  qfis@[graphicsQfi, computeQfi, transferQfi, presentQfi] <-
     liftIO $
     bestQueueFamilyIndexComboIn physicalDeviceQueueFamilyPropertiesArray
       [
@@ -141,12 +162,11 @@ resourceMain = do
           \_ _ -> return EQ
         )
       ]
+  ioPutStrLn "Queue family indices selected."
 
-  liftIO $ do
-    putStrLn $ "Graphics QFI: " ++ show graphicsQfi
-    putStrLn $ "Computer QFI: " ++ show computeQfi
-    putStrLn $ "Transfer QFI: " ++ show transferQfi
-    putStrLn $ "Present QFI: " ++ show presentQfi
+  let distinctQfis = distinct qfis
+
+  -- Next up: create the logical device
 
   return ()
 
@@ -239,30 +259,49 @@ onVkFailureThrow functionName successResults vkAction = do
   unless (result `elem` successResults) $ throwIO (VkaException functionName result)
   return result
 
+vkaRegisterDebugCallback :: MonadUnliftIO io => VkInstance -> VkDebugReportFlagsEXT -> HS_vkDebugReportCallbackEXT -> ResourceT io ()
+vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
+  debugCallbackPtr <- allocateAcquire_ . newFunPtrFrom . newVkDebugReportCallbackEXT $ debugCallback
+  void . allocateAcquire_ . newVk (registeredDebugReportCallbackResource vulkanInstance) $
+    createVk $
+    set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
+    set @"pNext" VK_NULL &*
+    set @"flags" flags &*
+    set @"pfnCallback" debugCallbackPtr
+
 data VkaResource vk ci =
   VkaResource {
-    vkrCreate :: Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult,
-    vkrDestroy :: vk -> Ptr VkAllocationCallbacks -> IO (),
+    vkrGetCreate :: IO (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult),
+    vkrGetDestroy :: IO (vk -> Ptr VkAllocationCallbacks -> IO ()),
     vkrCreateName :: String,
     vkrSuccessResults :: [VkResult]
   }
 
 newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource vk ci -> ci -> Acquire (VkResult, vk)
-newVkWithResult (VkaResource create destroy functionName successResults) createInfo =
-  (
-    withPtr createInfo $ \createInfoPtr ->
-    alloca $ \vkPtr -> do
-      result <- create createInfoPtr VK_NULL vkPtr & onVkFailureThrow functionName successResults
-      (result,) <$> peek vkPtr
-  )
-  `mkAcquire`
-  \(_, vk) -> destroy vk VK_NULL
+newVkWithResult (VkaResource getCreate getDestroy functionName successResults) createInfo =
+  liftIO (liftM2 (,) getCreate getDestroy) >>= \(create, destroy) ->
+    (
+      withPtr createInfo $ \createInfoPtr ->
+      alloca $ \vkPtr -> do
+        result <- create createInfoPtr VK_NULL vkPtr & onVkFailureThrow functionName successResults
+        (result,) <$> peek vkPtr
+    )
+    `mkAcquire`
+    \(_, vk) -> destroy vk VK_NULL
 
 newVk :: (Storable vk, VulkanMarshal ci) => VkaResource vk ci -> ci -> Acquire vk
 newVk vr ci = snd <$> newVkWithResult vr ci
 
 vulkanInstanceResource :: VkaResource VkInstance VkInstanceCreateInfo
-vulkanInstanceResource = VkaResource vkCreateInstance vkDestroyInstance "vkCreateInstance" [VK_SUCCESS]
+vulkanInstanceResource = VkaResource (return vkCreateInstance) (return vkDestroyInstance) "vkCreateInstance" [VK_SUCCESS]
+
+registeredDebugReportCallbackResource :: VkInstance -> VkaResource VkDebugReportCallbackEXT VkDebugReportCallbackCreateInfoEXT
+registeredDebugReportCallbackResource vulkanInstance =
+  VkaResource
+    (vkGetInstanceProc @VkCreateDebugReportCallbackEXT vulkanInstance <*> pure vulkanInstance)
+    (vkGetInstanceProc @VkDestroyDebugReportCallbackEXT vulkanInstance <*> pure vulkanInstance)
+    "vkCreateDebugReportCallbackEXT"
+    [VK_SUCCESS]
 
 type VkaGetter vk r = Ptr vk -> IO r
 
@@ -361,6 +400,9 @@ allocateAcquire_ = (snd <$>) . allocateAcquire
 -- ResourceT helpers<
 
 -- Other helpers>
+newFunPtrFrom :: IO (FunPtr f) -> Acquire (FunPtr f)
+newFunPtrFrom = flip mkAcquire freeHaskellFunPtr
+
 whenNothing :: Applicative f => Maybe a -> f a -> f a
 whenNothing (Just x) _ = pure x
 whenNothing Nothing m = m
@@ -373,6 +415,9 @@ whenNothingM mm a = mm >>= \m -> whenNothing m a
 lengthNum :: (Foldable t, Num n) => t a -> n
 lengthNum = fromIntegral . length
 {-# INLINE lengthNum #-}
+
+distinct :: Ord a => [a] -> [a]
+distinct = Set.toList . Set.fromList
 
 reflection :: forall t r. Reifies t r => r
 reflection = reflect (Proxy :: Proxy t)
@@ -470,5 +515,4 @@ preferWhereM (p:ps) a b = do
 
 ioPutStrLn :: MonadIO io => String -> io ()
 ioPutStrLn = liftIO . putStrLn
-
 -- Other helpers<

@@ -19,6 +19,7 @@ executable sandbox
   ghc-options: -threaded -Wall -Wno-name-shadowing
   build-depends:
     array,
+    containers,
     dimensions,
     easytensor,
     easytensor-vulkan,
