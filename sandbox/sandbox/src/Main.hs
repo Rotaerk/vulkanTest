@@ -27,7 +27,6 @@ import Data.Functor
 import Data.List
 import Data.Proxy
 import Data.Reflection
-import qualified Data.Set as Set
 import Data.Tuple.Extra
 import Foreign.C.String
 import Foreign.Marshal.Alloc
@@ -164,9 +163,9 @@ resourceMain = do
       ]
   ioPutStrLn "Queue family indices selected."
 
-  let distinctQfis = distinct qfis
-
-  -- Next up: create the logical device
+  (device, [graphicsQueue, computeQueue, transferQueue, presentQueue]) <-
+    vkaCreateDeviceWithOneQueuePerDistinctFamily physicalDevice qfis deviceExtensions
+  ioPutStrLn "Vulkan device created."
 
   return ()
 
@@ -303,6 +302,42 @@ registeredDebugReportCallbackResource vulkanInstance =
     "vkCreateDebugReportCallbackEXT"
     [VK_SUCCESS]
 
+deviceResource :: VkPhysicalDevice -> VkaResource VkDevice VkDeviceCreateInfo
+deviceResource physicalDevice = VkaResource (return $ vkCreateDevice physicalDevice) (return vkDestroyDevice) "vkCreateDevice" [VK_SUCCESS]
+
+-- Creates a device with one queue for each distinct queue family specified in the second argument.
+-- The resulting queue list's elemests correspond to the specified queue family indices, even when there are duplicates.
+vkaCreateDeviceWithOneQueuePerDistinctFamily :: MonadIO io => VkPhysicalDevice -> [Word32] -> [CString] -> ResourceT io (VkDevice, [VkQueue])
+vkaCreateDeviceWithOneQueuePerDistinctFamily physicalDevice queueFamilyIndices deviceExtensions = do
+  device <-
+    allocateAcquire_ . newVk (deviceResource physicalDevice) . createVk $
+    set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
+    set @"pNext" VK_NULL &*
+    set @"flags" 0 &*
+    set @"queueCreateInfoCount" (lengthNum distinctQfis) &*
+    setListRef @"pQueueCreateInfos" (
+      distinctQfis <&> \qfi ->
+        createVk $
+        set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
+        set @"pNext" VK_NULL &*
+        set @"flags" 0 &*
+        set @"queueFamilyIndex" qfi &*
+        set @"queueCount" 1 &*
+        setListRef @"pQueuePriorities" [1.0]
+    ) &*
+    set @"enabledLayerCount" 0 &*
+    set @"ppEnabledLayerNames" VK_NULL &*
+    set @"enabledExtensionCount" (lengthNum deviceExtensions) &*
+    setListRef @"ppEnabledExtensionNames" deviceExtensions &*
+    set @"pEnabledFeatures" VK_NULL
+
+  queues <- forM queueFamilyIndices $ \qfi -> getVk (vkGetDeviceQueue device qfi 0)
+
+  return (device, queues)
+
+  where
+    distinctQfis = nub queueFamilyIndices
+
 type VkaGetter vk r = Ptr vk -> IO r
 
 getVkWithResult :: (MonadIO io, Storable vk) => VkaGetter vk r -> io (r, vk)
@@ -415,9 +450,6 @@ whenNothingM mm a = mm >>= \m -> whenNothing m a
 lengthNum :: (Foldable t, Num n) => t a -> n
 lengthNum = fromIntegral . length
 {-# INLINE lengthNum #-}
-
-distinct :: Ord a => [a] -> [a]
-distinct = Set.toList . Set.fromList
 
 reflection :: forall t r. Reifies t r => r
 reflection = reflect (Proxy :: Proxy t)

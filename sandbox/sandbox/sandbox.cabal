@@ -16,7 +16,7 @@ cabal-version:       >=1.10
 executable sandbox
   hs-source-dirs: src
   main-is: Main.hs
-  ghc-options: -threaded -Wall -Wno-name-shadowing
+  ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches
   build-depends:
     array,
     containers,
