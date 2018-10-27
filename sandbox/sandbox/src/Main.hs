@@ -27,6 +27,8 @@ import Data.Functor
 import Data.List
 import Data.Proxy
 import Data.Reflection
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Tuple.Extra
 import Foreign.C.String
 import Foreign.Marshal.Alloc
@@ -163,9 +165,34 @@ resourceMain = do
       ]
   ioPutStrLn "Queue family indices selected."
 
-  (device, [graphicsQueue, computeQueue, transferQueue, presentQueue]) <-
-    vkaCreateDeviceWithOneQueuePerDistinctFamily physicalDevice qfis deviceExtensions
+  device <- allocateAcquire_ . newVk (deviceResource physicalDevice) $ defineDeviceWithOneQueuePerUsedFamily (Set.fromList qfis) deviceExtensions
   ioPutStrLn "Vulkan device created."
+
+  [(graphicsQueue, graphicsCommandPool), (computeQueue, computeCommandPool), (transferQueue, transferCommandPool), (presentQueue, presentCommandPool)] <-
+    let
+      createCommandPool = allocateAcquire_ . newVk (commandPoolResource device) . defineStandardCommandPool 0
+    in
+      forM qfis $ \qfi -> liftM2 (,) (getVk $ vkGetDeviceQueue device qfi 0) (createCommandPool qfi)
+  ioPutStrLn "Device queues obtained, and corresponding command pools created."
+
+  descriptorSetLayout <-
+    allocateAcquire_ . newVk (descriptorSetLayoutResource device) . defineStandardDescriptorSetLayout 0 . fmap (createVk @VkDescriptorSetLayoutBinding) $ [
+      set @"binding" 0 &*
+      set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+      set @"descriptorCount" 1 &*
+      set @"stageFlags" VK_SHADER_STAGE_VERTEX_BIT &*
+      set @"pImmutableSamplers" VK_NULL,
+
+      set @"binding" 1 &*
+      set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
+      set @"descriptorCount" 1 &*
+      set @"stageFlags" VK_SHADER_STAGE_FRAGMENT_BIT &*
+      set @"pImmutableSamplers" VK_NULL
+    ]
+  ioPutStrLn "Descriptor set layout created."
+
+  pipelineLayout <- allocateAcquire_ . newVk (pipelineLayoutResource device) $ defineStandardPipelineLayout [descriptorSetLayout] []
+  ioPutStrLn "Pipeline layout created."
 
   return ()
 
@@ -305,38 +332,65 @@ registeredDebugReportCallbackResource vulkanInstance =
 deviceResource :: VkPhysicalDevice -> VkaResource VkDevice VkDeviceCreateInfo
 deviceResource physicalDevice = VkaResource (return $ vkCreateDevice physicalDevice) (return vkDestroyDevice) "vkCreateDevice" [VK_SUCCESS]
 
--- Creates a device with one queue for each distinct queue family specified in the second argument.
--- The resulting queue list's elemests correspond to the specified queue family indices, even when there are duplicates.
-vkaCreateDeviceWithOneQueuePerDistinctFamily :: MonadIO io => VkPhysicalDevice -> [Word32] -> [CString] -> ResourceT io (VkDevice, [VkQueue])
-vkaCreateDeviceWithOneQueuePerDistinctFamily physicalDevice queueFamilyIndices deviceExtensions = do
-  device <-
-    allocateAcquire_ . newVk (deviceResource physicalDevice) . createVk $
-    set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
-    set @"pNext" VK_NULL &*
-    set @"flags" 0 &*
-    set @"queueCreateInfoCount" (lengthNum distinctQfis) &*
-    setListRef @"pQueueCreateInfos" (
-      distinctQfis <&> \qfi ->
-        createVk $
-        set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
-        set @"pNext" VK_NULL &*
-        set @"flags" 0 &*
-        set @"queueFamilyIndex" qfi &*
-        set @"queueCount" 1 &*
-        setListRef @"pQueuePriorities" [1.0]
-    ) &*
-    set @"enabledLayerCount" 0 &*
-    set @"ppEnabledLayerNames" VK_NULL &*
-    set @"enabledExtensionCount" (lengthNum deviceExtensions) &*
-    setListRef @"ppEnabledExtensionNames" deviceExtensions &*
-    set @"pEnabledFeatures" VK_NULL
+defineDeviceWithOneQueuePerUsedFamily :: Set Word32 -> [CString] -> VkDeviceCreateInfo
+defineDeviceWithOneQueuePerUsedFamily queueFamilyIndices deviceExtensions =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"flags" 0 &*
+  set @"queueCreateInfoCount" (fromIntegral $ Set.size queueFamilyIndices) &*
+  setListRef @"pQueueCreateInfos" (
+    Set.toList queueFamilyIndices <&> \qfi ->
+      createVk $
+      set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
+      set @"pNext" VK_NULL &*
+      set @"flags" 0 &*
+      set @"queueFamilyIndex" qfi &*
+      set @"queueCount" 1 &*
+      setListRef @"pQueuePriorities" [1.0]
+  ) &*
+  set @"enabledLayerCount" 0 &*
+  set @"ppEnabledLayerNames" VK_NULL &*
+  set @"enabledExtensionCount" (lengthNum deviceExtensions) &*
+  setListRef @"ppEnabledExtensionNames" deviceExtensions &*
+  set @"pEnabledFeatures" VK_NULL
 
-  queues <- forM queueFamilyIndices $ \qfi -> getVk (vkGetDeviceQueue device qfi 0)
+commandPoolResource :: VkDevice -> VkaResource VkCommandPool VkCommandPoolCreateInfo
+commandPoolResource device = VkaResource (return $ vkCreateCommandPool device) (return $ vkDestroyCommandPool device) "vkCreateCommandPool" [VK_SUCCESS]
 
-  return (device, queues)
+defineStandardCommandPool :: VkCommandPoolCreateFlags -> Word32 -> VkCommandPoolCreateInfo
+defineStandardCommandPool flags queueFamilyIndex =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"flags" flags &*
+  set @"queueFamilyIndex" queueFamilyIndex
 
-  where
-    distinctQfis = nub queueFamilyIndices
+descriptorSetLayoutResource :: VkDevice -> VkaResource VkDescriptorSetLayout VkDescriptorSetLayoutCreateInfo
+descriptorSetLayoutResource device = VkaResource (return $ vkCreateDescriptorSetLayout device) (return $ vkDestroyDescriptorSetLayout device) "vkCreateDescriptorSetLayout" [VK_SUCCESS]
+
+defineStandardDescriptorSetLayout :: VkDescriptorSetLayoutCreateFlags -> [VkDescriptorSetLayoutBinding] -> VkDescriptorSetLayoutCreateInfo
+defineStandardDescriptorSetLayout flags bindings =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"flags" flags &*
+  set @"bindingCount" (lengthNum bindings) &*
+  setListRef @"pBindings" bindings
+
+pipelineLayoutResource :: VkDevice -> VkaResource VkPipelineLayout VkPipelineLayoutCreateInfo
+pipelineLayoutResource device = VkaResource (return $ vkCreatePipelineLayout device) (return $ vkDestroyPipelineLayout device) "vkCreatePipelineLayout" [VK_SUCCESS]
+
+defineStandardPipelineLayout :: [VkDescriptorSetLayout] -> [VkPushConstantRange] -> VkPipelineLayoutCreateInfo
+defineStandardPipelineLayout descriptorSetLayouts pushConstantRanges =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"flags" 0 &*
+  set @"setLayoutCount" (lengthNum descriptorSetLayouts) &*
+  setListRef @"pSetLayouts" descriptorSetLayouts &*
+  set @"pushConstantRangeCount" (lengthNum pushConstantRanges) &*
+  setListRef @"pPushConstantRanges" pushConstantRanges
 
 type VkaGetter vk r = Ptr vk -> IO r
 
