@@ -77,7 +77,7 @@ resourceMain = do
   let allExtensions = glfwExtensions ++ extensions
 
   vulkanInstance <-
-    allocateAcquire_ . newVk vulkanInstanceResource . createVk $
+    allocateAcquireVk_ vulkanInstanceResource . createVk $
     set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
     set @"pNext" VK_NULL &*
     setVkRef @"pApplicationInfo" (
@@ -165,18 +165,18 @@ resourceMain = do
       ]
   ioPutStrLn "Queue family indices selected."
 
-  device <- allocateAcquire_ . newVk (deviceResource physicalDevice) $ defineDeviceWithOneQueuePerUsedFamily (Set.fromList qfis) deviceExtensions
+  device <- allocateAcquireVk_ (deviceResource physicalDevice) $ defineDeviceWithOneQueuePerUsedFamily (Set.fromList qfis) deviceExtensions
   ioPutStrLn "Vulkan device created."
 
   [(graphicsQueue, graphicsCommandPool), (computeQueue, computeCommandPool), (transferQueue, transferCommandPool), (presentQueue, presentCommandPool)] <-
     let
-      createCommandPool = allocateAcquire_ . newVk (commandPoolResource device) . defineStandardCommandPool 0
+      createCommandPool = allocateAcquireVk_ (commandPoolResource device) . defineStandardCommandPool 0
     in
       forM qfis $ \qfi -> liftM2 (,) (getVk $ vkGetDeviceQueue device qfi 0) (createCommandPool qfi)
   ioPutStrLn "Device queues obtained, and corresponding command pools created."
 
   descriptorSetLayout <-
-    allocateAcquire_ . newVk (descriptorSetLayoutResource device) . defineStandardDescriptorSetLayout 0 . fmap (createVk @VkDescriptorSetLayoutBinding) $ [
+    allocateAcquireVk_ (descriptorSetLayoutResource device) . defineStandardDescriptorSetLayout 0 . fmap (createVk @VkDescriptorSetLayoutBinding) $ [
       set @"binding" 0 &*
       set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
       set @"descriptorCount" 1 &*
@@ -191,7 +191,7 @@ resourceMain = do
     ]
   ioPutStrLn "Descriptor set layout created."
 
-  pipelineLayout <- allocateAcquire_ . newVk (pipelineLayoutResource device) $ defineStandardPipelineLayout [descriptorSetLayout] []
+  pipelineLayout <- allocateAcquireVk_ (pipelineLayoutResource device) $ defineStandardPipelineLayout [descriptorSetLayout] []
   ioPutStrLn "Pipeline layout created."
 
   return ()
@@ -317,6 +317,9 @@ newVkWithResult (VkaResource getCreate getDestroy functionName successResults) c
 
 newVk :: (Storable vk, VulkanMarshal ci) => VkaResource vk ci -> ci -> Acquire vk
 newVk vr ci = snd <$> newVkWithResult vr ci
+
+allocateAcquireVk_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource vk ci -> ci -> m vk
+allocateAcquireVk_ = (allocateAcquire_ .) . newVk
 
 vulkanInstanceResource :: VkaResource VkInstance VkInstanceCreateInfo
 vulkanInstanceResource = VkaResource (return vkCreateInstance) (return vkDestroyInstance) "vkCreateInstance" [VK_SUCCESS]
