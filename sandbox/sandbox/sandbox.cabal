@@ -16,6 +16,11 @@ cabal-version:       >=1.10
 executable sandbox
   hs-source-dirs: src
   main-is: Main.hs
+  other-modules:
+    Data.Acquire.Local
+    Data.Array.MArray.Local
+    Pipes.Prelude.Local
+    Prelude.Local
   ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches
   build-depends:
     array,
@@ -25,10 +30,16 @@ executable sandbox
     easytensor-vulkan,
     extra,
     GLFW-b,
+    ktx-rw,
+    monad-loops,
+    mtl,
+    pipes,
     reflection,
     resourcet,
-    transformers,
+    safe,
+    typelits-witnesses,
+    unliftio,
     vulkan-api,
 
-    base >=4.11 && <4.12
+    base >=4.12 && <4.13
   default-language:    Haskell2010

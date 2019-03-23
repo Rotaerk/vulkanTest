@@ -1,1 +1,1 @@
--c "cabal new-repl"
+-c "cabal new-repl" --restart=sandbox.cabal

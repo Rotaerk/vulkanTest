@@ -1,39 +1,57 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Main where
-  
-import Control.Exception
+
+import Prelude.Local
+
+import qualified Codec.Image.Ktx.Read as KTX
+import Control.Exception (throw)
 import Control.Monad
+import Control.Monad.BufferWriter
 import Control.Monad.Extra
+import Control.Monad.FileReader
 import Control.Monad.IO.Class
+import Control.Monad.Loops
+import Control.Monad.Reader
 import Control.Monad.Trans.Resource
-import Data.Acquire
+import Data.Acquire.Local
 import Data.Array.Base
-import Data.Array.MArray
+import Data.Array.MArray.Local
 import Data.Array.Storable
+import Data.Array.Unsafe
 import Data.Bits
 import Data.Bool
 import Data.Foldable
 import Data.Function
 import Data.Functor
+import Data.Functor.Identity
 import Data.List
-import Data.Proxy
-import Data.Reflection
+import Data.Maybe
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Tuple.Extra
+import Data.Word
 import Foreign.C.String
+import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc
 import Foreign.Ptr
 import Foreign.Storable
+
+import qualified GHC.Base as GHC
+import qualified GHC.ForeignPtr as GHC
 
 import qualified Graphics.UI.GLFW as GLFW
 
@@ -44,8 +62,17 @@ import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
+import Graphics.Vulkan.Marshal.Internal
 
 import qualified Numeric.DataFrame as DF
+
+import Pipes
+import qualified Pipes.Prelude.Local as P
+
+import Safe.Foldable
+import System.IO.Unsafe
+import UnliftIO.Exception
+import UnliftIO.IO
 
 main :: IO ()
 main =
@@ -77,23 +104,8 @@ resourceMain = do
   let allExtensions = glfwExtensions ++ extensions
 
   vulkanInstance <-
-    allocateAcquireVk_ vulkanInstanceResource . createVk $
-    set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
-    set @"pNext" VK_NULL &*
-    setVkRef @"pApplicationInfo" (
-      createVk $
-      set @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO &*
-      set @"pNext" VK_NULL &*
-      setStrRef @"pApplicationName" "Vulkan Sandbox" &*
-      set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
-      set @"pEngineName" VK_NULL &*
-      set @"engineVersion" 0 &*
-      set @"apiVersion" VK_API_VERSION_1_0
-    ) &*
-    set @"enabledLayerCount" (lengthNum validationLayers) &*
-    setStrListRef @"ppEnabledLayerNames" validationLayers &*
-    set @"enabledExtensionCount" (lengthNum allExtensions) &*
-    setListRef @"ppEnabledExtensionNames" allExtensions
+    allocateAcquireVk_ vulkanInstanceResource $
+    defineStandardVulkanInstance "Vulkan Sandbox" (_VK_MAKE_VERSION 1 0 0) "" 0 VK_API_VERSION_1_0 validationLayers allExtensions
   ioPutStrLn "Vulkan instance created."
 
 #ifndef NDEBUG
@@ -112,20 +124,24 @@ resourceMain = do
   ioPutStrLn "Vulkan debug callback registered."
 #endif
 
+  physicalDevicesArray <- getVkArray (vkaEnumeratePhysicalDevices vulkanInstance)
+
   (physicalDevice, physicalDeviceProperties, physicalDeviceMemoryProperties) <-
     liftIO $
-    fmap (
-      maximumBy . mconcat $ [
+    getElems physicalDevicesArray >>=
+    mapM (\pd ->
+      liftM2 (pd,,)
+        (getVk . vkGetPhysicalDeviceProperties $ pd)
+        (getVk . vkGetPhysicalDeviceMemoryProperties $ pd)
+    ) <&>
+    sortBy (
+      mconcat [
         prefer [VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU] `on` getField @"deviceType" . snd3,
         compare `on` pdmpDeviceLocalMemorySize . thd3
       ]
-    ) $
-    mapElemsM (\physicalDevice ->
-      liftM2 (physicalDevice,,)
-        (getVk . vkGetPhysicalDeviceProperties $ physicalDevice)
-        (getVk . vkGetPhysicalDeviceMemoryProperties $ physicalDevice)
-    ) =<<
-    getVkArray (vkaEnumeratePhysicalDevices vulkanInstance)
+    ) <&>
+    headOr (throwAppEx "No physical device found")
+
   ioPutStrLn "Physical device selected."
 
   window <- allocateAcquire_ $ newVulkanGLFWWindow 800 600 "Vulkan Sandbox"
@@ -138,7 +154,7 @@ resourceMain = do
 
   qfis@[graphicsQfi, computeQfi, transferQfi, presentQfi] <-
     liftIO $
-    bestQueueFamilyIndexComboIn physicalDeviceQueueFamilyPropertiesArray
+    pickQueueFamilyIndexCombo
       [
         (
           return . (zeroBits /=) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags" . snd,
@@ -159,10 +175,11 @@ resourceMain = do
           ]
         ),
         (
-          (\(qfi, _) -> (VK_TRUE ==) <$> getVk (vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi windowSurface)),
+          \(qfi, _) -> (VK_TRUE ==) <$> getVk (vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi windowSurface),
           \_ _ -> return EQ
         )
       ]
+      physicalDeviceQueueFamilyPropertiesArray
   ioPutStrLn "Queue family indices selected."
 
   device <- allocateAcquireVk_ (deviceResource physicalDevice) $ defineDeviceWithOneQueuePerUsedFamily (Set.fromList qfis) deviceExtensions
@@ -193,6 +210,12 @@ resourceMain = do
 
   pipelineLayout <- allocateAcquireVk_ (pipelineLayoutResource device) $ defineStandardPipelineLayout [descriptorSetLayout] []
   ioPutStrLn "Pipeline layout created."
+
+  -- What information I need about a texture:
+  -- - width, height, depth
+  -- - pixel size
+  -- - # mip levels
+  -- - format
 
   return ()
 
@@ -295,7 +318,7 @@ vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
     set @"flags" flags &*
     set @"pfnCallback" debugCallbackPtr
 
-data VkaResource vk ci =
+data VkaResource ci vk =
   VkaResource {
     vkrGetCreate :: IO (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult),
     vkrGetDestroy :: IO (vk -> Ptr VkAllocationCallbacks -> IO ()),
@@ -303,7 +326,7 @@ data VkaResource vk ci =
     vkrSuccessResults :: [VkResult]
   }
 
-newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource vk ci -> ci -> Acquire (VkResult, vk)
+newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire (VkResult, vk)
 newVkWithResult (VkaResource getCreate getDestroy functionName successResults) createInfo =
   liftIO (liftM2 (,) getCreate getDestroy) >>= \(create, destroy) ->
     (
@@ -315,16 +338,34 @@ newVkWithResult (VkaResource getCreate getDestroy functionName successResults) c
     `mkAcquire`
     \(_, vk) -> destroy vk VK_NULL
 
-newVk :: (Storable vk, VulkanMarshal ci) => VkaResource vk ci -> ci -> Acquire vk
+newVk :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire vk
 newVk vr ci = snd <$> newVkWithResult vr ci
 
-allocateAcquireVk_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource vk ci -> ci -> m vk
+allocateAcquireVk_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m vk
 allocateAcquireVk_ = (allocateAcquire_ .) . newVk
 
-vulkanInstanceResource :: VkaResource VkInstance VkInstanceCreateInfo
+vulkanInstanceResource :: VkaResource VkInstanceCreateInfo VkInstance
 vulkanInstanceResource = VkaResource (return vkCreateInstance) (return vkDestroyInstance) "vkCreateInstance" [VK_SUCCESS]
 
-registeredDebugReportCallbackResource :: VkInstance -> VkaResource VkDebugReportCallbackEXT VkDebugReportCallbackCreateInfoEXT
+defineStandardVulkanInstance :: String -> Word32 -> String -> Word32 -> Word32 -> [String] -> [CString] -> VkInstanceCreateInfo
+defineStandardVulkanInstance applicationName applicationVersion engineName engineVersion apiVersion validationLayers extensions =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  setVkRef @"pApplicationInfo" (
+    createVk $
+    set @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO &*
+    set @"pNext" VK_NULL &*
+    setStrRef @"pApplicationName" applicationName &*
+    set @"applicationVersion" applicationVersion &*
+    setStrRef @"pEngineName" engineName &*
+    set @"engineVersion" engineVersion &*
+    set @"apiVersion" apiVersion
+  ) &*
+  setStrListCountAndRef @"enabledLayerCount" @"ppEnabledLayerNames" validationLayers &*
+  setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" extensions
+
+registeredDebugReportCallbackResource :: VkInstance -> VkaResource VkDebugReportCallbackCreateInfoEXT VkDebugReportCallbackEXT
 registeredDebugReportCallbackResource vulkanInstance =
   VkaResource
     (vkGetInstanceProc @VkCreateDebugReportCallbackEXT vulkanInstance <*> pure vulkanInstance)
@@ -332,7 +373,7 @@ registeredDebugReportCallbackResource vulkanInstance =
     "vkCreateDebugReportCallbackEXT"
     [VK_SUCCESS]
 
-deviceResource :: VkPhysicalDevice -> VkaResource VkDevice VkDeviceCreateInfo
+deviceResource :: VkPhysicalDevice -> VkaResource VkDeviceCreateInfo VkDevice
 deviceResource physicalDevice = VkaResource (return $ vkCreateDevice physicalDevice) (return vkDestroyDevice) "vkCreateDevice" [VK_SUCCESS]
 
 defineDeviceWithOneQueuePerUsedFamily :: Set Word32 -> [CString] -> VkDeviceCreateInfo
@@ -341,24 +382,21 @@ defineDeviceWithOneQueuePerUsedFamily queueFamilyIndices deviceExtensions =
   set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
   set @"pNext" VK_NULL &*
   set @"flags" 0 &*
-  set @"queueCreateInfoCount" (fromIntegral $ Set.size queueFamilyIndices) &*
-  setListRef @"pQueueCreateInfos" (
+  setListCountAndRef @"queueCreateInfoCount" @"pQueueCreateInfos" (
     Set.toList queueFamilyIndices <&> \qfi ->
       createVk $
       set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
       set @"pNext" VK_NULL &*
       set @"flags" 0 &*
       set @"queueFamilyIndex" qfi &*
-      set @"queueCount" 1 &*
-      setListRef @"pQueuePriorities" [1.0]
+      setListCountAndRef @"queueCount" @"pQueuePriorities" [1.0]
   ) &*
   set @"enabledLayerCount" 0 &*
   set @"ppEnabledLayerNames" VK_NULL &*
-  set @"enabledExtensionCount" (lengthNum deviceExtensions) &*
-  setListRef @"ppEnabledExtensionNames" deviceExtensions &*
+  setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" deviceExtensions &*
   set @"pEnabledFeatures" VK_NULL
 
-commandPoolResource :: VkDevice -> VkaResource VkCommandPool VkCommandPoolCreateInfo
+commandPoolResource :: VkDevice -> VkaResource VkCommandPoolCreateInfo VkCommandPool
 commandPoolResource device = VkaResource (return $ vkCreateCommandPool device) (return $ vkDestroyCommandPool device) "vkCreateCommandPool" [VK_SUCCESS]
 
 defineStandardCommandPool :: VkCommandPoolCreateFlags -> Word32 -> VkCommandPoolCreateInfo
@@ -369,7 +407,7 @@ defineStandardCommandPool flags queueFamilyIndex =
   set @"flags" flags &*
   set @"queueFamilyIndex" queueFamilyIndex
 
-descriptorSetLayoutResource :: VkDevice -> VkaResource VkDescriptorSetLayout VkDescriptorSetLayoutCreateInfo
+descriptorSetLayoutResource :: VkDevice -> VkaResource VkDescriptorSetLayoutCreateInfo VkDescriptorSetLayout
 descriptorSetLayoutResource device = VkaResource (return $ vkCreateDescriptorSetLayout device) (return $ vkDestroyDescriptorSetLayout device) "vkCreateDescriptorSetLayout" [VK_SUCCESS]
 
 defineStandardDescriptorSetLayout :: VkDescriptorSetLayoutCreateFlags -> [VkDescriptorSetLayoutBinding] -> VkDescriptorSetLayoutCreateInfo
@@ -378,10 +416,9 @@ defineStandardDescriptorSetLayout flags bindings =
   set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO &*
   set @"pNext" VK_NULL &*
   set @"flags" flags &*
-  set @"bindingCount" (lengthNum bindings) &*
-  setListRef @"pBindings" bindings
+  setListCountAndRef @"bindingCount" @"pBindings" bindings
 
-pipelineLayoutResource :: VkDevice -> VkaResource VkPipelineLayout VkPipelineLayoutCreateInfo
+pipelineLayoutResource :: VkDevice -> VkaResource VkPipelineLayoutCreateInfo VkPipelineLayout
 pipelineLayoutResource device = VkaResource (return $ vkCreatePipelineLayout device) (return $ vkDestroyPipelineLayout device) "vkCreatePipelineLayout" [VK_SUCCESS]
 
 defineStandardPipelineLayout :: [VkDescriptorSetLayout] -> [VkPushConstantRange] -> VkPipelineLayoutCreateInfo
@@ -390,10 +427,128 @@ defineStandardPipelineLayout descriptorSetLayouts pushConstantRanges =
   set @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &*
   set @"pNext" VK_NULL &*
   set @"flags" 0 &*
-  set @"setLayoutCount" (lengthNum descriptorSetLayouts) &*
-  setListRef @"pSetLayouts" descriptorSetLayouts &*
-  set @"pushConstantRangeCount" (lengthNum pushConstantRanges) &*
-  setListRef @"pPushConstantRanges" pushConstantRanges
+  setListCountAndRef @"setLayoutCount" @"pSetLayouts" descriptorSetLayouts &*
+  setListCountAndRef @"pushConstantRangeCount" @"pPushConstantRanges" pushConstantRanges
+
+allocatedMemoryResource :: VkDevice -> VkaResource VkMemoryAllocateInfo VkDeviceMemory
+allocatedMemoryResource device = VkaResource (return $ vkAllocateMemory device) (return $ vkFreeMemory device) "vkAllocateMemory" [VK_SUCCESS]
+
+defineStandardMemoryAllocation :: VkDeviceSize -> Word32 -> VkMemoryAllocateInfo
+defineStandardMemoryAllocation allocationSize memoryTypeIndex =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"allocationSize" allocationSize &*
+  set @"memoryTypeIndex" memoryTypeIndex
+
+bufferResource :: VkDevice -> VkaResource VkBufferCreateInfo VkBuffer
+bufferResource device = VkaResource (return $ vkCreateBuffer device) (return $ vkDestroyBuffer device) "vkCreateBuffer" [VK_SUCCESS]
+
+defineStandardBuffer :: VkDeviceSize -> VkBufferUsageFlags -> [Word32] -> VkBufferCreateInfo
+defineStandardBuffer size usageFlags qfis =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"size" size &*
+  set @"usage" usageFlags &*
+  set @"sharingMode" (if null qfis' then VK_SHARING_MODE_EXCLUSIVE else VK_SHARING_MODE_CONCURRENT) &*
+  setListCountAndRef @"queueFamilyIndexCount" @"pQueueFamilyIndices" qfis'
+
+  where
+    -- If just one QFI is provided, it's the same as providing none; both are exclusive mode.
+    qfis' = if length qfis > 1 then qfis else []
+
+allocateAndBindBufferMemory ::
+  MonadUnliftIO io =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  VkBuffer ->
+  QualificationM io (Int, VkMemoryType) ->
+  ResourceT io (Maybe (VkBuffer, VkDeviceMemory))
+allocateAndBindBufferMemory device pdmp buffer qualification =
+  getVk (vkGetBufferMemoryRequirements device buffer) >>= \memReqs ->
+  lift (
+    pickByM qualification .
+    filter (testBit (getField @"memoryTypeBits" memReqs) . fst) .
+    take (fromIntegral $ getField @"memoryTypeCount" pdmp) $
+    getFieldArrayAssocs @"memoryTypes" pdmp
+  ) >>=
+    mapM (\(chosenMemoryTypeIndex, _) -> do
+      bufferMemory <-
+        allocateAcquireVk_ (allocatedMemoryResource device) $
+        defineStandardMemoryAllocation (getField @"size" memReqs) (fromIntegral chosenMemoryTypeIndex)
+      liftIO $ vkaBindBufferMemory device buffer bufferMemory 0
+      return (buffer, bufferMemory)
+    )
+
+vkaBindBufferMemory :: VkDevice -> VkBuffer -> VkDeviceMemory -> VkDeviceSize -> IO ()
+vkaBindBufferMemory device buffer memory memoryOffset =
+  void $ vkBindBufferMemory device buffer memory memoryOffset &
+    onVkFailureThrow "vkBindBufferMemory" [VK_SUCCESS]
+
+imageResource :: VkDevice -> VkaResource VkImageCreateInfo VkImage
+imageResource device = VkaResource (return $ vkCreateImage device) (return $ vkDestroyImage device) "vkCreateImage" [VK_SUCCESS]
+
+defineStandardImage ::
+  VkImageCreateFlags ->
+  VkImageType ->
+  VkFormat ->
+  VkExtent3D ->
+  Word32 ->
+  Word32 ->
+  VkSampleCountFlagBits ->
+  VkImageTiling ->
+  VkImageUsageFlags ->
+  [Word32] ->
+  VkImageLayout ->
+  VkImageCreateInfo
+defineStandardImage flags imageType format extent numMipLevels numArrayLayers sampleCountFlagBits tiling usage qfis initialLayout =
+  createVk $
+  set @"sType" VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"flags" flags &*
+  set @"imageType" imageType &*
+  set @"format" format &*
+  set @"extent" extent &*
+  set @"mipLevels" numMipLevels &*
+  set @"arrayLayers" numArrayLayers &*
+  set @"samples" sampleCountFlagBits &*
+  set @"tiling" tiling &*
+  set @"usage" usage &*
+  set @"sharingMode" (if null qfis' then VK_SHARING_MODE_EXCLUSIVE else VK_SHARING_MODE_CONCURRENT) &*
+  setListCountAndRef @"queueFamilyIndexCount" @"pQueueFamilyIndices" qfis' &*
+  set @"initialLayout" initialLayout
+
+  where
+    -- If just one QFI is provided, it's the same as providing none; both are exclusive mode.
+    qfis' = if length qfis > 1 then qfis else []
+
+allocateAndBindImageMemory :: MonadUnliftIO io => VkDevice -> VkImage -> (Word32 -> Word32) -> ResourceT io (VkImage, VkDeviceMemory)
+allocateAndBindImageMemory device image memoryTypeIndexFromMemoryTypeBits = do
+  memReqs <- getVk $ vkGetImageMemoryRequirements device image
+  imageMemory <-
+    allocateAcquireVk_ (allocatedMemoryResource device) $
+    defineStandardMemoryAllocation (getField @"size" memReqs) (memoryTypeIndexFromMemoryTypeBits $ getField @"memoryTypeBits" memReqs)
+  liftIO $ vkaBindImageMemory device image imageMemory 0
+  return (image, imageMemory)
+
+vkaBindImageMemory :: VkDevice -> VkImage -> VkDeviceMemory -> VkDeviceSize -> IO ()
+vkaBindImageMemory device buffer memory memoryOffset =
+  void $ vkBindImageMemory device buffer memory memoryOffset &
+    onVkFailureThrow "vkBindImageMemory" [VK_SUCCESS]
+
+loadKtxTexture :: (MonadUnliftIO io, MonadThrow io) => VkDevice -> VkPhysicalDeviceMemoryProperties -> FilePath -> ResourceT io ()
+loadKtxTexture device pdmp filePath =
+  withBinaryFile filePath ReadMode . runFileReaderT $
+  KTX.readAndCheckIdentifier >> KTX.readHeader >>= KTX.runKtxBodyReaderT (do
+    textureDataSize <- KTX.getTextureDataSize
+    stagingBuffer <-
+      lift . lift . allocateAcquireVk_ (bufferResource device) $
+      defineStandardBuffer (fromIntegral textureDataSize) VK_BUFFER_USAGE_TRANSFER_SRC_BIT []
+--    stagingBufferMemory <- lift . lift $ allocateAndBindBufferMemory device pdmp stagingBuffer undefined
+    KTX.skipMetadata
+    undefined
+  )
 
 type VkaGetter vk r = Ptr vk -> IO r
 
@@ -450,157 +605,28 @@ pdmpDeviceLocalMemorySize memoryProperties = sum . fmap (getField @"size") . fil
     memoryHeapCount = getField @"memoryHeapCount" memoryProperties
     memoryHeaps = take (fromIntegral memoryHeapCount) . fmap DF.unScalar . DF.toList . getVec @"memoryHeaps" $ memoryProperties
 
-comboWithFewestDistinct :: Eq a => [[a]] -> [a]
-comboWithFewestDistinct = minimumBy (compare `on` length . nub) . sequence
+pickQueueFamilyIndexCombo :: forall i. Ix i => [QualificationM IO (i, VkQueueFamilyProperties)] -> StorableArray i VkQueueFamilyProperties -> IO [i]
+pickQueueFamilyIndexCombo qualifications qfpArray =
+  fmap (fmap fst . comboWithFewestDistinct) . sequence $
+  P.picksByM <$> qualifications <*> pure (produceAssocs qfpArray)
 
-type QF i = (i, VkQueueFamilyProperties)
-type QFIPredicateM i = PredicateM IO (QF i)
-type QFICompareM i = CompareM IO (QF i)
+getFieldArrayAssocs :: forall fname a. CanReadFieldArray fname a => a -> [(Int, FieldType fname a)]
+getFieldArrayAssocs a = [0 .. fieldArrayLength @fname @a] <&> \i -> (i, getFieldArrayUnsafe @fname i a)
 
-bestQueueFamilyIndices :: forall i. Ix i => QFIPredicateM i -> QFICompareM i -> StorableArray i VkQueueFamilyProperties -> IO [i]
-bestQueueFamilyIndices isCandidate compareQfps = (fmap . fmap) fst . foldrAssocsM step []
-  where
-    step :: i -> VkQueueFamilyProperties -> [QF i] -> IO [QF i]
-    step qfi qfp best@(bqf:_) = do
-      let qf = (qfi,qfp)
-      c <- isCandidate qf
-      if c then
-        compareQfps qf bqf <&> \case
-          LT -> best
-          EQ -> qf:best
-          GT -> [qf]
-      else
-        return best
-    step qfi qfp [] = let qf = (qfi,qfp) in bool [] [qf] <$> isCandidate qf
-
-bestQueueFamilyIndicesIn :: forall i. Ix i => StorableArray i VkQueueFamilyProperties -> QFIPredicateM i -> QFICompareM i -> IO [i]
-bestQueueFamilyIndicesIn a p c = bestQueueFamilyIndices p c a
-
-bestQueueFamilyIndexCombo :: Ix i => [(QFIPredicateM i, QFICompareM i)] -> StorableArray i VkQueueFamilyProperties -> IO [i]
-bestQueueFamilyIndexCombo criteriaList = fmap comboWithFewestDistinct . forM criteriaList . uncurry . bestQueueFamilyIndicesIn
-
-bestQueueFamilyIndexComboIn :: Ix i => StorableArray i VkQueueFamilyProperties -> [(QFIPredicateM i, QFICompareM i)] -> IO [i]
-bestQueueFamilyIndexComboIn a cs = bestQueueFamilyIndexCombo cs a
+getFieldArrayElems :: forall fname a. CanReadFieldArray fname a => a -> [(FieldType fname a)]
+getFieldArrayElems = fmap snd . getFieldArrayAssocs @fname @a
 -- Vulkan helpers<
-
--- ResourceT helpers>
-allocate_ :: MonadResource m => IO a -> (a -> IO ()) -> m a
-allocate_ acquire free = snd <$> allocate acquire free
-
-allocateAcquire_ :: MonadResource m => Acquire a -> m a
-allocateAcquire_ = (snd <$>) . allocateAcquire
--- ResourceT helpers<
 
 -- Other helpers>
 newFunPtrFrom :: IO (FunPtr f) -> Acquire (FunPtr f)
 newFunPtrFrom = flip mkAcquire freeHaskellFunPtr
 
-whenNothing :: Applicative f => Maybe a -> f a -> f a
-whenNothing (Just x) _ = pure x
-whenNothing Nothing m = m
-{-# INLINE whenNothing #-}
-
-whenNothingM :: Monad m => m (Maybe a) -> m a -> m a
-whenNothingM mm a = mm >>= \m -> whenNothing m a
-{-# INLINE whenNothingM #-}
-
 lengthNum :: (Foldable t, Num n) => t a -> n
 lengthNum = fromIntegral . length
 {-# INLINE lengthNum #-}
 
-reflection :: forall t r. Reifies t r => r
-reflection = reflect (Proxy :: Proxy t)
-
-mapAssocsM :: (Monad m, MArray a e m, Ix i) => (i -> e -> m b) -> a i e -> m [b]
-mapAssocsM f array = do
-  bounds <- getBounds array
-  let
-    index' = index bounds
-    unsafeRead' = unsafeRead array
-  forM (range bounds) $ \i ->
-    unsafeRead' (index' i) >>= f i
-
-forAssocsM :: (Monad m, MArray a e m, Ix i) => a i e -> (i -> e -> m b) -> m [b]
-forAssocsM = flip mapAssocsM
-
-mapElemsM :: (Monad m, MArray a e m, Ix i) => (e -> m b) -> a i e -> m [b]
-mapElemsM f = mapAssocsM (const f)
-
-forElemsM :: (Monad m, MArray a e m, Ix i) => a i e -> (e -> m b) -> m [b]
-forElemsM = flip mapElemsM
-
-mapAssocsM_ :: (Monad m, MArray a e m, Ix i) => (i -> e -> m b) -> a i e -> m ()
-mapAssocsM_ f array = do
-  bounds <- getBounds array
-  let
-    index' = index bounds
-    unsafeRead' = unsafeRead array
-  forM_ (range bounds) $ \i ->
-    unsafeRead' (index' i) >>= f i
-
-forAssocsM_ :: (Monad m, MArray a e m, Ix i) => a i e -> (i -> e -> m b) -> m ()
-forAssocsM_ = flip mapAssocsM_
-
-mapElemsM_ :: (Monad m, MArray a e m, Ix i) => (e -> m b) -> a i e -> m ()
-mapElemsM_ f = mapAssocsM_ (const f)
-
-forElemsM_ :: (Monad m, MArray a e m, Ix i) => a i e -> (e -> m b) -> m ()
-forElemsM_ = flip mapElemsM_
-
-foldlAssocsM :: forall a i e m b. (Monad m, MArray a e m, Ix i) => (b -> i -> e -> m b) -> b -> a i e -> m b
-foldlAssocsM f z array = do
-  bounds <- getBounds array
-  let
-    index' = index bounds
-    unsafeRead' = unsafeRead array
-    step b i = do
-      e <- unsafeRead' (index' i)
-      f b i e
-  foldlM step z (range bounds)
-
-foldlElemsM :: forall a i e m b. (Monad m, MArray a e m, Ix i) => (b -> e -> m b) -> b -> a i e -> m b
-foldlElemsM f = foldlAssocsM (\b _ e -> f b e)
-
-foldrAssocsM :: forall a i e m b. (Monad m, MArray a e m, Ix i) => (i -> e -> b -> m b) -> b -> a i e -> m b
-foldrAssocsM f z array = do
-  bounds <- getBounds array
-  let
-    index' = index bounds
-    unsafeRead' = unsafeRead array
-    step i b = do
-      e <- unsafeRead' (index' i)
-      f i e b
-  foldrM step z (range bounds)
-
-foldrElemsM :: forall a i e m b. (Monad m, MArray a e m, Ix i) => (e -> b -> m b) -> b -> a i e -> m b
-foldrElemsM f = foldrAssocsM (\_ e b -> f e b)
-
-type Predicate a = a -> Bool
-type PredicateM m a = a -> m Bool
-type Compare a = a -> a -> Ordering
-type CompareM m a = a -> a -> m Ordering
-
-preferWhere :: [Predicate a] -> Compare a
-preferWhere [] _ _ = EQ
-preferWhere (p:ps) a b
-  | p a = if p b then EQ else GT
-  | p b = LT
-  | otherwise = preferWhere ps a b
-
-prefer :: Eq a => [a] -> Compare a
-prefer = preferWhere . fmap (==)
-
-preferWhereM :: Monad m => [PredicateM m a] -> CompareM m a
-preferWhereM [] _ _ = return EQ
-preferWhereM (p:ps) a b = do
-  pa <- p a
-  pb <- p b
-  if pa then
-    return $ if pb then EQ else GT
-  else if pb then
-    return LT
-  else
-    preferWhereM ps a b
+comboWithFewestDistinct :: Eq a => [[a]] -> [a]
+comboWithFewestDistinct = minimumBy (compare `on` length . nub) . sequence
 
 ioPutStrLn :: MonadIO io => String -> io ()
 ioPutStrLn = liftIO . putStrLn
