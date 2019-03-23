@@ -32,7 +32,7 @@ import Data.Array.Base
 import Data.Array.MArray.Local
 import Data.Array.Storable
 import Data.Array.Unsafe
-import Data.Bits
+import Data.Bits.Local
 import Data.Bool
 import Data.Foldable
 import Data.Function
@@ -82,7 +82,7 @@ main =
       putStrLn $ displayException e
   )
   `catch` (
-    \(e :: VkaException) ->
+    \(e :: VkResultException) ->
       putStrLn $ displayException e
   )
   `catch` (
@@ -154,31 +154,30 @@ resourceMain = do
 
   qfis@[graphicsQfi, computeQfi, transferQfi, presentQfi] <-
     liftIO $
-    pickQueueFamilyIndexCombo
-      [
-        (
-          return . (zeroBits /=) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags" . snd,
-          preferWhereM [
-            return . (zeroBits ==) . (VK_QUEUE_COMPUTE_BIT .&.) . getField @"queueFlags" . snd
-          ]
-        ),
-        (
-          return . (zeroBits /=) . (VK_QUEUE_COMPUTE_BIT .&.) . getField @"queueFlags" . snd,
-          preferWhereM [
-            return . (zeroBits ==) . (VK_QUEUE_GRAPHICS_BIT .&.) . getField @"queueFlags" . snd
-          ]
-        ),
-        (
-          return . (zeroBits /=) . ((VK_QUEUE_GRAPHICS_BIT .|. VK_QUEUE_COMPUTE_BIT .|. VK_QUEUE_TRANSFER_BIT) .&.) . getField @"queueFlags" . snd,
-          preferWhereM [
-            return . (zeroBits ==) . ((VK_QUEUE_GRAPHICS_BIT .|. VK_QUEUE_COMPUTE_BIT) .&.) . getField @"queueFlags" . snd
-          ]
-        ),
-        (
-          \(qfi, _) -> (VK_TRUE ==) <$> getVk (vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi windowSurface),
-          \_ _ -> return EQ
-        )
-      ]
+    pickQueueFamilyIndexCombo [
+      (
+        return . someAreSet VK_QUEUE_GRAPHICS_BIT . getField @"queueFlags" . snd,
+        preferWhereM [
+          return . noneAreSet VK_QUEUE_COMPUTE_BIT . getField @"queueFlags" . snd
+        ]
+      ),
+      (
+        return . someAreSet VK_QUEUE_COMPUTE_BIT . getField @"queueFlags" . snd,
+        preferWhereM [
+          return . noneAreSet VK_QUEUE_GRAPHICS_BIT . getField @"queueFlags" . snd
+        ]
+      ),
+      (
+        return . someAreSet (VK_QUEUE_GRAPHICS_BIT .|. VK_QUEUE_COMPUTE_BIT .|. VK_QUEUE_TRANSFER_BIT) . getField @"queueFlags" . snd,
+        preferWhereM [
+          return . noneAreSet (VK_QUEUE_GRAPHICS_BIT .|. VK_QUEUE_COMPUTE_BIT) . getField @"queueFlags" . snd
+        ]
+      ),
+      (
+        \(qfi, _) -> (VK_TRUE ==) <$> getVk (vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi windowSurface),
+        \_ _ -> return EQ
+      )
+    ]
       physicalDeviceQueueFamilyPropertiesArray
   ioPutStrLn "Queue family indices selected."
 
@@ -263,12 +262,14 @@ data GLFWException =
   } deriving (Eq, Show, Read)
 
 instance Exception GLFWException where
-  displayException (GLFWException functionName) =
-    functionName ++ " failed."
+  displayException (GLFWException functionName) = "GLFWException: " ++ functionName ++ " failed."
+
+throwGLFWException :: MonadThrow m => String -> m a
+throwGLFWException = throwM . GLFWException
 
 initializedGLFW :: Acquire ()
 initializedGLFW =
-  unlessM GLFW.init (throwIO $ GLFWException "init")
+  unlessM GLFW.init (throwGLFWException "init")
   `mkAcquire`
   const GLFW.terminate
 
@@ -276,7 +277,7 @@ newVulkanGLFWWindow :: Int -> Int -> String -> Acquire GLFW.Window
 newVulkanGLFWWindow width height title =
   do
     GLFW.windowHint $ GLFW.WindowHint'ClientAPI GLFW.ClientAPI'NoAPI
-    whenNothingM (GLFW.createWindow width height title Nothing Nothing) (throwIO $ GLFWException "createWindow")
+    fromMaybeM (throwGLFWException "createWindow") (GLFW.createWindow width height title Nothing Nothing)
   `mkAcquire`
   GLFW.destroyWindow
 
@@ -292,21 +293,29 @@ newVulkanGLFWWindowSurface vulkanInstance window =
 -- GLFW helpers<
 
 -- Vulkan helpers>
-data VkaException =
-  VkaException {
-    vkexFunctionName :: String,
-    vkexResult :: VkResult
+data VkResultException =
+  VkResultException {
+    vkaResultException'functionName :: String,
+    vkaResultException'result :: VkResult
   } deriving (Eq, Show, Read)
 
-instance Exception VkaException where
-  displayException (VkaException functionName result) =
+instance Exception VkResultException where
+  displayException (VkResultException functionName result) =
     functionName ++ " failed with: " ++ show result
 
 onVkFailureThrow :: String -> [VkResult] -> IO VkResult -> IO VkResult
 onVkFailureThrow functionName successResults vkAction = do
   result <- vkAction
-  unless (result `elem` successResults) $ throwIO (VkaException functionName result)
+  unless (result `elem` successResults) $ throwIO (VkResultException functionName result)
   return result
+
+data VkaException = VkaException String deriving (Eq, Show, Read)
+
+instance Exception VkaException where
+  displayException (VkaException message) = "VkaException: " ++ message
+
+throwVkaException :: MonadThrow m => String -> m a
+throwVkaException = throwM . VkaException
 
 vkaRegisterDebugCallback :: MonadUnliftIO io => VkInstance -> VkDebugReportFlagsEXT -> HS_vkDebugReportCallbackEXT -> ResourceT io ()
 vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
@@ -464,7 +473,7 @@ allocateAndBindBufferMemory ::
   VkPhysicalDeviceMemoryProperties ->
   VkBuffer ->
   QualificationM io (Int, VkMemoryType) ->
-  ResourceT io (Maybe (VkBuffer, VkDeviceMemory))
+  ResourceT io (Maybe VkDeviceMemory)
 allocateAndBindBufferMemory device pdmp buffer qualification =
   getVk (vkGetBufferMemoryRequirements device buffer) >>= \memReqs ->
   lift (
@@ -478,13 +487,26 @@ allocateAndBindBufferMemory device pdmp buffer qualification =
         allocateAcquireVk_ (allocatedMemoryResource device) $
         defineStandardMemoryAllocation (getField @"size" memReqs) (fromIntegral chosenMemoryTypeIndex)
       liftIO $ vkaBindBufferMemory device buffer bufferMemory 0
-      return (buffer, bufferMemory)
+      return bufferMemory
     )
 
 vkaBindBufferMemory :: VkDevice -> VkBuffer -> VkDeviceMemory -> VkDeviceSize -> IO ()
 vkaBindBufferMemory device buffer memory memoryOffset =
   void $ vkBindBufferMemory device buffer memory memoryOffset &
     onVkFailureThrow "vkBindBufferMemory" [VK_SUCCESS]
+
+vkaMapMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> VkMemoryMapFlags -> IO (Ptr Void)
+vkaMapMemory device deviceMemory offset size flags =
+  alloca $ \ptrPtr -> do
+    void $ vkMapMemory device deviceMemory offset size flags ptrPtr &
+      onVkFailureThrow "vkMapMemory" [VK_SUCCESS]
+    peek ptrPtr
+
+mappedMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> Acquire (Ptr Void)
+mappedMemory device deviceMemory offset size =
+  vkaMapMemory device deviceMemory offset size 0
+  `mkAcquire`
+  const (vkUnmapMemory device deviceMemory)
 
 imageResource :: VkDevice -> VkaResource VkImageCreateInfo VkImage
 imageResource device = VkaResource (return $ vkCreateImage device) (return $ vkDestroyImage device) "vkCreateImage" [VK_SUCCESS]
@@ -541,12 +563,29 @@ loadKtxTexture :: (MonadUnliftIO io, MonadThrow io) => VkDevice -> VkPhysicalDev
 loadKtxTexture device pdmp filePath =
   withBinaryFile filePath ReadMode . runFileReaderT $
   KTX.readAndCheckIdentifier >> KTX.readHeader >>= KTX.runKtxBodyReaderT (do
+    KTX.skipMetadata
     textureDataSize <- KTX.getTextureDataSize
+
+    let textureDataVkSize = fromIntegral textureDataSize
+
     stagingBuffer <-
       lift . lift . allocateAcquireVk_ (bufferResource device) $
-      defineStandardBuffer (fromIntegral textureDataSize) VK_BUFFER_USAGE_TRANSFER_SRC_BIT []
---    stagingBufferMemory <- lift . lift $ allocateAndBindBufferMemory device pdmp stagingBuffer undefined
-    KTX.skipMetadata
+      defineStandardBuffer textureDataVkSize VK_BUFFER_USAGE_TRANSFER_SRC_BIT []
+
+    stagingBufferMemory <-
+      lift . lift $
+      fromMaybeM (throwVkaException "Failed to find a suitable memory type for the staging buffer.") $
+      allocateAndBindBufferMemory device pdmp stagingBuffer (
+        return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
+        \_ _ -> return EQ
+      )
+
+    bufferRegions <-
+      with (mappedMemory device stagingBufferMemory 0 textureDataVkSize) $ \stagingBufferPtr ->
+        evalBufferWriterT KTX.readTextureDataIntoBuffer (castPtr stagingBufferPtr, textureDataSize) 0
+
+    ktxHeader <- ask
+
     undefined
   )
 

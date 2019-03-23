@@ -19,6 +19,7 @@ executable sandbox
   other-modules:
     Data.Acquire.Local
     Data.Array.MArray.Local
+    Data.Bits.Local
     Pipes.Prelude.Local
     Prelude.Local
   ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches

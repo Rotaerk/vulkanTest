@@ -10,6 +10,7 @@ import Data.Foldable
 import Data.Function
 import Data.Functor
 import Data.Functor.Identity
+import Data.Maybe
 import Safe.Foldable
   
 (.:) :: (c -> d) -> (a -> b -> c) -> a -> b -> d
@@ -126,12 +127,8 @@ preferWhereM (p:ps) a b = do
 headOr :: a -> [a] -> a
 headOr a [] = a
 headOr _ (h:_) = h
+{-# INLINE headOr #-}
 
-whenNothing :: Applicative f => Maybe a -> f a -> f a
-whenNothing (Just x) _ = pure x
-whenNothing Nothing m = m
-{-# INLINE whenNothing #-}
-
-whenNothingM :: Monad m => m (Maybe a) -> m a -> m a
-whenNothingM mm a = mm >>= \m -> whenNothing m a
-{-# INLINE whenNothingM #-}
+fromMaybeM :: Monad m => m a -> m (Maybe a) -> m a
+fromMaybeM a mb = fromMaybe a =<< fmap return <$> mb
+{-# INLINE fromMaybeM #-}
