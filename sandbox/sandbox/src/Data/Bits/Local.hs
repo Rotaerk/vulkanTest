@@ -2,8 +2,11 @@ module Data.Bits.Local (
   module Data.Bits,
   allAreSet,
   someAreSet,
-  noneAreSet
+  noneAreSet,
+  setIf
 ) where
+
+import Prelude.Local
 
 import Data.Bits
 
@@ -15,3 +18,7 @@ someAreSet bits = (zeroBits /=) . (bits .&.)
 
 noneAreSet :: Bits b => b -> b -> Bool
 noneAreSet bits = (zeroBits ==) . (bits .&.)
+
+setIf :: Bits b => Bool -> b -> b
+setIf True b = b
+setIf False _ = zeroBits

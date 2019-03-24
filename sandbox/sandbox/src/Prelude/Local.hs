@@ -15,6 +15,7 @@ import Safe.Foldable
   
 (.:) :: (c -> d) -> (a -> b -> c) -> a -> b -> d
 (.:) = (.) . (.)
+infixr 9 .:
 
 type Predicate a = a -> Bool
 type Comparison a = a -> a -> Ordering

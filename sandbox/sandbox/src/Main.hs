@@ -6,6 +6,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
@@ -18,6 +19,8 @@ module Main where
 import Prelude.Local
 
 import qualified Codec.Image.Ktx.Read as KTX
+import qualified Codec.Image.Ktx.VkConstants as KTX
+import Control.Applicative
 import Control.Exception (throw)
 import Control.Monad
 import Control.Monad.BufferWriter
@@ -57,6 +60,7 @@ import qualified Graphics.UI.GLFW as GLFW
 
 import Graphics.Vulkan
 import Graphics.Vulkan.Core_1_0
+import Graphics.Vulkan.Core_1_1
 import Graphics.Vulkan.Ext.VK_EXT_debug_report
 import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
@@ -105,7 +109,7 @@ resourceMain = do
 
   vulkanInstance <-
     allocateAcquireVk_ vulkanInstanceResource $
-    defineStandardVulkanInstance "Vulkan Sandbox" (_VK_MAKE_VERSION 1 0 0) "" 0 VK_API_VERSION_1_0 validationLayers allExtensions
+    defineStandardVulkanInstance "Vulkan Sandbox" (_VK_MAKE_VERSION 1 0 0) "" 0 VK_API_VERSION_1_1 validationLayers allExtensions
   ioPutStrLn "Vulkan instance created."
 
 #ifndef NDEBUG
@@ -252,8 +256,8 @@ instance Exception ApplicationException where
 throwAppEx :: String -> a
 throwAppEx message = throw $ ApplicationException message
 
-throwIOAppEx :: MonadIO io => String -> io a
-throwIOAppEx message = liftIO . throwIO $ ApplicationException message
+throwAppExM :: MonadThrow m => String -> m a
+throwAppExM message = throwM $ ApplicationException message
 
 -- GLFW helpers>
 data GLFWException =
@@ -264,12 +268,12 @@ data GLFWException =
 instance Exception GLFWException where
   displayException (GLFWException functionName) = "GLFWException: " ++ functionName ++ " failed."
 
-throwGLFWException :: MonadThrow m => String -> m a
-throwGLFWException = throwM . GLFWException
+throwGLFWExceptionM :: MonadThrow m => String -> m a
+throwGLFWExceptionM = throwM . GLFWException
 
 initializedGLFW :: Acquire ()
 initializedGLFW =
-  unlessM GLFW.init (throwGLFWException "init")
+  unlessM GLFW.init (throwGLFWExceptionM "init")
   `mkAcquire`
   const GLFW.terminate
 
@@ -277,7 +281,7 @@ newVulkanGLFWWindow :: Int -> Int -> String -> Acquire GLFW.Window
 newVulkanGLFWWindow width height title =
   do
     GLFW.windowHint $ GLFW.WindowHint'ClientAPI GLFW.ClientAPI'NoAPI
-    fromMaybeM (throwGLFWException "createWindow") (GLFW.createWindow width height title Nothing Nothing)
+    fromMaybeM (throwGLFWExceptionM "createWindow") (GLFW.createWindow width height title Nothing Nothing)
   `mkAcquire`
   GLFW.destroyWindow
 
@@ -314,8 +318,11 @@ data VkaException = VkaException String deriving (Eq, Show, Read)
 instance Exception VkaException where
   displayException (VkaException message) = "VkaException: " ++ message
 
-throwVkaException :: MonadThrow m => String -> m a
-throwVkaException = throwM . VkaException
+throwVkaException :: String -> a
+throwVkaException = throw . VkaException
+
+throwVkaExceptionM :: MonadThrow m => String -> m a
+throwVkaExceptionM = throwM . VkaException
 
 vkaRegisterDebugCallback :: MonadUnliftIO io => VkInstance -> VkDebugReportFlagsEXT -> HS_vkDebugReportCallbackEXT -> ResourceT io ()
 vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
@@ -467,47 +474,6 @@ defineStandardBuffer size usageFlags qfis =
     -- If just one QFI is provided, it's the same as providing none; both are exclusive mode.
     qfis' = if length qfis > 1 then qfis else []
 
-allocateAndBindBufferMemory ::
-  MonadUnliftIO io =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  VkBuffer ->
-  QualificationM io (Int, VkMemoryType) ->
-  ResourceT io (Maybe VkDeviceMemory)
-allocateAndBindBufferMemory device pdmp buffer qualification =
-  getVk (vkGetBufferMemoryRequirements device buffer) >>= \memReqs ->
-  lift (
-    pickByM qualification .
-    filter (testBit (getField @"memoryTypeBits" memReqs) . fst) .
-    take (fromIntegral $ getField @"memoryTypeCount" pdmp) $
-    getFieldArrayAssocs @"memoryTypes" pdmp
-  ) >>=
-    mapM (\(chosenMemoryTypeIndex, _) -> do
-      bufferMemory <-
-        allocateAcquireVk_ (allocatedMemoryResource device) $
-        defineStandardMemoryAllocation (getField @"size" memReqs) (fromIntegral chosenMemoryTypeIndex)
-      liftIO $ vkaBindBufferMemory device buffer bufferMemory 0
-      return bufferMemory
-    )
-
-vkaBindBufferMemory :: VkDevice -> VkBuffer -> VkDeviceMemory -> VkDeviceSize -> IO ()
-vkaBindBufferMemory device buffer memory memoryOffset =
-  void $ vkBindBufferMemory device buffer memory memoryOffset &
-    onVkFailureThrow "vkBindBufferMemory" [VK_SUCCESS]
-
-vkaMapMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> VkMemoryMapFlags -> IO (Ptr Void)
-vkaMapMemory device deviceMemory offset size flags =
-  alloca $ \ptrPtr -> do
-    void $ vkMapMemory device deviceMemory offset size flags ptrPtr &
-      onVkFailureThrow "vkMapMemory" [VK_SUCCESS]
-    peek ptrPtr
-
-mappedMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> Acquire (Ptr Void)
-mappedMemory device deviceMemory offset size =
-  vkaMapMemory device deviceMemory offset size 0
-  `mkAcquire`
-  const (vkUnmapMemory device deviceMemory)
-
 imageResource :: VkDevice -> VkaResource VkImageCreateInfo VkImage
 imageResource device = VkaResource (return $ vkCreateImage device) (return $ vkDestroyImage device) "vkCreateImage" [VK_SUCCESS]
 
@@ -524,7 +490,7 @@ defineStandardImage ::
   [Word32] ->
   VkImageLayout ->
   VkImageCreateInfo
-defineStandardImage flags imageType format extent numMipLevels numArrayLayers sampleCountFlagBits tiling usage qfis initialLayout =
+defineStandardImage flags imageType format extent numMipLevels numArrayLayers sampleCountFlagBit tiling usage qfis initialLayout =
   createVk $
   set @"sType" VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO &*
   set @"pNext" VK_NULL &*
@@ -534,7 +500,7 @@ defineStandardImage flags imageType format extent numMipLevels numArrayLayers sa
   set @"extent" extent &*
   set @"mipLevels" numMipLevels &*
   set @"arrayLayers" numArrayLayers &*
-  set @"samples" sampleCountFlagBits &*
+  set @"samples" sampleCountFlagBit &*
   set @"tiling" tiling &*
   set @"usage" usage &*
   set @"sharingMode" (if null qfis' then VK_SHARING_MODE_EXCLUSIVE else VK_SHARING_MODE_CONCURRENT) &*
@@ -545,22 +511,84 @@ defineStandardImage flags imageType format extent numMipLevels numArrayLayers sa
     -- If just one QFI is provided, it's the same as providing none; both are exclusive mode.
     qfis' = if length qfis > 1 then qfis else []
 
-allocateAndBindImageMemory :: MonadUnliftIO io => VkDevice -> VkImage -> (Word32 -> Word32) -> ResourceT io (VkImage, VkDeviceMemory)
-allocateAndBindImageMemory device image memoryTypeIndexFromMemoryTypeBits = do
-  memReqs <- getVk $ vkGetImageMemoryRequirements device image
-  imageMemory <-
-    allocateAcquireVk_ (allocatedMemoryResource device) $
-    defineStandardMemoryAllocation (getField @"size" memReqs) (memoryTypeIndexFromMemoryTypeBits $ getField @"memoryTypeBits" memReqs)
-  liftIO $ vkaBindImageMemory device image imageMemory 0
-  return (image, imageMemory)
+allocateAndBindVulkanMemory ::
+  MonadUnliftIO io =>
+  (VkDevice -> obj -> Ptr VkMemoryRequirements -> IO ()) ->
+  (VkDevice -> obj -> VkDeviceMemory -> VkDeviceSize -> IO ()) ->
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  obj ->
+  QualificationM io (Int, VkMemoryType) ->
+  ResourceT io (Maybe VkDeviceMemory)
+allocateAndBindVulkanMemory getMemoryRequirements bindMemory device pdmp obj qualification =
+  getVk (getMemoryRequirements device obj) >>= \memReqs ->
+  lift (
+    pickByM qualification .
+    filter (testBit (getField @"memoryTypeBits" memReqs) . fst) .
+    take (fromIntegral $ getField @"memoryTypeCount" pdmp) $
+    getFieldArrayAssocs @"memoryTypes" pdmp
+  ) >>=
+    mapM (\(chosenMemoryTypeIndex, _) -> do
+      memory <-
+        allocateAcquireVk_ (allocatedMemoryResource device) $
+        defineStandardMemoryAllocation (getField @"size" memReqs) (fromIntegral chosenMemoryTypeIndex)
+      liftIO $ bindMemory device obj memory 0
+      return memory
+    )
+
+allocateAndBindBufferMemory ::
+  MonadUnliftIO io =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  VkBuffer ->
+  QualificationM io (Int, VkMemoryType) ->
+  ResourceT io (Maybe VkDeviceMemory)
+allocateAndBindBufferMemory = allocateAndBindVulkanMemory vkGetBufferMemoryRequirements vkaBindBufferMemory
+
+vkaBindBufferMemory :: VkDevice -> VkBuffer -> VkDeviceMemory -> VkDeviceSize -> IO ()
+vkaBindBufferMemory device buffer memory memoryOffset =
+  void $ vkBindBufferMemory device buffer memory memoryOffset &
+    onVkFailureThrow "vkBindBufferMemory" [VK_SUCCESS]
+
+allocateAndBindImageMemory ::
+  MonadUnliftIO io =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  VkImage ->
+  QualificationM io (Int, VkMemoryType) ->
+  ResourceT io (Maybe VkDeviceMemory)
+allocateAndBindImageMemory = allocateAndBindVulkanMemory vkGetImageMemoryRequirements vkaBindImageMemory
 
 vkaBindImageMemory :: VkDevice -> VkImage -> VkDeviceMemory -> VkDeviceSize -> IO ()
 vkaBindImageMemory device buffer memory memoryOffset =
   void $ vkBindImageMemory device buffer memory memoryOffset &
     onVkFailureThrow "vkBindImageMemory" [VK_SUCCESS]
 
-loadKtxTexture :: (MonadUnliftIO io, MonadThrow io) => VkDevice -> VkPhysicalDeviceMemoryProperties -> FilePath -> ResourceT io ()
-loadKtxTexture device pdmp filePath =
+vkaMapMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> VkMemoryMapFlags -> IO (Ptr Void)
+vkaMapMemory device deviceMemory offset size flags =
+  alloca $ \ptrPtr -> do
+    void $ vkMapMemory device deviceMemory offset size flags ptrPtr &
+      onVkFailureThrow "vkMapMemory" [VK_SUCCESS]
+    peek ptrPtr
+
+mappedMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> Acquire (Ptr Void)
+mappedMemory device deviceMemory offset size =
+  vkaMapMemory device deviceMemory offset size 0
+  `mkAcquire`
+  const (vkUnmapMemory device deviceMemory)
+
+loadKtxTexture ::
+  (MonadUnliftIO io, MonadThrow io) =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  VkSampleCountFlagBits ->
+  VkImageTiling ->
+  VkImageUsageFlags ->
+  [Word32] ->
+  VkImageLayout ->
+  FilePath ->
+  ResourceT io ()
+loadKtxTexture device pdmp sampleCountFlagBit tiling usageFlags qfis initialLayout filePath =
   withBinaryFile filePath ReadMode . runFileReaderT $
   KTX.readAndCheckIdentifier >> KTX.readHeader >>= KTX.runKtxBodyReaderT (do
     KTX.skipMetadata
@@ -569,12 +597,13 @@ loadKtxTexture device pdmp filePath =
     let textureDataVkSize = fromIntegral textureDataSize
 
     stagingBuffer <-
-      lift . lift . allocateAcquireVk_ (bufferResource device) $
+      lift . lift $
+      allocateAcquireVk_ (bufferResource device) $
       defineStandardBuffer textureDataVkSize VK_BUFFER_USAGE_TRANSFER_SRC_BIT []
 
     stagingBufferMemory <-
       lift . lift $
-      fromMaybeM (throwVkaException "Failed to find a suitable memory type for the staging buffer.") $
+      fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the staging buffer.") $
       allocateAndBindBufferMemory device pdmp stagingBuffer (
         return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
         \_ _ -> return EQ
@@ -584,7 +613,45 @@ loadKtxTexture device pdmp filePath =
       with (mappedMemory device stagingBufferMemory 0 textureDataVkSize) $ \stagingBufferPtr ->
         evalBufferWriterT KTX.readTextureDataIntoBuffer (castPtr stagingBufferPtr, textureDataSize) 0
 
-    ktxHeader <- ask
+    -- TODO: end the KTX-reading context here, returning the staging buffer and its memory along with the KTX Header and BufferRegions.
+    header@KTX.Header {..} <- ask
+
+    let
+      isCubeMap = KTX.isCubeMap header
+      isArray = KTX.isArray header
+
+    image <-
+      lift . lift $
+      allocateAcquireVk_ (imageResource device) $
+      defineStandardImage
+        (
+          setIf isCubeMap VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT .|.
+          setIf isArray VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT
+        )
+        (
+          case (header'pixelHeight, header'pixelDepth) of
+            (0, 0) -> VK_IMAGE_TYPE_1D
+            (_, 0) -> VK_IMAGE_TYPE_2D
+            _ -> VK_IMAGE_TYPE_3D
+        )
+        (
+          fromMaybe (throwVkaException "Unsupported KTX format.") $
+          KTX.getVkFormatFromGlTypeAndFormat header'glType header'glFormat <|>
+          KTX.getVkFormatFromGlInternalFormat header'glInternalFormat
+        )
+        (
+          createVk @VkExtent3D $
+          set @"width" header'pixelWidth &*
+          set @"height" header'pixelHeight &*
+          set @"depth" header'pixelDepth
+        )
+        header'numberOfMipmapLevels
+        header'numberOfArrayElements
+        sampleCountFlagBit
+        tiling
+        usageFlags
+        qfis
+        initialLayout
 
     undefined
   )
