@@ -25,6 +25,7 @@ import Control.Exception (throw)
 import Control.Monad
 import Control.Monad.BufferWriter
 import Control.Monad.Extra
+import Control.Monad.Fail
 import Control.Monad.FileReader
 import Control.Monad.IO.Class
 import Control.Monad.Loops
@@ -50,6 +51,7 @@ import Data.Word
 import Foreign.C.String
 import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc
+import Foreign.Marshal.Array
 import Foreign.Ptr
 import Foreign.Storable
 
@@ -109,7 +111,19 @@ resourceMain = do
 
   vulkanInstance <-
     allocateAcquireVk_ vulkanInstanceResource $
-    defineStandardVulkanInstance "Vulkan Sandbox" (_VK_MAKE_VERSION 1 0 0) "" 0 VK_API_VERSION_1_1 validationLayers allExtensions
+    createVk $
+    initStandardInstanceCreateInfo &*
+    setVkRef @"pApplicationInfo" (
+      createVk $
+      initStandardApplicationInfo &*
+      setStrRef @"pApplicationName" "Vulkan Sandbox" &*
+      set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
+      setStrRef @"pEngineName" "" &*
+      set @"engineVersion" 0 &*
+      set @"apiVersion" VK_API_VERSION_1_1
+    ) &*
+    setStrListCountAndRef @"enabledLayerCount" @"ppEnabledLayerNames" validationLayers &*
+    setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" allExtensions
   ioPutStrLn "Vulkan instance created."
 
 #ifndef NDEBUG
@@ -185,40 +199,63 @@ resourceMain = do
       physicalDeviceQueueFamilyPropertiesArray
   ioPutStrLn "Queue family indices selected."
 
-  device <- allocateAcquireVk_ (deviceResource physicalDevice) $ defineDeviceWithOneQueuePerUsedFamily (Set.fromList qfis) deviceExtensions
+  device <-
+    allocateAcquireVk_ (deviceResource physicalDevice) $
+    createVk $
+    initStandardDeviceCreateInfo &*
+    setListCountAndRef @"queueCreateInfoCount" @"pQueueCreateInfos" (
+      qfis <&> \qfi ->
+        createVk $
+        initStandardDeviceQueueCreateInfo &*
+        set @"flags" 0 &*
+        set @"queueFamilyIndex" qfi &*
+        setListCountAndRef @"queueCount" @"pQueuePriorities" [1.0]
+    ) &*
+    setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" deviceExtensions &*
+    set @"pEnabledFeatures" VK_NULL
   ioPutStrLn "Vulkan device created."
 
   [(graphicsQueue, graphicsCommandPool), (computeQueue, computeCommandPool), (transferQueue, transferCommandPool), (presentQueue, presentCommandPool)] <-
     let
-      createCommandPool = allocateAcquireVk_ (commandPoolResource device) . defineStandardCommandPool 0
+      createCommandPool qfi =
+        allocateAcquireVk_ (commandPoolResource device) $
+        createVk $
+        initStandardCommandPoolCreateInfo &*
+        set @"flags" 0 &*
+        set @"queueFamilyIndex" qfi
     in
       forM qfis $ \qfi -> liftM2 (,) (getVk $ vkGetDeviceQueue device qfi 0) (createCommandPool qfi)
   ioPutStrLn "Device queues obtained, and corresponding command pools created."
 
   descriptorSetLayout <-
-    allocateAcquireVk_ (descriptorSetLayoutResource device) . defineStandardDescriptorSetLayout 0 . fmap (createVk @VkDescriptorSetLayoutBinding) $ [
-      set @"binding" 0 &*
-      set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
-      set @"descriptorCount" 1 &*
-      set @"stageFlags" VK_SHADER_STAGE_VERTEX_BIT &*
-      set @"pImmutableSamplers" VK_NULL,
+    allocateAcquireVk_ (descriptorSetLayoutResource device) $
+    createVk $
+    initStandardDescriptorSetLayoutCreateInfo &*
+    set @"flags" 0 &*
+    setListCountAndRef @"bindingCount" @"pBindings" (
+      fmap createVk [
+        set @"binding" 0 &*
+        set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+        set @"descriptorCount" 1 &*
+        set @"stageFlags" VK_SHADER_STAGE_VERTEX_BIT &*
+        set @"pImmutableSamplers" VK_NULL,
 
-      set @"binding" 1 &*
-      set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
-      set @"descriptorCount" 1 &*
-      set @"stageFlags" VK_SHADER_STAGE_FRAGMENT_BIT &*
-      set @"pImmutableSamplers" VK_NULL
-    ]
+        set @"binding" 1 &*
+        set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
+        set @"descriptorCount" 1 &*
+        set @"stageFlags" VK_SHADER_STAGE_FRAGMENT_BIT &*
+        set @"pImmutableSamplers" VK_NULL
+      ]
+    )
   ioPutStrLn "Descriptor set layout created."
 
-  pipelineLayout <- allocateAcquireVk_ (pipelineLayoutResource device) $ defineStandardPipelineLayout [descriptorSetLayout] []
+  pipelineLayout <-
+    allocateAcquireVk_ (pipelineLayoutResource device) $
+    createVk $
+    initStandardPipelineLayoutCreateInfo &*
+    setListCountAndRef @"setLayoutCount" @"pSetLayouts" [descriptorSetLayout] &*
+    setListCountAndRef @"pushConstantRangeCount" @"pPushConstantRanges" []
   ioPutStrLn "Pipeline layout created."
-
-  -- What information I need about a texture:
-  -- - width, height, depth
-  -- - pixel size
-  -- - # mip levels
-  -- - format
 
   return ()
 
@@ -336,10 +373,10 @@ vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
 
 data VkaResource ci vk =
   VkaResource {
-    vkrGetCreate :: IO (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult),
-    vkrGetDestroy :: IO (vk -> Ptr VkAllocationCallbacks -> IO ()),
-    vkrCreateName :: String,
-    vkrSuccessResults :: [VkResult]
+    vkaResource'getCreate :: IO (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult),
+    vkaResource'getDestroy :: IO (vk -> Ptr VkAllocationCallbacks -> IO ()),
+    vkaResource'createName :: String,
+    vkaResource'successResults :: [VkResult]
   }
 
 newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire (VkResult, vk)
@@ -363,23 +400,15 @@ allocateAcquireVk_ = (allocateAcquire_ .) . newVk
 vulkanInstanceResource :: VkaResource VkInstanceCreateInfo VkInstance
 vulkanInstanceResource = VkaResource (return vkCreateInstance) (return vkDestroyInstance) "vkCreateInstance" [VK_SUCCESS]
 
-defineStandardVulkanInstance :: String -> Word32 -> String -> Word32 -> Word32 -> [String] -> [CString] -> VkInstanceCreateInfo
-defineStandardVulkanInstance applicationName applicationVersion engineName engineVersion apiVersion validationLayers extensions =
-  createVk $
+initStandardInstanceCreateInfo :: CreateVkStruct VkInstanceCreateInfo '["sType", "pNext"] ()
+initStandardInstanceCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
-  set @"pNext" VK_NULL &*
-  setVkRef @"pApplicationInfo" (
-    createVk $
-    set @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO &*
-    set @"pNext" VK_NULL &*
-    setStrRef @"pApplicationName" applicationName &*
-    set @"applicationVersion" applicationVersion &*
-    setStrRef @"pEngineName" engineName &*
-    set @"engineVersion" engineVersion &*
-    set @"apiVersion" apiVersion
-  ) &*
-  setStrListCountAndRef @"enabledLayerCount" @"ppEnabledLayerNames" validationLayers &*
-  setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" extensions
+  set @"pNext" VK_NULL
+
+initStandardApplicationInfo :: CreateVkStruct VkApplicationInfo '["sType", "pNext"] ()
+initStandardApplicationInfo =
+  set @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO &*
+  set @"pNext" VK_NULL
 
 registeredDebugReportCallbackResource :: VkInstance -> VkaResource VkDebugReportCallbackCreateInfoEXT VkDebugReportCallbackEXT
 registeredDebugReportCallbackResource vulkanInstance =
@@ -392,124 +421,86 @@ registeredDebugReportCallbackResource vulkanInstance =
 deviceResource :: VkPhysicalDevice -> VkaResource VkDeviceCreateInfo VkDevice
 deviceResource physicalDevice = VkaResource (return $ vkCreateDevice physicalDevice) (return vkDestroyDevice) "vkCreateDevice" [VK_SUCCESS]
 
-defineDeviceWithOneQueuePerUsedFamily :: Set Word32 -> [CString] -> VkDeviceCreateInfo
-defineDeviceWithOneQueuePerUsedFamily queueFamilyIndices deviceExtensions =
-  createVk $
+initStandardDeviceCreateInfo :: CreateVkStruct VkDeviceCreateInfo '["sType", "pNext", "flags", "enabledLayerCount", "ppEnabledLayerNames"] ()
+initStandardDeviceCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
   set @"pNext" VK_NULL &*
   set @"flags" 0 &*
-  setListCountAndRef @"queueCreateInfoCount" @"pQueueCreateInfos" (
-    Set.toList queueFamilyIndices <&> \qfi ->
-      createVk $
-      set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
-      set @"pNext" VK_NULL &*
-      set @"flags" 0 &*
-      set @"queueFamilyIndex" qfi &*
-      setListCountAndRef @"queueCount" @"pQueuePriorities" [1.0]
-  ) &*
   set @"enabledLayerCount" 0 &*
-  set @"ppEnabledLayerNames" VK_NULL &*
-  setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" deviceExtensions &*
-  set @"pEnabledFeatures" VK_NULL
+  set @"ppEnabledLayerNames" VK_NULL
+
+initStandardDeviceQueueCreateInfo :: CreateVkStruct VkDeviceQueueCreateInfo '["sType", "pNext"] ()
+initStandardDeviceQueueCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
+  set @"pNext" VK_NULL
 
 commandPoolResource :: VkDevice -> VkaResource VkCommandPoolCreateInfo VkCommandPool
 commandPoolResource device = VkaResource (return $ vkCreateCommandPool device) (return $ vkDestroyCommandPool device) "vkCreateCommandPool" [VK_SUCCESS]
 
-defineStandardCommandPool :: VkCommandPoolCreateFlags -> Word32 -> VkCommandPoolCreateInfo
-defineStandardCommandPool flags queueFamilyIndex =
-  createVk $
+initStandardCommandPoolCreateInfo :: CreateVkStruct VkCommandPoolCreateInfo '["sType", "pNext"] ()
+initStandardCommandPoolCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO &*
-  set @"pNext" VK_NULL &*
-  set @"flags" flags &*
-  set @"queueFamilyIndex" queueFamilyIndex
+  set @"pNext" VK_NULL
 
 descriptorSetLayoutResource :: VkDevice -> VkaResource VkDescriptorSetLayoutCreateInfo VkDescriptorSetLayout
 descriptorSetLayoutResource device = VkaResource (return $ vkCreateDescriptorSetLayout device) (return $ vkDestroyDescriptorSetLayout device) "vkCreateDescriptorSetLayout" [VK_SUCCESS]
 
-defineStandardDescriptorSetLayout :: VkDescriptorSetLayoutCreateFlags -> [VkDescriptorSetLayoutBinding] -> VkDescriptorSetLayoutCreateInfo
-defineStandardDescriptorSetLayout flags bindings =
-  createVk $
+initStandardDescriptorSetLayoutCreateInfo :: CreateVkStruct VkDescriptorSetLayoutCreateInfo '["sType", "pNext"] ()
+initStandardDescriptorSetLayoutCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO &*
-  set @"pNext" VK_NULL &*
-  set @"flags" flags &*
-  setListCountAndRef @"bindingCount" @"pBindings" bindings
+  set @"pNext" VK_NULL
 
 pipelineLayoutResource :: VkDevice -> VkaResource VkPipelineLayoutCreateInfo VkPipelineLayout
 pipelineLayoutResource device = VkaResource (return $ vkCreatePipelineLayout device) (return $ vkDestroyPipelineLayout device) "vkCreatePipelineLayout" [VK_SUCCESS]
 
-defineStandardPipelineLayout :: [VkDescriptorSetLayout] -> [VkPushConstantRange] -> VkPipelineLayoutCreateInfo
-defineStandardPipelineLayout descriptorSetLayouts pushConstantRanges =
-  createVk $
+initStandardPipelineLayoutCreateInfo :: CreateVkStruct VkPipelineLayoutCreateInfo '["sType", "pNext", "flags"] ()
+initStandardPipelineLayoutCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &*
   set @"pNext" VK_NULL &*
-  set @"flags" 0 &*
-  setListCountAndRef @"setLayoutCount" @"pSetLayouts" descriptorSetLayouts &*
-  setListCountAndRef @"pushConstantRangeCount" @"pPushConstantRanges" pushConstantRanges
+  set @"flags" 0
 
 allocatedMemoryResource :: VkDevice -> VkaResource VkMemoryAllocateInfo VkDeviceMemory
 allocatedMemoryResource device = VkaResource (return $ vkAllocateMemory device) (return $ vkFreeMemory device) "vkAllocateMemory" [VK_SUCCESS]
 
-defineStandardMemoryAllocation :: VkDeviceSize -> Word32 -> VkMemoryAllocateInfo
-defineStandardMemoryAllocation allocationSize memoryTypeIndex =
-  createVk $
+initStandardMemoryAllocateInfo :: CreateVkStruct VkMemoryAllocateInfo '["sType", "pNext"] ()
+initStandardMemoryAllocateInfo =
   set @"sType" VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &*
-  set @"pNext" VK_NULL &*
-  set @"allocationSize" allocationSize &*
-  set @"memoryTypeIndex" memoryTypeIndex
+  set @"pNext" VK_NULL
 
 bufferResource :: VkDevice -> VkaResource VkBufferCreateInfo VkBuffer
 bufferResource device = VkaResource (return $ vkCreateBuffer device) (return $ vkDestroyBuffer device) "vkCreateBuffer" [VK_SUCCESS]
 
-defineStandardBuffer :: VkDeviceSize -> VkBufferUsageFlags -> [Word32] -> VkBufferCreateInfo
-defineStandardBuffer size usageFlags qfis =
-  createVk $
+initStandardBufferCreateInfo :: CreateVkStruct VkBufferCreateInfo '["sType", "pNext"] ()
+initStandardBufferCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &*
-  set @"pNext" VK_NULL &*
-  set @"size" size &*
-  set @"usage" usageFlags &*
+  set @"pNext" VK_NULL
+
+setSharingQueueFamilyIndices ::
+  (
+    CanWriteField "sharingMode" a,
+    CanWriteField "queueFamilyIndexCount" a,
+    CanWriteField "pQueueFamilyIndices" a,
+    FieldType "sharingMode" a ~ VkSharingMode,
+    FieldType "queueFamilyIndexCount" a ~ Word32,
+    FieldType "pQueueFamilyIndices" a ~ Ptr Word32
+  ) =>
+  [Word32] ->
+  CreateVkStruct a '["sharingMode", "queueFamilyIndexCount", "pQueueFamilyIndices"] ()
+setSharingQueueFamilyIndices qfis =
   set @"sharingMode" (if null qfis' then VK_SHARING_MODE_EXCLUSIVE else VK_SHARING_MODE_CONCURRENT) &*
   setListCountAndRef @"queueFamilyIndexCount" @"pQueueFamilyIndices" qfis'
-
   where
-    -- If just one QFI is provided, it's the same as providing none; both are exclusive mode.
+    -- If just one QFI is provided, it's the same as providing none; both are exclusive mode,
+    -- and the QFI list is ignored in that case.
     qfis' = if length qfis > 1 then qfis else []
 
 imageResource :: VkDevice -> VkaResource VkImageCreateInfo VkImage
 imageResource device = VkaResource (return $ vkCreateImage device) (return $ vkDestroyImage device) "vkCreateImage" [VK_SUCCESS]
 
-defineStandardImage ::
-  VkImageCreateFlags ->
-  VkImageType ->
-  VkFormat ->
-  VkExtent3D ->
-  Word32 ->
-  Word32 ->
-  VkSampleCountFlagBits ->
-  VkImageTiling ->
-  VkImageUsageFlags ->
-  [Word32] ->
-  VkImageLayout ->
-  VkImageCreateInfo
-defineStandardImage flags imageType format extent numMipLevels numArrayLayers sampleCountFlagBit tiling usage qfis initialLayout =
-  createVk $
+initStandardImageCreateInfo :: CreateVkStruct VkImageCreateInfo '["sType", "pNext"] ()
+initStandardImageCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO &*
-  set @"pNext" VK_NULL &*
-  set @"flags" flags &*
-  set @"imageType" imageType &*
-  set @"format" format &*
-  set @"extent" extent &*
-  set @"mipLevels" numMipLevels &*
-  set @"arrayLayers" numArrayLayers &*
-  set @"samples" sampleCountFlagBit &*
-  set @"tiling" tiling &*
-  set @"usage" usage &*
-  set @"sharingMode" (if null qfis' then VK_SHARING_MODE_EXCLUSIVE else VK_SHARING_MODE_CONCURRENT) &*
-  setListCountAndRef @"queueFamilyIndexCount" @"pQueueFamilyIndices" qfis' &*
-  set @"initialLayout" initialLayout
-
-  where
-    -- If just one QFI is provided, it's the same as providing none; both are exclusive mode.
-    qfis' = if length qfis > 1 then qfis else []
+  set @"pNext" VK_NULL
 
 allocateAndBindVulkanMemory ::
   MonadUnliftIO io =>
@@ -531,7 +522,10 @@ allocateAndBindVulkanMemory getMemoryRequirements bindMemory device pdmp obj qua
     mapM (\(chosenMemoryTypeIndex, _) -> do
       memory <-
         allocateAcquireVk_ (allocatedMemoryResource device) $
-        defineStandardMemoryAllocation (getField @"size" memReqs) (fromIntegral chosenMemoryTypeIndex)
+        createVk $
+        initStandardMemoryAllocateInfo &*
+        set @"allocationSize" (getField @"size" memReqs) &*
+        set @"memoryTypeIndex" (fromIntegral chosenMemoryTypeIndex)
       liftIO $ bindMemory device obj memory 0
       return memory
     )
@@ -577,6 +571,174 @@ mappedMemory device deviceMemory offset size =
   `mkAcquire`
   const (vkUnmapMemory device deviceMemory)
 
+allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (StorableArray Word32 VkCommandBuffer)
+allocatedCommandBuffers device allocateInfo =
+  do
+    array <- newArray_ (0, commandBufferCount-1)
+    when (commandBufferCount > 0) $
+      withPtr allocateInfo $ \allocateInfoPtr ->
+        void $ withStorableArray array (vkAllocateCommandBuffers device allocateInfoPtr) &
+          onVkFailureThrow "vkAllocateCommandBuffers" [VK_SUCCESS]
+    return array
+  `mkAcquire`
+  if commandBufferCount > 0 then
+    \commandBufferArray -> withStorableArray commandBufferArray $ vkFreeCommandBuffers device commandPool commandBufferCount
+  else
+    const $ return ()
+
+  where
+    commandBufferCount = getField @"commandBufferCount" allocateInfo
+    commandPool = getField @"commandPool" allocateInfo
+
+initStandardCommandBufferAllocateInfo :: CreateVkStruct VkCommandBufferAllocateInfo '["sType", "pNext"] ()
+initStandardCommandBufferAllocateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO &*
+  set @"pNext" VK_NULL
+
+recordingCommandBuffer :: VkCommandBuffer -> VkCommandBufferBeginInfo -> Acquire ()
+recordingCommandBuffer commandBuffer beginInfo =
+  (
+    withPtr beginInfo $ \beginInfoPtr ->
+      void $ vkBeginCommandBuffer commandBuffer beginInfoPtr &
+        onVkFailureThrow "vkBeginCommandBuffer" [VK_SUCCESS]
+  )
+  `mkAcquire`
+  const (
+    void $ vkEndCommandBuffer commandBuffer &
+      onVkFailureThrow "vkEndCommandBuffer" [VK_SUCCESS]
+  )
+
+initStandardCommandBufferBeginInfo :: CreateVkStruct VkCommandBufferBeginInfo '["sType", "pNext"] ()
+initStandardCommandBufferBeginInfo =
+  set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO &*
+  set @"pNext" VK_NULL
+
+initPrimaryCommandBufferBeginInfo :: CreateVkStruct VkCommandBufferBeginInfo '["sType", "pNext", "pInheritanceInfo"] ()
+initPrimaryCommandBufferBeginInfo =
+  initStandardCommandBufferBeginInfo &*
+  set @"pInheritanceInfo" VK_NULL
+
+vkaQueueWaitIdle :: VkQueue -> IO ()
+vkaQueueWaitIdle queue = void $ vkQueueWaitIdle queue & onVkFailureThrow "vkQueueWaitIdle" [VK_SUCCESS]
+
+vkaQueueSubmit :: VkQueue -> [VkSubmitInfo] -> VkFence -> IO ()
+vkaQueueSubmit queue submitInfos fence =
+  withArray submitInfos $ \submitInfosPtr ->
+  void $ vkQueueSubmit queue (lengthNum submitInfos) submitInfosPtr fence &
+    onVkFailureThrow "vkQueueSubmit" [VK_SUCCESS]
+
+initStandardSubmitInfo :: CreateVkStruct VkSubmitInfo '["sType", "pNext"] ()
+initStandardSubmitInfo =
+  set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
+  set @"pNext" VK_NULL
+
+setSubmitWaitSemaphoresAndStageFlags ::
+  [(VkSemaphore, VkPipelineStageFlags)] ->
+  CreateVkStruct VkSubmitInfo '["waitSemaphoreCount", "pWaitSemaphores", "pWaitDstStageMask"] ()
+setSubmitWaitSemaphoresAndStageFlags waitSemaphoresAndStageFlags =
+  setListCountAndRef @"waitSemaphoreCount" @"pWaitSemaphores" (fst <$> waitSemaphoresAndStageFlags) &*
+  setListRef @"pWaitDstStageMask" (snd <$> waitSemaphoresAndStageFlags)
+
+fenceResource :: VkDevice -> VkaResource VkFenceCreateInfo VkFence
+fenceResource device = VkaResource (return $ vkCreateFence device) (return $ vkDestroyFence device) "vkCreateFence" [VK_SUCCESS]
+
+initStandardFenceCreateInfo :: CreateVkStruct VkFenceCreateInfo '["sType", "pNext"] ()
+initStandardFenceCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_FENCE_CREATE_INFO &*
+  set @"pNext" VK_NULL
+
+setFenceSignaled :: Bool -> CreateVkStruct VkFenceCreateInfo '["flags"] ()
+setFenceSignaled isSignaled = set @"flags" (if isSignaled then VK_FENCE_CREATE_SIGNALED_BIT else 0)
+
+vkaWaitForFences :: VkDevice -> [VkFence] -> VkBool32 -> Word64 -> IO VkResult
+vkaWaitForFences device fences waitAll timeout =
+  withArray fences $ \fencesPtr ->
+  vkWaitForFences device (lengthNum fences) fencesPtr waitAll timeout &
+    onVkFailureThrow "vkWaitForFences" [VK_SUCCESS, VK_TIMEOUT]
+
+vkaWaitForFence :: VkDevice -> VkFence -> Word64 -> IO VkResult
+vkaWaitForFence device fence timeout = vkaWaitForFences device [fence] VK_TRUE timeout
+
+executeCommands :: (MonadUnliftIO m, MonadFail m) => VkDevice -> VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
+executeCommands device commandPool submissionQueue fillCommandBuffer = runResourceT $ do
+  [commandBuffer] <-
+    liftIO . getElems =<< (
+      allocateAcquire_ $ allocatedCommandBuffers device $
+      createVk $
+      initStandardCommandBufferAllocateInfo &*
+      set @"commandPool" commandPool &*
+      set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
+      set @"commandBufferCount" 1
+    )
+
+  result <-
+    with_ (
+      recordingCommandBuffer commandBuffer $
+      createVk $
+      initPrimaryCommandBufferBeginInfo &*
+      set @"flags" VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    )
+    (fillCommandBuffer commandBuffer)
+
+  executionCompleteFence <-
+    allocateAcquireVk_ (fenceResource device) $
+    createVk $
+    initStandardFenceCreateInfo &*
+    setFenceSignaled False
+
+  liftIO $ do
+    vkaQueueSubmit submissionQueue
+      [
+        createVk (
+          initStandardSubmitInfo &*
+          setSubmitWaitSemaphoresAndStageFlags [] &*
+          setListCountAndRef @"commandBufferCount" @"pCommandBuffers" [commandBuffer] &*
+          setListCountAndRef @"signalSemaphoreCount" @"pSignalSemaphores" []
+        )
+      ]
+      executionCompleteFence
+    vkaWaitForFence device executionCompleteFence maxBound
+
+  return result
+
+vkaCmdPipelineBarrier ::
+  VkCommandBuffer ->
+  VkPipelineStageFlags ->
+  VkPipelineStageFlags ->
+  VkDependencyFlags ->
+  [VkMemoryBarrier] ->
+  [VkBufferMemoryBarrier] ->
+  [VkImageMemoryBarrier] ->
+  IO ()
+vkaCmdPipelineBarrier
+  commandBuffer
+  srcStageMask
+  dstStageMask
+  depFlags
+  memoryBarriers
+  bufferMemoryBarriers
+  imageMemoryBarriers
+  =
+  withArray memoryBarriers $ \memoryBarriersPtr ->
+  withArray bufferMemoryBarriers $ \bufferMemoryBarriersPtr ->
+  withArray imageMemoryBarriers $ \imageMemoryBarriersPtr ->
+  vkCmdPipelineBarrier
+    commandBuffer
+    srcStageMask
+    dstStageMask
+    depFlags
+    (lengthNum memoryBarriers)
+    memoryBarriersPtr
+    (lengthNum bufferMemoryBarriers)
+    bufferMemoryBarriersPtr
+    (lengthNum imageMemoryBarriers)
+    imageMemoryBarriersPtr
+
+initStandardImageMemoryBarrier :: CreateVkStruct VkImageMemoryBarrier '["sType", "pNext"] ()
+initStandardImageMemoryBarrier =
+  set @"sType" VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER &*
+  set @"pNext" VK_NULL
+
 loadKtxTexture ::
   (MonadUnliftIO io, MonadThrow io) =>
   VkDevice ->
@@ -599,7 +761,12 @@ loadKtxTexture device pdmp sampleCountFlagBit tiling usageFlags qfis initialLayo
     stagingBuffer <-
       lift . lift $
       allocateAcquireVk_ (bufferResource device) $
-      defineStandardBuffer textureDataVkSize VK_BUFFER_USAGE_TRANSFER_SRC_BIT []
+      createVk $
+      initStandardBufferCreateInfo &*
+      set @"flags" 0 &*
+      set @"size" textureDataVkSize &*
+      set @"usage" VK_BUFFER_USAGE_TRANSFER_SRC_BIT &*
+      setSharingQueueFamilyIndices []
 
     stagingBufferMemory <-
       lift . lift $
@@ -623,35 +790,43 @@ loadKtxTexture device pdmp sampleCountFlagBit tiling usageFlags qfis initialLayo
     image <-
       lift . lift $
       allocateAcquireVk_ (imageResource device) $
-      defineStandardImage
-        (
-          setIf isCubeMap VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT .|.
-          setIf isArray VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT
-        )
-        (
-          case (header'pixelHeight, header'pixelDepth) of
-            (0, 0) -> VK_IMAGE_TYPE_1D
-            (_, 0) -> VK_IMAGE_TYPE_2D
-            _ -> VK_IMAGE_TYPE_3D
-        )
-        (
-          fromMaybe (throwVkaException "Unsupported KTX format.") $
-          KTX.getVkFormatFromGlTypeAndFormat header'glType header'glFormat <|>
-          KTX.getVkFormatFromGlInternalFormat header'glInternalFormat
-        )
-        (
-          createVk @VkExtent3D $
-          set @"width" header'pixelWidth &*
-          set @"height" header'pixelHeight &*
-          set @"depth" header'pixelDepth
-        )
-        header'numberOfMipmapLevels
-        header'numberOfArrayElements
-        sampleCountFlagBit
-        tiling
-        usageFlags
-        qfis
-        initialLayout
+      createVk $
+      initStandardImageCreateInfo &*
+      set @"flags" (
+        setIf isCubeMap VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT .|.
+        setIf isArray VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT
+      ) &*
+      set @"imageType" (
+        case (header'pixelHeight, header'pixelDepth) of
+          (0, 0) -> VK_IMAGE_TYPE_1D
+          (_, 0) -> VK_IMAGE_TYPE_2D
+          _ -> VK_IMAGE_TYPE_3D
+      ) &*
+      set @"format" (
+        fromMaybe (throwVkaException "Unsupported KTX format.") $
+        KTX.getVkFormatFromGlTypeAndFormat header'glType header'glFormat <|>
+        KTX.getVkFormatFromGlInternalFormat header'glInternalFormat
+      ) &*
+      setVk @"extent" (
+        set @"width" header'pixelWidth &*
+        set @"height" header'pixelHeight &*
+        set @"depth" header'pixelDepth
+      ) &*
+      set @"mipLevels" header'numberOfMipmapLevels &*
+      set @"arrayLayers" header'numberOfArrayElements &*
+      set @"samples" sampleCountFlagBit &*
+      set @"tiling" tiling &*
+      set @"usage" usageFlags &*
+      setSharingQueueFamilyIndices qfis &*
+      set @"initialLayout" initialLayout
+
+    imageMemory <-
+      lift . lift $
+      fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the image.") $
+      allocateAndBindImageMemory device pdmp image (
+        return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
+        \_ _ -> return EQ
+      )
 
     undefined
   )
@@ -683,7 +858,7 @@ getVkArrayWithResult :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (
 getVkArrayWithResult fillArray =
   liftIO $
   alloca $ \countPtr -> do
-    let fillArray' ptr = fillArray countPtr ptr
+    let fillArray' = fillArray countPtr
     getCountResult <- fillArray' VK_NULL
     count <- peek countPtr
     array <- newArray_ (0, count-1)
