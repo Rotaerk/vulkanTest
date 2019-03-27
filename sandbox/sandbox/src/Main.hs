@@ -740,8 +740,10 @@ initStandardImageMemoryBarrier =
   set @"pNext" VK_NULL
 
 loadKtxTexture ::
-  (MonadUnliftIO io, MonadThrow io) =>
+  (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
   VkDevice ->
+  VkCommandPool ->
+  VkQueue ->
   VkPhysicalDeviceMemoryProperties ->
   VkSampleCountFlagBits ->
   VkImageTiling ->
@@ -749,8 +751,8 @@ loadKtxTexture ::
   [Word32] ->
   VkImageLayout ->
   FilePath ->
-  ResourceT io ()
-loadKtxTexture device pdmp sampleCountFlagBit tiling usageFlags qfis initialLayout filePath =
+  ResourceT m ()
+loadKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlags qfis initialLayout filePath =
   withBinaryFile filePath ReadMode . runFileReaderT $
   KTX.readAndCheckIdentifier >> KTX.readHeader >>= KTX.runKtxBodyReaderT (do
     KTX.skipMetadata
@@ -827,6 +829,30 @@ loadKtxTexture device pdmp sampleCountFlagBit tiling usageFlags qfis initialLayo
         return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
         \_ _ -> return EQ
       )
+
+    executeCommands device commandPool queue $ \commandBuffer -> liftIO $ do
+      vkaCmdPipelineBarrier commandBuffer
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+        VK_PIPELINE_STAGE_TRANSFER_BIT
+        0 [] []
+        [
+          createVk $
+          initStandardImageMemoryBarrier &*
+          set @"srcAccessMask" 0 &*
+          set @"dstAccessMask" VK_ACCESS_TRANSFER_WRITE_BIT &*
+          set @"oldLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+          set @"newLayout" VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &*
+          set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+          set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+          set @"image" image &*
+          setVk @"subresourceRange" (
+            set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+            set @"baseMipLevel" 0 &*
+            set @"levelCount" header'numberOfMipmapLevels &*
+            set @"baseArrayLayer" 0 &*
+            set @"layerCount" header'numberOfArrayElements
+          )
+        ]
 
     undefined
   )
