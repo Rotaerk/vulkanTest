@@ -739,6 +739,49 @@ initStandardImageMemoryBarrier =
   set @"sType" VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER &*
   set @"pNext" VK_NULL
 
+vkaCmdCopyBufferToImage ::
+  VkCommandBuffer ->
+  VkBuffer ->
+  VkImage ->
+  VkImageLayout ->
+  [VkBufferImageCopy] ->
+  IO ()
+vkaCmdCopyBufferToImage
+  commandBuffer
+  buffer
+  image
+  imageLayout
+  bufferImageCopies
+  =
+  withArray bufferImageCopies $ \bufferImageCopiesPtr ->
+  vkCmdCopyBufferToImage
+    commandBuffer
+    buffer
+    image
+    imageLayout
+    (lengthNum bufferImageCopies)
+    bufferImageCopiesPtr
+
+depthBearingFormats :: Set VkFormat
+depthBearingFormats =
+  Set.fromList [
+    VK_FORMAT_D16_UNORM,
+    VK_FORMAT_X8_D24_UNORM_PACK32,
+    VK_FORMAT_D32_SFLOAT,
+    VK_FORMAT_D16_UNORM_S8_UINT,
+    VK_FORMAT_D24_UNORM_S8_UINT,
+    VK_FORMAT_D32_SFLOAT_S8_UINT
+  ]
+
+stencilBearingFormats :: Set VkFormat
+stencilBearingFormats =
+  Set.fromList [
+    VK_FORMAT_S8_UINT,
+    VK_FORMAT_D16_UNORM_S8_UINT,
+    VK_FORMAT_D24_UNORM_S8_UINT,
+    VK_FORMAT_D32_SFLOAT_S8_UINT
+  ]
+
 loadKtxTexture ::
   (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
   VkDevice ->
@@ -788,6 +831,14 @@ loadKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlag
     let
       isCubeMap = KTX.isCubeMap header
       isArray = KTX.isArray header
+      format =
+        fromMaybe (throwVkaException "Unsupported KTX format.") $
+        KTX.getVkFormatFromGlTypeAndFormat header'glType header'glFormat <|>
+        KTX.getVkFormatFromGlInternalFormat header'glInternalFormat
+      aspectMask =
+        replace zeroBits VK_IMAGE_ASPECT_COLOR_BIT $
+        setIf (Set.member format depthBearingFormats) VK_IMAGE_ASPECT_DEPTH_BIT .|.
+        setIf (Set.member format stencilBearingFormats) VK_IMAGE_ASPECT_STENCIL_BIT
 
     image <-
       lift . lift $
@@ -804,11 +855,7 @@ loadKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlag
           (_, 0) -> VK_IMAGE_TYPE_2D
           _ -> VK_IMAGE_TYPE_3D
       ) &*
-      set @"format" (
-        fromMaybe (throwVkaException "Unsupported KTX format.") $
-        KTX.getVkFormatFromGlTypeAndFormat header'glType header'glFormat <|>
-        KTX.getVkFormatFromGlInternalFormat header'glInternalFormat
-      ) &*
+      set @"format" format &*
       setVk @"extent" (
         set @"width" header'pixelWidth &*
         set @"height" header'pixelHeight &*
@@ -846,13 +893,48 @@ loadKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlag
           set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
           set @"image" image &*
           setVk @"subresourceRange" (
-            set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+            set @"aspectMask" aspectMask &*
             set @"baseMipLevel" 0 &*
             set @"levelCount" header'numberOfMipmapLevels &*
             set @"baseArrayLayer" 0 &*
             set @"layerCount" header'numberOfArrayElements
           )
         ]
+
+      vkaCmdCopyBufferToImage commandBuffer stagingBuffer image VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL $
+        case bufferRegions of
+          KTX.SimpleBufferRegions brs -> do
+            (mipLevel, offset) <- zip [0..] (fromIntegral . snd <$> brs)
+            return $
+              createVk $
+              set @"bufferOffset" offset &*
+              set @"bufferRowLength" 0 &*
+              set @"bufferImageHeight" 0 &*
+              setVk @"imageSubresource" (
+                set @"aspectMask" aspectMask &*
+                set @"mipLevel" mipLevel &*
+                set @"baseArrayLayer" 0 &*
+                set @"layerCount" 1
+              ) &*
+              setVk @"imageOffset" (set @"x" 0 &* set @"y" 0 &* set @"z" 0) &*
+              setVk @"imageExtent" (set @"width" 0 &* set @"height" 0 &* set @"depth" 0)
+
+          KTX.NonArrayCubeMapBufferRegions brs -> do
+            (mipLevel, assertPred ((6 ==) . length) -> offsets) <- zip [0..] (snd <$> brs)
+            (arrayLayer, offset) <- zip [0..] (fromIntegral <$> offsets)
+            return $
+              createVk $
+              set @"bufferOffset" offset &*
+              set @"bufferRowLength" 0 &*
+              set @"bufferImageHeight" 0 &*
+              setVk @"imageSubresource" (
+                set @"aspectMask" aspectMask &*
+                set @"mipLevel" mipLevel &*
+                set @"baseArrayLayer" arrayLayer &*
+                set @"layerCount" 1
+              ) &*
+              setVk @"imageOffset" (set @"x" 0 &* set @"y" 0 &* set @"z" 0) &*
+              setVk @"imageExtent" (set @"width" 0 &* set @"height" 0 &* set @"depth" 0)
 
     undefined
   )
@@ -937,4 +1019,14 @@ comboWithFewestDistinct = minimumBy (compare `on` length . nub) . sequence
 
 ioPutStrLn :: MonadIO io => String -> io ()
 ioPutStrLn = liftIO . putStrLn
+
+replace :: Eq a => a -> a -> a -> a
+replace match replacement value | value == match = replacement
+replace _ _ value = value
+
+assertM_ :: Monad m => Bool -> m ()
+assertM_ cond = assert cond (return ())
+
+assertPred :: (a -> Bool) -> a -> a
+assertPred p a = assert (p a) a
 -- Other helpers<
