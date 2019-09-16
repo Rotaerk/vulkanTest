@@ -204,7 +204,7 @@ resourceMain = do
     createVk $
     initStandardDeviceCreateInfo &*
     setListCountAndRef @"queueCreateInfoCount" @"pQueueCreateInfos" (
-      qfis <&> \qfi ->
+      nub qfis <&> \qfi ->
         createVk $
         initStandardDeviceQueueCreateInfo &*
         set @"flags" 0 &*
@@ -256,6 +256,10 @@ resourceMain = do
     setListCountAndRef @"setLayoutCount" @"pSetLayouts" [descriptorSetLayout] &*
     setListCountAndRef @"pushConstantRangeCount" @"pPushConstantRanges" []
   ioPutStrLn "Pipeline layout created."
+
+  (ktxHeader, ktxBufferRegions, buffer, bufferMemory) <-
+    loadKtxTextureToVkBuffer device physicalDeviceMemoryProperties "../ktx-rw/ktx-rw/textures/oak_leafs.ktx"
+  ioPutStrLn "Loaded KTX texture to a buffer."
 
   return ()
 
@@ -782,6 +786,37 @@ stencilBearingFormats =
     VK_FORMAT_D32_SFLOAT_S8_UINT
   ]
 
+loadKtxTextureToVkBuffer ::
+  (MonadUnliftIO m, MonadThrow m) =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  FilePath ->
+  ResourceT m (KTX.Header, KTX.BufferRegions, VkBuffer, VkDeviceMemory)
+loadKtxTextureToVkBuffer device pdmp filePath =
+  KTX.readKtxFile filePath KTX.skipMetadata $ \header () (fromIntegral -> textureDataSize) readTextureDataInto -> do
+    buffer <-
+      lift . lift $
+      allocateAcquireVk_ (bufferResource device) $
+      createVk $
+      initStandardBufferCreateInfo &*
+      set @"flags" 0 &*
+      set @"size" textureDataSize &*
+      set @"usage" VK_BUFFER_USAGE_TRANSFER_SRC_BIT &*
+      setSharingQueueFamilyIndices []
+
+    bufferMemory <-
+      lift . lift $
+      fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the staging buffer.") $
+      allocateAndBindBufferMemory device pdmp buffer (
+        return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
+        \_ _ -> return EQ
+      )
+
+    bufferRegions <- with (mappedMemory device bufferMemory 0 textureDataSize) $ readTextureDataInto . castPtr
+
+    return (header, bufferRegions, buffer, bufferMemory)
+
+{-
 loadKtxTexture ::
   (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
   VkDevice ->
@@ -938,6 +973,7 @@ loadKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlag
 
     undefined
   )
+-}
 
 type VkaGetter vk r = Ptr vk -> IO r
 

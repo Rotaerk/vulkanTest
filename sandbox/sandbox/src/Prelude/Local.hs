@@ -129,7 +129,3 @@ headOr :: a -> [a] -> a
 headOr a [] = a
 headOr _ (h:_) = h
 {-# INLINE headOr #-}
-
-fromMaybeM :: Monad m => m a -> m (Maybe a) -> m a
-fromMaybeM a mb = fromMaybe a =<< fmap return <$> mb
-{-# INLINE fromMaybeM #-}
