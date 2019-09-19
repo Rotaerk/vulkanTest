@@ -258,7 +258,7 @@ resourceMain = do
     setListCountAndRef @"pushConstantRangeCount" @"pPushConstantRanges" []
   ioPutStrLn "Pipeline layout created."
 
-  (image, imageMemory, imageView) <-
+  (image, imageMemory, imageView, sampler) <-
     createImageFromKtxTexture
       device
       transferCommandPool
@@ -631,6 +631,14 @@ initStandardImageViewCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &*
   set @"pNext" VK_NULL
 
+samplerResource :: VkDevice -> VkaResource VkSamplerCreateInfo VkSampler
+samplerResource device = VkaResource (return $ vkCreateSampler device) (return $ vkDestroySampler device) "vkCreateSampler" [VK_SUCCESS]
+
+initStandardSamplerCreateInfo :: CreateVkStruct VkSamplerCreateInfo '["sType", "pNext"] ()
+initStandardSamplerCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO &*
+  set @"pNext" VK_NULL
+
 allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (StorableArray Word32 VkCommandBuffer)
 allocatedCommandBuffers device allocateInfo =
   do
@@ -879,7 +887,7 @@ createImageFromKtxTexture ::
   [Word32] ->
   VkImageLayout ->
   FilePath ->
-  ResourceT m (VkImage, VkDeviceMemory, VkImageView)
+  ResourceT m (VkImage, VkDeviceMemory, VkImageView, VkSampler)
 createImageFromKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlags qfis initialLayout filePath = runResourceT $ do
   (h@KTX.Header{..}, stagingBufferRegions, stagingBuffer, stagingBufferMemory) <- stageKtxTexture device pdmp filePath
 
@@ -1027,7 +1035,27 @@ createImageFromKtxTexture device commandPool queue pdmp sampleCountFlagBit tilin
       set @"layerCount" numArrayLayers
     )
 
-  return (image, imageMemory, imageView)
+  sampler <-
+    lift . allocateAcquireVk_ (samplerResource device) $
+    createVk $
+    initStandardSamplerCreateInfo &*
+    set @"magFilter" VK_FILTER_LINEAR &*
+    set @"minFilter" VK_FILTER_LINEAR &*
+    set @"addressModeU" VK_SAMPLER_ADDRESS_MODE_REPEAT &*
+    set @"addressModeV" VK_SAMPLER_ADDRESS_MODE_REPEAT &*
+    set @"addressModeW" VK_SAMPLER_ADDRESS_MODE_REPEAT &*
+    set @"anisotropyEnable" VK_FALSE &*
+    set @"maxAnisotropy" 0 &*
+    set @"borderColor" VK_BORDER_COLOR_INT_OPAQUE_BLACK &*
+    set @"unnormalizedCoordinates" VK_FALSE &*
+    set @"compareEnable" VK_FALSE &*
+    set @"compareOp" VK_COMPARE_OP_ALWAYS &*
+    set @"mipmapMode" VK_SAMPLER_MIPMAP_MODE_LINEAR &*
+    set @"minLod" 0 &*
+    set @"maxLod" (fromIntegral numMipLevels) &*
+    set @"mipLodBias" 0
+
+  return (image, imageMemory, imageView, sampler)
 
 type VkaGetter vk r = Ptr vk -> IO r
 
