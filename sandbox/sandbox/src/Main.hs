@@ -258,15 +258,15 @@ resourceMain = do
     setListCountAndRef @"pushConstantRangeCount" @"pPushConstantRanges" []
   ioPutStrLn "Pipeline layout created."
 
-  (image, imageMemory) <-
+  (image, imageMemory, imageView) <-
     createImageFromKtxTexture
       device
-      graphicsCommandPool
-      graphicsQueue
+      transferCommandPool
+      transferQueue
       physicalDeviceMemoryProperties
       VK_SAMPLE_COUNT_1_BIT
       VK_IMAGE_TILING_OPTIMAL
-      (VK_IMAGE_USAGE_TRANSFER_SRC_BIT .|. VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+      (VK_IMAGE_USAGE_TRANSFER_SRC_BIT .|. VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
       []
       VK_IMAGE_LAYOUT_UNDEFINED
       "../ktx-rw/ktx-rw/textures/oak_leafs.ktx"
@@ -623,6 +623,14 @@ mappedMemory device deviceMemory offset size =
   `mkAcquire`
   const (vkUnmapMemory device deviceMemory)
 
+imageViewResource :: VkDevice -> VkaResource VkImageViewCreateInfo VkImageView
+imageViewResource device = VkaResource (return $ vkCreateImageView device) (return $ vkDestroyImageView device) "vkCreateImageView" [VK_SUCCESS]
+
+initStandardImageViewCreateInfo :: CreateVkStruct VkImageViewCreateInfo '["sType", "pNext"] ()
+initStandardImageViewCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &*
+  set @"pNext" VK_NULL
+
 allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (StorableArray Word32 VkCommandBuffer)
 allocatedCommandBuffers device allocateInfo =
   do
@@ -871,7 +879,7 @@ createImageFromKtxTexture ::
   [Word32] ->
   VkImageLayout ->
   FilePath ->
-  ResourceT m (VkImage, VkDeviceMemory)
+  ResourceT m (VkImage, VkDeviceMemory, VkImageView)
 createImageFromKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlags qfis initialLayout filePath = runResourceT $ do
   (h@KTX.Header{..}, stagingBufferRegions, stagingBuffer, stagingBufferMemory) <- stageKtxTexture device pdmp filePath
 
@@ -992,7 +1000,34 @@ createImageFromKtxTexture device commandPool queue pdmp sampleCountFlagBit tilin
             setVk @"imageExtent" (set @"width" 0 &* set @"height" 0 &* set @"depth" 0)
           -}
 
-  return (image, imageMemory)
+  imageView <-
+    lift . allocateAcquireVk_ (imageViewResource device) $
+    createVk $
+    initStandardImageViewCreateInfo &*
+    set @"flags" 0 &*
+    set @"image" image &*
+    set @"viewType" (
+      case (header'pixelHeight, header'pixelDepth) of
+        (0, 0) -> VK_IMAGE_VIEW_TYPE_1D
+        (_, 0) -> VK_IMAGE_VIEW_TYPE_2D
+        _ -> VK_IMAGE_VIEW_TYPE_3D
+    ) &*
+    set @"format" format &*
+    setVk @"components" (
+      set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
+      set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
+      set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
+      set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
+    ) &*
+    setVk @"subresourceRange" (
+      set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+      set @"baseMipLevel" 0 &*
+      set @"levelCount" numMipLevels &*
+      set @"baseArrayLayer" 0 &*
+      set @"layerCount" numArrayLayers
+    )
+
+  return (image, imageMemory, imageView)
 
 type VkaGetter vk r = Ptr vk -> IO r
 
