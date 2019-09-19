@@ -48,6 +48,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Tuple.Extra
 import Data.Word
+import Debug.Trace
 import Foreign.C.String
 import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc
@@ -257,10 +258,20 @@ resourceMain = do
     setListCountAndRef @"pushConstantRangeCount" @"pPushConstantRanges" []
   ioPutStrLn "Pipeline layout created."
 
-  (ktxHeader, ktxBufferRegions, buffer, bufferMemory) <-
-    loadKtxTextureToVkBuffer device physicalDeviceMemoryProperties "../ktx-rw/ktx-rw/textures/oak_leafs.ktx"
-  ioPutStrLn "Loaded KTX texture to a buffer."
-
+  (image, imageMemory) <-
+    createImageFromKtxTexture
+      device
+      graphicsCommandPool
+      graphicsQueue
+      physicalDeviceMemoryProperties
+      VK_SAMPLE_COUNT_1_BIT
+      VK_IMAGE_TILING_OPTIMAL
+      (VK_IMAGE_USAGE_TRANSFER_SRC_BIT .|. VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+      []
+      VK_IMAGE_LAYOUT_UNDEFINED
+      "../ktx-rw/ktx-rw/textures/oak_leafs.ktx"
+  ioPutStrLn "Loaded KTX texture to an image."
+  
   return ()
 
 extensions :: [CString]
@@ -400,6 +411,9 @@ newVk vr ci = snd <$> newVkWithResult vr ci
 
 allocateAcquireVk_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m vk
 allocateAcquireVk_ = (allocateAcquire_ .) . newVk
+
+allocateAcquireVk :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m (ReleaseKey, vk)
+allocateAcquireVk = (allocateAcquire .) . newVk
 
 vulkanInstanceResource :: VkaResource VkInstanceCreateInfo VkInstance
 vulkanInstanceResource = VkaResource (return vkCreateInstance) (return vkDestroyInstance) "vkCreateInstance" [VK_SUCCESS]
@@ -561,6 +575,40 @@ vkaBindImageMemory :: VkDevice -> VkImage -> VkDeviceMemory -> VkDeviceSize -> I
 vkaBindImageMemory device buffer memory memoryOffset =
   void $ vkBindImageMemory device buffer memory memoryOffset &
     onVkFailureThrow "vkBindImageMemory" [VK_SUCCESS]
+
+createBoundBuffer ::
+  (MonadUnliftIO m, MonadThrow m) =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  QualificationM m (Int, VkMemoryType) ->
+  VkBufferCreateInfo ->
+  ResourceT m (VkBuffer, VkDeviceMemory)
+createBoundBuffer device pdmp qualification bufferCreateInfo = runResourceT $ do
+  (bufferReleaseKey, buffer) <- allocateAcquireVk (bufferResource device) bufferCreateInfo
+  memory <-
+    lift $
+    fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the buffer.") $
+    allocateAndBindBufferMemory device pdmp buffer qualification
+  -- To force the buffer to be freed before the memory it's bound to.
+  lift . register =<< fromJust <$> unprotect bufferReleaseKey
+  return (buffer, memory)
+
+createBoundImage ::
+  (MonadUnliftIO m, MonadThrow m) =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  QualificationM m (Int, VkMemoryType) ->
+  VkImageCreateInfo ->
+  ResourceT m (VkImage, VkDeviceMemory)
+createBoundImage device pdmp qualification imageCreateInfo = runResourceT $ do
+  (imageReleaseKey, image) <- allocateAcquireVk (imageResource device) imageCreateInfo
+  memory <-
+    lift $
+    fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the image.") $
+    allocateAndBindImageMemory device pdmp image qualification
+  -- To force the image to be freed before the memory it's bound to.
+  lift . register =<< fromJust <$> unprotect imageReleaseKey
+  return (image, memory)
 
 vkaMapMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> VkMemoryMapFlags -> IO (Ptr Void)
 vkaMapMemory device deviceMemory offset size flags =
@@ -786,17 +834,20 @@ stencilBearingFormats =
     VK_FORMAT_D32_SFLOAT_S8_UINT
   ]
 
-loadKtxTextureToVkBuffer ::
+stageKtxTexture ::
   (MonadUnliftIO m, MonadThrow m) =>
   VkDevice ->
   VkPhysicalDeviceMemoryProperties ->
   FilePath ->
   ResourceT m (KTX.Header, KTX.BufferRegions, VkBuffer, VkDeviceMemory)
-loadKtxTextureToVkBuffer device pdmp filePath =
+stageKtxTexture device pdmp filePath =
   KTX.readKtxFile filePath KTX.skipMetadata $ \header () (fromIntegral -> textureDataSize) readTextureDataInto -> do
-    buffer <-
+    (buffer, bufferMemory) <-
       lift . lift $
-      allocateAcquireVk_ (bufferResource device) $
+      createBoundBuffer device pdmp (
+        return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
+        \_ _ -> return EQ
+      ) $
       createVk $
       initStandardBufferCreateInfo &*
       set @"flags" 0 &*
@@ -804,20 +855,11 @@ loadKtxTextureToVkBuffer device pdmp filePath =
       set @"usage" VK_BUFFER_USAGE_TRANSFER_SRC_BIT &*
       setSharingQueueFamilyIndices []
 
-    bufferMemory <-
-      lift . lift $
-      fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the staging buffer.") $
-      allocateAndBindBufferMemory device pdmp buffer (
-        return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
-        \_ _ -> return EQ
-      )
-
     bufferRegions <- with (mappedMemory device bufferMemory 0 textureDataSize) $ readTextureDataInto . castPtr
 
     return (header, bufferRegions, buffer, bufferMemory)
 
-{-
-loadKtxTexture ::
+createImageFromKtxTexture ::
   (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
   VkDevice ->
   VkCommandPool ->
@@ -829,118 +871,94 @@ loadKtxTexture ::
   [Word32] ->
   VkImageLayout ->
   FilePath ->
-  ResourceT m ()
-loadKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlags qfis initialLayout filePath =
-  withBinaryFile filePath ReadMode . runFileReaderT $
-  KTX.readAndCheckIdentifier >> KTX.readHeader >>= KTX.runKtxBodyReaderT (do
-    KTX.skipMetadata
-    textureDataSize <- KTX.getTextureDataSize
+  ResourceT m (VkImage, VkDeviceMemory)
+createImageFromKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlags qfis initialLayout filePath = runResourceT $ do
+  (h@KTX.Header{..}, stagingBufferRegions, stagingBuffer, stagingBufferMemory) <- stageKtxTexture device pdmp filePath
 
-    let textureDataVkSize = fromIntegral textureDataSize
+  let
+    isCubeMap = KTX.isCubeMap h
+    isArray = KTX.isArray h
+    imageWidth = header'pixelWidth
+    imageHeight = replace 0 1 header'pixelHeight
+    imageDepth = replace 0 1 header'pixelDepth
+    numArrayLayers = replace 0 1 header'numberOfArrayElements
+    numMipLevels = KTX.effectiveNumberOfMipmapLevels h
+    format =
+      fromMaybe (throwVkaException "Unsupported KTX format.") $
+      KTX.getVkFormatFromGlTypeAndFormat header'glType header'glFormat <|>
+      KTX.getVkFormatFromGlInternalFormat header'glInternalFormat
+    pixelSize = (`div` 8) . KTX.vkFormatSize'blockSizeInBits . KTX.getVkFormatSize $ format
+    aspectMask :: VkImageAspectFlags =
+      replace zeroBits VK_IMAGE_ASPECT_COLOR_BIT $
+      setIf (Set.member format depthBearingFormats) VK_IMAGE_ASPECT_DEPTH_BIT .|.
+      setIf (Set.member format stencilBearingFormats) VK_IMAGE_ASPECT_STENCIL_BIT
 
-    stagingBuffer <-
-      lift . lift $
-      allocateAcquireVk_ (bufferResource device) $
-      createVk $
-      initStandardBufferCreateInfo &*
-      set @"flags" 0 &*
-      set @"size" textureDataVkSize &*
-      set @"usage" VK_BUFFER_USAGE_TRANSFER_SRC_BIT &*
-      setSharingQueueFamilyIndices []
+  (image, imageMemory) <-
+    lift $
+    createBoundImage device pdmp (
+      return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
+      \_ _ -> return EQ
+    ) $
+    createVk $
+    initStandardImageCreateInfo &*
+    set @"flags" (
+      setIf isCubeMap VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT .|.
+      setIf isArray VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT
+    ) &*
+    set @"imageType" (
+      case (header'pixelHeight, header'pixelDepth) of
+        (0, 0) -> VK_IMAGE_TYPE_1D
+        (_, 0) -> VK_IMAGE_TYPE_2D
+        _ -> VK_IMAGE_TYPE_3D
+    ) &*
+    set @"format" format &*
+    setVk @"extent" (
+      set @"width" imageWidth &*
+      set @"height" imageHeight &*
+      set @"depth" imageDepth
+    ) &*
+    set @"mipLevels" numMipLevels &*
+    set @"arrayLayers" numArrayLayers &*
+    set @"samples" sampleCountFlagBit &*
+    set @"tiling" tiling &*
+    set @"usage" usageFlags &*
+    setSharingQueueFamilyIndices qfis &*
+    set @"initialLayout" initialLayout
 
-    stagingBufferMemory <-
-      lift . lift $
-      fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the staging buffer.") $
-      allocateAndBindBufferMemory device pdmp stagingBuffer (
-        return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
-        \_ _ -> return EQ
-      )
+  executeCommands device commandPool queue $ \commandBuffer -> liftIO $ do
+    vkaCmdPipelineBarrier commandBuffer
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+      VK_PIPELINE_STAGE_TRANSFER_BIT
+      0 [] []
+      [
+        createVk $
+        initStandardImageMemoryBarrier &*
+        set @"srcAccessMask" 0 &*
+        set @"dstAccessMask" VK_ACCESS_TRANSFER_WRITE_BIT &*
+        set @"oldLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+        set @"newLayout" VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &*
+        set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+        set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+        set @"image" image &*
+        setVk @"subresourceRange" (
+          set @"aspectMask" aspectMask &*
+          set @"baseMipLevel" 0 &*
+          set @"levelCount" numMipLevels &*
+          set @"baseArrayLayer" 0 &*
+          set @"layerCount" numArrayLayers
+        )
+      ]
 
-    bufferRegions <-
-      with (mappedMemory device stagingBufferMemory 0 textureDataVkSize) $ \stagingBufferPtr ->
-        evalBufferWriterT KTX.readTextureDataIntoBuffer (castPtr stagingBufferPtr, textureDataSize) 0
-
-    -- TODO: end the KTX-reading context here, returning the staging buffer and its memory along with the KTX Header and BufferRegions.
-    header@KTX.Header {..} <- ask
-
-    let
-      isCubeMap = KTX.isCubeMap header
-      isArray = KTX.isArray header
-      format =
-        fromMaybe (throwVkaException "Unsupported KTX format.") $
-        KTX.getVkFormatFromGlTypeAndFormat header'glType header'glFormat <|>
-        KTX.getVkFormatFromGlInternalFormat header'glInternalFormat
-      aspectMask =
-        replace zeroBits VK_IMAGE_ASPECT_COLOR_BIT $
-        setIf (Set.member format depthBearingFormats) VK_IMAGE_ASPECT_DEPTH_BIT .|.
-        setIf (Set.member format stencilBearingFormats) VK_IMAGE_ASPECT_STENCIL_BIT
-
-    image <-
-      lift . lift $
-      allocateAcquireVk_ (imageResource device) $
-      createVk $
-      initStandardImageCreateInfo &*
-      set @"flags" (
-        setIf isCubeMap VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT .|.
-        setIf isArray VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT
-      ) &*
-      set @"imageType" (
-        case (header'pixelHeight, header'pixelDepth) of
-          (0, 0) -> VK_IMAGE_TYPE_1D
-          (_, 0) -> VK_IMAGE_TYPE_2D
-          _ -> VK_IMAGE_TYPE_3D
-      ) &*
-      set @"format" format &*
-      setVk @"extent" (
-        set @"width" header'pixelWidth &*
-        set @"height" header'pixelHeight &*
-        set @"depth" header'pixelDepth
-      ) &*
-      set @"mipLevels" header'numberOfMipmapLevels &*
-      set @"arrayLayers" header'numberOfArrayElements &*
-      set @"samples" sampleCountFlagBit &*
-      set @"tiling" tiling &*
-      set @"usage" usageFlags &*
-      setSharingQueueFamilyIndices qfis &*
-      set @"initialLayout" initialLayout
-
-    imageMemory <-
-      lift . lift $
-      fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the image.") $
-      allocateAndBindImageMemory device pdmp image (
-        return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
-        \_ _ -> return EQ
-      )
-
-    executeCommands device commandPool queue $ \commandBuffer -> liftIO $ do
-      vkaCmdPipelineBarrier commandBuffer
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-        VK_PIPELINE_STAGE_TRANSFER_BIT
-        0 [] []
-        [
-          createVk $
-          initStandardImageMemoryBarrier &*
-          set @"srcAccessMask" 0 &*
-          set @"dstAccessMask" VK_ACCESS_TRANSFER_WRITE_BIT &*
-          set @"oldLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
-          set @"newLayout" VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &*
-          set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
-          set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
-          set @"image" image &*
-          setVk @"subresourceRange" (
-            set @"aspectMask" aspectMask &*
-            set @"baseMipLevel" 0 &*
-            set @"levelCount" header'numberOfMipmapLevels &*
-            set @"baseArrayLayer" 0 &*
-            set @"layerCount" header'numberOfArrayElements
-          )
-        ]
-
-      vkaCmdCopyBufferToImage commandBuffer stagingBuffer image VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL $
-        case bufferRegions of
-          KTX.SimpleBufferRegions brs -> do
-            (mipLevel, offset) <- zip [0..] (fromIntegral . snd <$> brs)
-            return $
+    vkaCmdCopyBufferToImage commandBuffer stagingBuffer image VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL $
+      case stagingBufferRegions of
+        KTX.SimpleBufferRegions brs ->
+          zip [0..] brs <&> \(mipLevelInt@(fromIntegral -> mipLevel), (size, fromIntegral -> offset)) ->
+            let
+              width = replace 0 1 $ imageWidth `shiftR` mipLevelInt
+              height = replace 0 1 $ imageHeight `shiftR` mipLevelInt
+              depth = replace 0 1 $ imageDepth `shiftR` mipLevelInt
+            in
+              assert (size == fromIntegral (width * height * depth * pixelSize)) $
               createVk $
               set @"bufferOffset" offset &*
               set @"bufferRowLength" 0 &*
@@ -952,28 +970,29 @@ loadKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlag
                 set @"layerCount" 1
               ) &*
               setVk @"imageOffset" (set @"x" 0 &* set @"y" 0 &* set @"z" 0) &*
-              setVk @"imageExtent" (set @"width" 0 &* set @"height" 0 &* set @"depth" 0)
+              setVk @"imageExtent" (set @"width" width &* set @"height" height &* set @"depth" depth)
 
-          KTX.NonArrayCubeMapBufferRegions brs -> do
-            (mipLevel, assertPred ((6 ==) . length) -> offsets) <- zip [0..] (snd <$> brs)
-            (arrayLayer, offset) <- zip [0..] (fromIntegral <$> offsets)
-            return $
-              createVk $
-              set @"bufferOffset" offset &*
-              set @"bufferRowLength" 0 &*
-              set @"bufferImageHeight" 0 &*
-              setVk @"imageSubresource" (
-                set @"aspectMask" aspectMask &*
-                set @"mipLevel" mipLevel &*
-                set @"baseArrayLayer" arrayLayer &*
-                set @"layerCount" 1
-              ) &*
-              setVk @"imageOffset" (set @"x" 0 &* set @"y" 0 &* set @"z" 0) &*
-              setVk @"imageExtent" (set @"width" 0 &* set @"height" 0 &* set @"depth" 0)
+        KTX.NonArrayCubeMapBufferRegions brs -> do
+          undefined
+          {-
+          (mipLevel, assertPred ((6 ==) . length) -> offsets) <- zip [0..] (snd <$> brs)
+          (arrayLayer, offset) <- zip [0..] (fromIntegral <$> offsets)
+          return $
+            createVk $
+            set @"bufferOffset" offset &*
+            set @"bufferRowLength" 0 &*
+            set @"bufferImageHeight" 0 &*
+            setVk @"imageSubresource" (
+              set @"aspectMask" aspectMask &*
+              set @"mipLevel" mipLevel &*
+              set @"baseArrayLayer" arrayLayer &*
+              set @"layerCount" 1
+            ) &*
+            setVk @"imageOffset" (set @"x" 0 &* set @"y" 0 &* set @"z" 0) &*
+            setVk @"imageExtent" (set @"width" 0 &* set @"height" 0 &* set @"depth" 0)
+          -}
 
-    undefined
-  )
--}
+  return (image, imageMemory)
 
 type VkaGetter vk r = Ptr vk -> IO r
 
