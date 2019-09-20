@@ -42,6 +42,7 @@ import Data.Foldable
 import Data.Function
 import Data.Functor
 import Data.Functor.Identity
+import Data.IORef
 import Data.List
 import Data.Maybe
 import Data.Set (Set)
@@ -77,6 +78,7 @@ import Pipes
 import qualified Pipes.Prelude.Local as P
 
 import Safe.Foldable
+import System.Clock
 import System.IO.Unsafe
 import UnliftIO.Exception
 import UnliftIO.IO
@@ -160,11 +162,17 @@ resourceMain = do
       ]
     ) <&>
     headOr (throwAppEx "No physical device found")
-
   ioPutStrLn "Physical device selected."
 
   window <- allocateAcquire_ $ newVulkanGLFWWindow 800 600 "Vulkan Sandbox"
   ioPutStrLn "Window created."
+
+  lastWindowResizeTimeRef <- liftIO $ newIORef Nothing
+
+  liftIO $ GLFW.setFramebufferSizeCallback window $ Just $ \_ _ _ -> do
+    time <- getTime Monotonic
+    writeIORef lastWindowResizeTimeRef $ Just time
+  ioPutStrLn "Window framebuffer size callback registered."
 
   windowSurface <- allocateAcquire_ $ newVulkanGLFWWindowSurface vulkanInstance window
   ioPutStrLn "Window surface created."
@@ -727,6 +735,14 @@ vkaWaitForFences device fences waitAll timeout =
 vkaWaitForFence :: VkDevice -> VkFence -> Word64 -> IO VkResult
 vkaWaitForFence device fence timeout = vkaWaitForFences device [fence] VK_TRUE timeout
 
+swapchainResource :: VkDevice -> VkaResource VkSwapchainCreateInfoKHR VkSwapchainKHR
+swapchainResource device = VkaResource (return $ vkCreateSwapchainKHR device) (return $ vkDestroySwapchainKHR device) "vkCreateSwapchainKHR" [VK_SUCCESS]
+
+initStandardSwapchainCreateInfo :: CreateVkStruct VkSwapchainCreateInfoKHR '["sType", "pNext"] ()
+initStandardSwapchainCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR &*
+  set @"pNext" VK_NULL
+
 executeCommands :: (MonadUnliftIO m, MonadFail m) => VkDevice -> VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
 executeCommands device commandPool submissionQueue fillCommandBuffer = runResourceT $ do
   [commandBuffer] <-
@@ -1078,6 +1094,11 @@ vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface =
   vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface &
     onGetterFailureThrow "vkGetPhysicalDeviceSurfaceSupportKHR" [VK_SUCCESS]
 
+vkaGetPhysicalDeviceSurfaceCapabilitiesKHR :: VkPhysicalDevice -> VkSurfaceKHR -> VkaGetter VkSurfaceCapabilitiesKHR VkResult
+vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface =
+  vkGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface &
+  onGetterFailureThrow "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" [VK_SUCCESS]
+
 type VkaArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
 
 getVkArrayWithResult :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (r, StorableArray Word32 vk)
@@ -1104,6 +1125,12 @@ onArrayFillerFailureThrow functionName successResults fillArray countPtr arrayPt
 
 vkaEnumeratePhysicalDevices :: VkInstance -> VkaArrayFiller VkPhysicalDevice VkResult
 vkaEnumeratePhysicalDevices = onArrayFillerFailureThrow "vkEnumeratePhysicalDevices" [VK_SUCCESS] . vkEnumeratePhysicalDevices
+
+vkaGetPhysicalDeviceSurfaceFormatsKHR :: VkPhysicalDevice -> VkSurfaceKHR -> VkaArrayFiller VkSurfaceFormatKHR VkResult
+vkaGetPhysicalDeviceSurfaceFormatsKHR = onArrayFillerFailureThrow "vkGetPhysicalDeviceSurfaceFormatsKHR" [VK_SUCCESS] .: vkGetPhysicalDeviceSurfaceFormatsKHR
+
+vkaGetPhysicalDeviceSurfacePresentModesKHR :: VkPhysicalDevice -> VkSurfaceKHR -> VkaArrayFiller VkPresentModeKHR VkResult
+vkaGetPhysicalDeviceSurfacePresentModesKHR = onArrayFillerFailureThrow "vkGetPhysicalDeviceSurfacePresentModesKHR" [VK_SUCCESS] .: vkGetPhysicalDeviceSurfacePresentModesKHR
 
 pdmpDeviceLocalMemorySize :: VkPhysicalDeviceMemoryProperties -> VkDeviceSize
 pdmpDeviceLocalMemorySize memoryProperties = sum . fmap (getField @"size") . filter isDeviceLocal $ memoryHeaps
