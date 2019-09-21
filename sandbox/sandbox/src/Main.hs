@@ -2,6 +2,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MagicHash #-}
@@ -59,6 +60,7 @@ import Foreign.Storable
 
 import qualified GHC.Base as GHC
 import qualified GHC.ForeignPtr as GHC
+import GHC.Generics (Generic)
 
 import qualified Graphics.UI.GLFW as GLFW
 
@@ -73,6 +75,7 @@ import Graphics.Vulkan.Marshal.Create.DataFrame
 import Graphics.Vulkan.Marshal.Internal
 
 import qualified Numeric.DataFrame as DF
+import Numeric.PrimBytes
 
 import Pipes
 import qualified Pipes.Prelude.Local as P
@@ -269,9 +272,9 @@ resourceMain = do
   (image, imageMemory, imageView, sampler) <-
     createImageFromKtxTexture
       device
+      physicalDeviceMemoryProperties
       transferCommandPool
       transferQueue
-      physicalDeviceMemoryProperties
       VK_SAMPLE_COUNT_1_BIT
       VK_IMAGE_TILING_OPTIMAL
       (VK_IMAGE_USAGE_TRANSFER_SRC_BIT .|. VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
@@ -279,7 +282,16 @@ resourceMain = do
       VK_IMAGE_LAYOUT_UNDEFINED
       "../ktx-rw/ktx-rw/textures/oak_leafs.ktx"
   ioPutStrLn "Loaded KTX texture to an image."
-  
+{-
+  (vertexBuffer, vertexBufferMemory) <-
+    createFilledBuffer
+      device
+      physicalDeviceMemoryProperties
+      transferCommandPool
+      transferQueue
+      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+      undefined -- TODO: figure out how to build a DataFrame Vertex '[4]
+-}
   return ()
 
 extensions :: [CString]
@@ -318,6 +330,14 @@ throwAppEx message = throw $ ApplicationException message
 
 throwAppExM :: MonadThrow m => String -> m a
 throwAppExM message = throwM $ ApplicationException message
+
+data Vertex =
+  Vertex {
+    vtxPos :: DF.Vec3f,
+    vtxTexCoord :: DF.Vec2f
+  } deriving (Eq, Show, Generic)
+
+instance PrimBytes Vertex
 
 -- GLFW helpers>
 data GLFWException =
@@ -601,6 +621,68 @@ createBoundBuffer device pdmp qualification bufferCreateInfo = runResourceT $ do
   lift . register =<< fromJust <$> unprotect bufferReleaseKey
   return (buffer, memory)
 
+createStagingBuffer ::
+  (MonadUnliftIO m, MonadThrow m) =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  VkDeviceSize ->
+  ResourceT m (VkBuffer, VkDeviceMemory)
+createStagingBuffer device pdmp size =
+  createBoundBuffer device pdmp (
+    return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
+    \_ _ -> return EQ
+  ) $
+  createVk $
+  initStandardBufferCreateInfo &*
+  set @"flags" 0 &*
+  set @"size" size &*
+  set @"usage" VK_BUFFER_USAGE_TRANSFER_SRC_BIT &*
+  setSharingQueueFamilyIndices []
+
+createFilledBuffer ::
+  (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  VkCommandPool ->
+  VkQueue ->
+  VkBufferUsageFlags ->
+  VkDeviceSize ->
+  (Ptr Void -> IO ()) ->
+  ResourceT m (VkBuffer, VkDeviceMemory)
+createFilledBuffer device pdmp commandPool queue usageFlags dataSize fillBuffer = runResourceT $ do
+  (stagingBuffer, stagingBufferMemory) <- createStagingBuffer device pdmp dataSize
+
+  liftIO $ with (mappedMemory device stagingBufferMemory 0 dataSize) fillBuffer
+
+  (buffer, bufferMemory) <-
+    lift $ createBoundBuffer device pdmp (
+      return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
+      \_ _ -> return EQ
+    ) $
+    createVk $
+    initStandardBufferCreateInfo &*
+    set @"flags" 0 &*
+    set @"size" dataSize &*
+    set @"usage" (VK_BUFFER_USAGE_TRANSFER_DST_BIT .|. usageFlags) &*
+    setSharingQueueFamilyIndices []
+
+  executeCommands device commandPool queue $ \commandBuffer -> liftIO $
+    vkaCmdCopyBuffer commandBuffer stagingBuffer buffer [createVk $ set @"size" dataSize &* set @"srcOffset" 0 &* set @"dstOffset" 0]
+
+  return (buffer, bufferMemory)
+
+createFilledBufferFromPrimBytes ::
+  (MonadUnliftIO m, MonadThrow m, MonadFail m, Storable pb, PrimBytes pb) =>
+  VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
+  VkCommandPool ->
+  VkQueue ->
+  VkBufferUsageFlags ->
+  pb ->
+  ResourceT m (VkBuffer, VkDeviceMemory)
+createFilledBufferFromPrimBytes device pdmp commandPool queue usageFlags pb =
+  createFilledBuffer device pdmp commandPool queue usageFlags (fromIntegral $ DF.bSizeOf pb) (flip poke pb . castPtr)
+
 createBoundImage ::
   (MonadUnliftIO m, MonadThrow m) =>
   VkDevice ->
@@ -823,6 +905,16 @@ initStandardImageMemoryBarrier =
   set @"sType" VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER &*
   set @"pNext" VK_NULL
 
+vkaCmdCopyBuffer ::
+  VkCommandBuffer ->
+  VkBuffer ->
+  VkBuffer ->
+  [VkBufferCopy] ->
+  IO ()
+vkaCmdCopyBuffer commandBuffer srcBuffer dstBuffer bufferCopies =
+  withArray bufferCopies $ \bufferCopiesPtr ->
+  vkCmdCopyBuffer commandBuffer srcBuffer dstBuffer (lengthNum bufferCopies) bufferCopiesPtr
+
 vkaCmdCopyBufferToImage ::
   VkCommandBuffer ->
   VkBuffer ->
@@ -830,21 +922,9 @@ vkaCmdCopyBufferToImage ::
   VkImageLayout ->
   [VkBufferImageCopy] ->
   IO ()
-vkaCmdCopyBufferToImage
-  commandBuffer
-  buffer
-  image
-  imageLayout
-  bufferImageCopies
-  =
+vkaCmdCopyBufferToImage commandBuffer buffer image imageLayout bufferImageCopies =
   withArray bufferImageCopies $ \bufferImageCopiesPtr ->
-  vkCmdCopyBufferToImage
-    commandBuffer
-    buffer
-    image
-    imageLayout
-    (lengthNum bufferImageCopies)
-    bufferImageCopiesPtr
+  vkCmdCopyBufferToImage commandBuffer buffer image imageLayout (lengthNum bufferImageCopies) bufferImageCopiesPtr
 
 depthBearingFormats :: Set VkFormat
 depthBearingFormats =
@@ -874,29 +954,16 @@ stageKtxTexture ::
   ResourceT m (KTX.Header, KTX.BufferRegions, VkBuffer, VkDeviceMemory)
 stageKtxTexture device pdmp filePath =
   KTX.readKtxFile filePath KTX.skipMetadata $ \header () (fromIntegral -> textureDataSize) readTextureDataInto -> do
-    (buffer, bufferMemory) <-
-      lift . lift $
-      createBoundBuffer device pdmp (
-        return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
-        \_ _ -> return EQ
-      ) $
-      createVk $
-      initStandardBufferCreateInfo &*
-      set @"flags" 0 &*
-      set @"size" textureDataSize &*
-      set @"usage" VK_BUFFER_USAGE_TRANSFER_SRC_BIT &*
-      setSharingQueueFamilyIndices []
-
+    (buffer, bufferMemory) <- lift . lift $ createStagingBuffer device pdmp textureDataSize
     bufferRegions <- with (mappedMemory device bufferMemory 0 textureDataSize) $ readTextureDataInto . castPtr
-
     return (header, bufferRegions, buffer, bufferMemory)
 
 createImageFromKtxTexture ::
   (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
   VkDevice ->
+  VkPhysicalDeviceMemoryProperties ->
   VkCommandPool ->
   VkQueue ->
-  VkPhysicalDeviceMemoryProperties ->
   VkSampleCountFlagBits ->
   VkImageTiling ->
   VkImageUsageFlags ->
@@ -904,7 +971,7 @@ createImageFromKtxTexture ::
   VkImageLayout ->
   FilePath ->
   ResourceT m (VkImage, VkDeviceMemory, VkImageView, VkSampler)
-createImageFromKtxTexture device commandPool queue pdmp sampleCountFlagBit tiling usageFlags qfis initialLayout filePath = runResourceT $ do
+createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tiling usageFlags qfis initialLayout filePath = runResourceT $ do
   (h@KTX.Header{..}, stagingBufferRegions, stagingBuffer, stagingBufferMemory) <- stageKtxTexture device pdmp filePath
 
   let
