@@ -2,11 +2,12 @@
 with pkgs;
 let
   inherit (lib) makeLibraryPath;
-  hs = haskell.packages.ghc864;
+  hs = haskell.packages.ghc865;
   tools = [
     hs.ghc
     hs.cabal-install
     hs.ghcid
+    hs.hpack
     vulkan-tools
   ];
   libraries = [

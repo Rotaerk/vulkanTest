@@ -1,9 +1,6 @@
 [submodule "sandbox/vulkan"]
 	path = sandbox/vulkan
 	url = https://github.com/achirkin/vulkan
-[submodule "sandbox/easytensor"]
-	path = sandbox/easytensor
-	url = https://github.com/achirkin/easytensor
 [submodule "sandbox/ktx-rw"]
 	path = sandbox/ktx-rw
 	url = https://github.com/rotaerk/ktx-rw

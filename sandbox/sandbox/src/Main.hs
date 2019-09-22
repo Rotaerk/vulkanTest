@@ -72,9 +72,9 @@ import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
-import Graphics.Vulkan.Marshal.Internal
 
-import qualified Numeric.DataFrame as DF
+import Numeric.DataFrame as DF
+import Numeric.Dimensions
 import Numeric.PrimBytes
 
 import Pipes
@@ -219,7 +219,7 @@ resourceMain = do
       nub qfis <&> \qfi ->
         createVk $
         initStandardDeviceQueueCreateInfo &*
-        set @"flags" 0 &*
+        set @"flags" zeroBits &*
         set @"queueFamilyIndex" qfi &*
         setListCountAndRef @"queueCount" @"pQueuePriorities" [1.0]
     ) &*
@@ -233,7 +233,7 @@ resourceMain = do
         allocateAcquireVk_ (commandPoolResource device) $
         createVk $
         initStandardCommandPoolCreateInfo &*
-        set @"flags" 0 &*
+        set @"flags" zeroBits &*
         set @"queueFamilyIndex" qfi
     in
       forM qfis $ \qfi -> liftM2 (,) (getVk $ vkGetDeviceQueue device qfi 0) (createCommandPool qfi)
@@ -243,7 +243,7 @@ resourceMain = do
     allocateAcquireVk_ (descriptorSetLayoutResource device) $
     createVk $
     initStandardDescriptorSetLayoutCreateInfo &*
-    set @"flags" 0 &*
+    set @"flags" zeroBits &*
     setListCountAndRef @"bindingCount" @"pBindings" (
       fmap createVk [
         set @"binding" 0 &*
@@ -333,8 +333,8 @@ throwAppExM message = throwM $ ApplicationException message
 
 data Vertex =
   Vertex {
-    vtxPos :: DF.Vec3f,
-    vtxTexCoord :: DF.Vec2f
+    vtxPos :: Vec3f,
+    vtxTexCoord :: Vec2f
   } deriving (Eq, Show, Generic)
 
 instance PrimBytes Vertex
@@ -471,7 +471,7 @@ initStandardDeviceCreateInfo :: CreateVkStruct VkDeviceCreateInfo '["sType", "pN
 initStandardDeviceCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
   set @"pNext" VK_NULL &*
-  set @"flags" 0 &*
+  set @"flags" zeroBits &*
   set @"enabledLayerCount" 0 &*
   set @"ppEnabledLayerNames" VK_NULL
 
@@ -503,7 +503,7 @@ initStandardPipelineLayoutCreateInfo :: CreateVkStruct VkPipelineLayoutCreateInf
 initStandardPipelineLayoutCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &*
   set @"pNext" VK_NULL &*
-  set @"flags" 0
+  set @"flags" zeroBits
 
 allocatedMemoryResource :: VkDevice -> VkaResource VkMemoryAllocateInfo VkDeviceMemory
 allocatedMemoryResource device = VkaResource (return $ vkAllocateMemory device) (return $ vkFreeMemory device) "vkAllocateMemory" [VK_SUCCESS]
@@ -634,7 +634,7 @@ createStagingBuffer device pdmp size =
   ) $
   createVk $
   initStandardBufferCreateInfo &*
-  set @"flags" 0 &*
+  set @"flags" zeroBits &*
   set @"size" size &*
   set @"usage" VK_BUFFER_USAGE_TRANSFER_SRC_BIT &*
   setSharingQueueFamilyIndices []
@@ -661,7 +661,7 @@ createFilledBuffer device pdmp commandPool queue usageFlags dataSize fillBuffer 
     ) $
     createVk $
     initStandardBufferCreateInfo &*
-    set @"flags" 0 &*
+    set @"flags" zeroBits &*
     set @"size" dataSize &*
     set @"usage" (VK_BUFFER_USAGE_TRANSFER_DST_BIT .|. usageFlags) &*
     setSharingQueueFamilyIndices []
@@ -681,7 +681,7 @@ createFilledBufferFromPrimBytes ::
   pb ->
   ResourceT m (VkBuffer, VkDeviceMemory)
 createFilledBufferFromPrimBytes device pdmp commandPool queue usageFlags pb =
-  createFilledBuffer device pdmp commandPool queue usageFlags (fromIntegral $ DF.bSizeOf pb) (flip poke pb . castPtr)
+  createFilledBuffer device pdmp commandPool queue usageFlags (fromIntegral $ bSizeOf pb) (flip poke pb . castPtr)
 
 createBoundImage ::
   (MonadUnliftIO m, MonadThrow m) =>
@@ -709,7 +709,7 @@ vkaMapMemory device deviceMemory offset size flags =
 
 mappedMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> Acquire (Ptr Void)
 mappedMemory device deviceMemory offset size =
-  vkaMapMemory device deviceMemory offset size 0
+  vkaMapMemory device deviceMemory offset size zeroBits
   `mkAcquire`
   const (vkUnmapMemory device deviceMemory)
 
@@ -806,7 +806,7 @@ initStandardFenceCreateInfo =
   set @"pNext" VK_NULL
 
 setFenceSignaled :: Bool -> CreateVkStruct VkFenceCreateInfo '["flags"] ()
-setFenceSignaled isSignaled = set @"flags" (if isSignaled then VK_FENCE_CREATE_SIGNALED_BIT else 0)
+setFenceSignaled isSignaled = set @"flags" (if isSignaled then VK_FENCE_CREATE_SIGNALED_BIT else zeroBits)
 
 vkaWaitForFences :: VkDevice -> [VkFence] -> VkBool32 -> Word64 -> IO VkResult
 vkaWaitForFences device fences waitAll timeout =
@@ -982,11 +982,12 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
     imageDepth = replace 0 1 header'pixelDepth
     numArrayLayers = replace 0 1 header'numberOfArrayElements
     numMipLevels = KTX.effectiveNumberOfMipmapLevels h
-    format =
+    formatNum =
       fromMaybe (throwVkaException "Unsupported KTX format.") $
       KTX.getVkFormatFromGlTypeAndFormat header'glType header'glFormat <|>
       KTX.getVkFormatFromGlInternalFormat header'glInternalFormat
-    pixelSize = (`div` 8) . KTX.vkFormatSize'blockSizeInBits . KTX.getVkFormatSize $ format
+    pixelSize = (`div` 8) . KTX.vkFormatSize'blockSizeInBits . KTX.getVkFormatSize $ formatNum
+    format = VkFormat formatNum
     aspectMask :: VkImageAspectFlags =
       replace zeroBits VK_IMAGE_ASPECT_COLOR_BIT $
       setIf (Set.member format depthBearingFormats) VK_IMAGE_ASPECT_DEPTH_BIT .|.
@@ -1028,11 +1029,11 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
     vkaCmdPipelineBarrier commandBuffer
       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
       VK_PIPELINE_STAGE_TRANSFER_BIT
-      0 [] []
+      zeroBits [] []
       [
         createVk $
         initStandardImageMemoryBarrier &*
-        set @"srcAccessMask" 0 &*
+        set @"srcAccessMask" zeroBits &*
         set @"dstAccessMask" VK_ACCESS_TRANSFER_WRITE_BIT &*
         set @"oldLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
         set @"newLayout" VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &*
@@ -1095,7 +1096,7 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
     lift . allocateAcquireVk_ (imageViewResource device) $
     createVk $
     initStandardImageViewCreateInfo &*
-    set @"flags" 0 &*
+    set @"flags" zeroBits &*
     set @"image" image &*
     set @"viewType" (
       case (header'pixelHeight, header'pixelDepth) of
@@ -1200,11 +1201,16 @@ vkaGetPhysicalDeviceSurfacePresentModesKHR :: VkPhysicalDevice -> VkSurfaceKHR -
 vkaGetPhysicalDeviceSurfacePresentModesKHR = onArrayFillerFailureThrow "vkGetPhysicalDeviceSurfacePresentModesKHR" [VK_SUCCESS] .: vkGetPhysicalDeviceSurfacePresentModesKHR
 
 pdmpDeviceLocalMemorySize :: VkPhysicalDeviceMemoryProperties -> VkDeviceSize
-pdmpDeviceLocalMemorySize memoryProperties = sum . fmap (getField @"size") . filter isDeviceLocal $ memoryHeaps
+pdmpDeviceLocalMemorySize memoryProperties =
+  iwfoldr @VkMemoryHeap @'[_] @'[] (
+    \(Idx i :* U) (S x) s ->
+      if i < memoryHeapCount && isDeviceLocal x then s + getField @"size" x else s
+  ) 0 .
+  getVec @"memoryHeaps" $
+  memoryProperties
   where
-    isDeviceLocal = (0 /=) . (VK_MEMORY_HEAP_DEVICE_LOCAL_BIT .&.) . getField @"flags"
-    memoryHeapCount = getField @"memoryHeapCount" memoryProperties
-    memoryHeaps = take (fromIntegral memoryHeapCount) . fmap DF.unScalar . DF.toList . getVec @"memoryHeaps" $ memoryProperties
+    isDeviceLocal = (zeroBits /=) . (VK_MEMORY_HEAP_DEVICE_LOCAL_BIT .&.) . getField @"flags"
+    memoryHeapCount = fromIntegral $ getField @"memoryHeapCount" memoryProperties
 
 pickQueueFamilyIndexCombo :: forall i. Ix i => [QualificationM IO (i, VkQueueFamilyProperties)] -> StorableArray i VkQueueFamilyProperties -> IO [i]
 pickQueueFamilyIndexCombo qualifications qfpArray =
