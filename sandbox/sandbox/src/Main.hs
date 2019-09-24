@@ -297,7 +297,7 @@ resourceMain = do
           (svertex (vec2 (0.5) (0.5)) (vec2 0 1))
           (svertex (vec2 (-0.5) (0.5)) (vec2 1 1))
       )
-  ioPutStrLn "Created and filled vertex buffer."
+  ioPutStrLn "Vertex buffer created."
 
   (indexBuffer, indexBufferMemory) <-
     createFilledBufferFromPrimBytes
@@ -307,7 +307,17 @@ resourceMain = do
       transferQueue
       VK_BUFFER_USAGE_INDEX_BUFFER_BIT
       (packDF @Double @6 @'[] 0 1 2 2 3 0)
-  ioPutStrLn "Created and filled index buffer."
+  ioPutStrLn "Index buffer created."
+
+  frameSyncs <- replicateM maxFramesInFlight $ FrameSync <$> createFence device True <*> createSemaphore device <*> createSemaphore device
+  ioPutStrLn "Frame syncs created."
+
+  renderStartTimeRef <- liftIO $ newIORef Nothing
+
+  doWhileM $ runResourceT $ do
+    (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
+
+    return False
 
   return ()
 
@@ -336,6 +346,9 @@ validationLayers =
 #endif
   ]
 
+maxFramesInFlight :: Int
+maxFramesInFlight = 2
+
 data ApplicationException = ApplicationException String deriving (Eq, Show, Read)
 
 instance Exception ApplicationException where
@@ -358,6 +371,13 @@ instance PrimBytes Vertex
 
 svertex :: Vec2f -> Vec2f -> Scalar Vertex
 svertex = S .: Vertex
+
+data FrameSync =
+  FrameSync {
+    fsInFlightFence :: VkFence,
+    fsImageAvailableSemaphore :: VkSemaphore,
+    fsRenderFinishedSemaphore :: VkSemaphore
+  }
 
 -- GLFW helpers>
 data GLFWException =
@@ -836,6 +856,9 @@ initStandardFenceCreateInfo =
 setFenceSignaled :: Bool -> CreateVkStruct VkFenceCreateInfo '["flags"] ()
 setFenceSignaled isSignaled = set @"flags" (if isSignaled then VK_FENCE_CREATE_SIGNALED_BIT else zeroBits)
 
+createFence :: MonadIO m => VkDevice -> Bool -> ResourceT m VkFence
+createFence device signaled = allocateAcquireVk_ (fenceResource device) $ createVk $ initStandardFenceCreateInfo &* setFenceSignaled signaled
+
 vkaWaitForFences :: VkDevice -> [VkFence] -> VkBool32 -> Word64 -> IO VkResult
 vkaWaitForFences device fences waitAll timeout =
   withArray fences $ \fencesPtr ->
@@ -852,6 +875,9 @@ initStandardSemaphoreCreateInfo :: CreateVkStruct VkSemaphoreCreateInfo '["sType
 initStandardSemaphoreCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO &*
   set @"pNext" VK_NULL
+
+createSemaphore :: MonadIO m => VkDevice -> ResourceT m VkSemaphore
+createSemaphore device = allocateAcquireVk_ (semaphoreResource device) $ createVk initStandardSemaphoreCreateInfo
 
 swapchainResource :: VkDevice -> VkaResource VkSwapchainCreateInfoKHR VkSwapchainKHR
 swapchainResource device = simpleVkaResource (vkCreateSwapchainKHR device) (vkDestroySwapchainKHR device) "vkCreateSwapchainKHR" [VK_SUCCESS]
@@ -1283,4 +1309,7 @@ assertM_ cond = assert cond (return ())
 
 assertPred :: (a -> Bool) -> a -> a
 assertPred p a = assert (p a) a
+
+doWhileM :: Monad m => m Bool -> m ()
+doWhileM a = fix $ \loop -> a >>= bool (return ()) loop
 -- Other helpers<
