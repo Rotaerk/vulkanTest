@@ -442,6 +442,14 @@ data VkaResource ci vk =
     vkaResource'successResults :: [VkResult]
   }
 
+simpleVkaResource ::
+  (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
+  (vk -> Ptr VkAllocationCallbacks -> IO ()) ->
+  String ->
+  [VkResult] ->
+  VkaResource ci vk
+simpleVkaResource create destroy = VkaResource (return create) (return destroy)
+
 newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire (VkResult, vk)
 newVkWithResult (VkaResource getCreate getDestroy functionName successResults) createInfo =
   liftIO (liftM2 (,) getCreate getDestroy) >>= \(create, destroy) ->
@@ -464,7 +472,7 @@ allocateAcquireVk :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaReso
 allocateAcquireVk = (allocateAcquire .) . newVk
 
 vulkanInstanceResource :: VkaResource VkInstanceCreateInfo VkInstance
-vulkanInstanceResource = VkaResource (return vkCreateInstance) (return vkDestroyInstance) "vkCreateInstance" [VK_SUCCESS]
+vulkanInstanceResource = simpleVkaResource vkCreateInstance vkDestroyInstance "vkCreateInstance" [VK_SUCCESS]
 
 initStandardInstanceCreateInfo :: CreateVkStruct VkInstanceCreateInfo '["sType", "pNext"] ()
 initStandardInstanceCreateInfo =
@@ -485,7 +493,7 @@ registeredDebugReportCallbackResource vulkanInstance =
     [VK_SUCCESS]
 
 deviceResource :: VkPhysicalDevice -> VkaResource VkDeviceCreateInfo VkDevice
-deviceResource physicalDevice = VkaResource (return $ vkCreateDevice physicalDevice) (return vkDestroyDevice) "vkCreateDevice" [VK_SUCCESS]
+deviceResource physicalDevice = simpleVkaResource (vkCreateDevice physicalDevice) vkDestroyDevice "vkCreateDevice" [VK_SUCCESS]
 
 initStandardDeviceCreateInfo :: CreateVkStruct VkDeviceCreateInfo '["sType", "pNext", "flags", "enabledLayerCount", "ppEnabledLayerNames"] ()
 initStandardDeviceCreateInfo =
@@ -501,7 +509,7 @@ initStandardDeviceQueueCreateInfo =
   set @"pNext" VK_NULL
 
 commandPoolResource :: VkDevice -> VkaResource VkCommandPoolCreateInfo VkCommandPool
-commandPoolResource device = VkaResource (return $ vkCreateCommandPool device) (return $ vkDestroyCommandPool device) "vkCreateCommandPool" [VK_SUCCESS]
+commandPoolResource device = simpleVkaResource (vkCreateCommandPool device) (vkDestroyCommandPool device) "vkCreateCommandPool" [VK_SUCCESS]
 
 initStandardCommandPoolCreateInfo :: CreateVkStruct VkCommandPoolCreateInfo '["sType", "pNext"] ()
 initStandardCommandPoolCreateInfo =
@@ -509,7 +517,7 @@ initStandardCommandPoolCreateInfo =
   set @"pNext" VK_NULL
 
 descriptorSetLayoutResource :: VkDevice -> VkaResource VkDescriptorSetLayoutCreateInfo VkDescriptorSetLayout
-descriptorSetLayoutResource device = VkaResource (return $ vkCreateDescriptorSetLayout device) (return $ vkDestroyDescriptorSetLayout device) "vkCreateDescriptorSetLayout" [VK_SUCCESS]
+descriptorSetLayoutResource device = simpleVkaResource (vkCreateDescriptorSetLayout device) (vkDestroyDescriptorSetLayout device) "vkCreateDescriptorSetLayout" [VK_SUCCESS]
 
 initStandardDescriptorSetLayoutCreateInfo :: CreateVkStruct VkDescriptorSetLayoutCreateInfo '["sType", "pNext"] ()
 initStandardDescriptorSetLayoutCreateInfo =
@@ -517,7 +525,7 @@ initStandardDescriptorSetLayoutCreateInfo =
   set @"pNext" VK_NULL
 
 pipelineLayoutResource :: VkDevice -> VkaResource VkPipelineLayoutCreateInfo VkPipelineLayout
-pipelineLayoutResource device = VkaResource (return $ vkCreatePipelineLayout device) (return $ vkDestroyPipelineLayout device) "vkCreatePipelineLayout" [VK_SUCCESS]
+pipelineLayoutResource device = simpleVkaResource (vkCreatePipelineLayout device) (vkDestroyPipelineLayout device) "vkCreatePipelineLayout" [VK_SUCCESS]
 
 initStandardPipelineLayoutCreateInfo :: CreateVkStruct VkPipelineLayoutCreateInfo '["sType", "pNext", "flags"] ()
 initStandardPipelineLayoutCreateInfo =
@@ -526,7 +534,7 @@ initStandardPipelineLayoutCreateInfo =
   set @"flags" zeroBits
 
 allocatedMemoryResource :: VkDevice -> VkaResource VkMemoryAllocateInfo VkDeviceMemory
-allocatedMemoryResource device = VkaResource (return $ vkAllocateMemory device) (return $ vkFreeMemory device) "vkAllocateMemory" [VK_SUCCESS]
+allocatedMemoryResource device = simpleVkaResource (vkAllocateMemory device) (vkFreeMemory device) "vkAllocateMemory" [VK_SUCCESS]
 
 initStandardMemoryAllocateInfo :: CreateVkStruct VkMemoryAllocateInfo '["sType", "pNext"] ()
 initStandardMemoryAllocateInfo =
@@ -534,7 +542,7 @@ initStandardMemoryAllocateInfo =
   set @"pNext" VK_NULL
 
 bufferResource :: VkDevice -> VkaResource VkBufferCreateInfo VkBuffer
-bufferResource device = VkaResource (return $ vkCreateBuffer device) (return $ vkDestroyBuffer device) "vkCreateBuffer" [VK_SUCCESS]
+bufferResource device = simpleVkaResource (vkCreateBuffer device) (vkDestroyBuffer device) "vkCreateBuffer" [VK_SUCCESS]
 
 initStandardBufferCreateInfo :: CreateVkStruct VkBufferCreateInfo '["sType", "pNext"] ()
 initStandardBufferCreateInfo =
@@ -561,7 +569,7 @@ setSharingQueueFamilyIndices qfis =
     qfis' = if length qfis > 1 then qfis else []
 
 imageResource :: VkDevice -> VkaResource VkImageCreateInfo VkImage
-imageResource device = VkaResource (return $ vkCreateImage device) (return $ vkDestroyImage device) "vkCreateImage" [VK_SUCCESS]
+imageResource device = simpleVkaResource (vkCreateImage device) (vkDestroyImage device) "vkCreateImage" [VK_SUCCESS]
 
 initStandardImageCreateInfo :: CreateVkStruct VkImageCreateInfo '["sType", "pNext"] ()
 initStandardImageCreateInfo =
@@ -734,7 +742,7 @@ mappedMemory device deviceMemory offset size =
   const (vkUnmapMemory device deviceMemory)
 
 imageViewResource :: VkDevice -> VkaResource VkImageViewCreateInfo VkImageView
-imageViewResource device = VkaResource (return $ vkCreateImageView device) (return $ vkDestroyImageView device) "vkCreateImageView" [VK_SUCCESS]
+imageViewResource device = simpleVkaResource (vkCreateImageView device) (vkDestroyImageView device) "vkCreateImageView" [VK_SUCCESS]
 
 initStandardImageViewCreateInfo :: CreateVkStruct VkImageViewCreateInfo '["sType", "pNext"] ()
 initStandardImageViewCreateInfo =
@@ -742,7 +750,7 @@ initStandardImageViewCreateInfo =
   set @"pNext" VK_NULL
 
 samplerResource :: VkDevice -> VkaResource VkSamplerCreateInfo VkSampler
-samplerResource device = VkaResource (return $ vkCreateSampler device) (return $ vkDestroySampler device) "vkCreateSampler" [VK_SUCCESS]
+samplerResource device = simpleVkaResource (vkCreateSampler device) (vkDestroySampler device) "vkCreateSampler" [VK_SUCCESS]
 
 initStandardSamplerCreateInfo :: CreateVkStruct VkSamplerCreateInfo '["sType", "pNext"] ()
 initStandardSamplerCreateInfo =
@@ -818,7 +826,7 @@ setSubmitWaitSemaphoresAndStageFlags waitSemaphoresAndStageFlags =
   setListRef @"pWaitDstStageMask" (snd <$> waitSemaphoresAndStageFlags)
 
 fenceResource :: VkDevice -> VkaResource VkFenceCreateInfo VkFence
-fenceResource device = VkaResource (return $ vkCreateFence device) (return $ vkDestroyFence device) "vkCreateFence" [VK_SUCCESS]
+fenceResource device = simpleVkaResource (vkCreateFence device) (vkDestroyFence device) "vkCreateFence" [VK_SUCCESS]
 
 initStandardFenceCreateInfo :: CreateVkStruct VkFenceCreateInfo '["sType", "pNext"] ()
 initStandardFenceCreateInfo =
@@ -837,8 +845,16 @@ vkaWaitForFences device fences waitAll timeout =
 vkaWaitForFence :: VkDevice -> VkFence -> Word64 -> IO VkResult
 vkaWaitForFence device fence timeout = vkaWaitForFences device [fence] VK_TRUE timeout
 
+semaphoreResource :: VkDevice -> VkaResource VkSemaphoreCreateInfo VkSemaphore
+semaphoreResource device = simpleVkaResource (vkCreateSemaphore device) (vkDestroySemaphore device) "vkCreateSemaphore" [VK_SUCCESS]
+
+initStandardSemaphoreCreateInfo :: CreateVkStruct VkSemaphoreCreateInfo '["sType", "pNext"] ()
+initStandardSemaphoreCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO &*
+  set @"pNext" VK_NULL
+
 swapchainResource :: VkDevice -> VkaResource VkSwapchainCreateInfoKHR VkSwapchainKHR
-swapchainResource device = VkaResource (return $ vkCreateSwapchainKHR device) (return $ vkDestroySwapchainKHR device) "vkCreateSwapchainKHR" [VK_SUCCESS]
+swapchainResource device = simpleVkaResource (vkCreateSwapchainKHR device) (vkDestroySwapchainKHR device) "vkCreateSwapchainKHR" [VK_SUCCESS]
 
 initStandardSwapchainCreateInfo :: CreateVkStruct VkSwapchainCreateInfoKHR '["sType", "pNext"] ()
 initStandardSwapchainCreateInfo =
