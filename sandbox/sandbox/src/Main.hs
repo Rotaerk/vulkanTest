@@ -282,16 +282,17 @@ resourceMain = do
       VK_IMAGE_LAYOUT_UNDEFINED
       "../ktx-rw/ktx-rw/textures/oak_leafs.ktx"
   ioPutStrLn "Loaded KTX texture to an image."
-{-
+
   (vertexBuffer, vertexBufferMemory) <-
-    createFilledBuffer
-      device
-      physicalDeviceMemoryProperties
-      transferCommandPool
-      transferQueue
-      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-      undefined -- TODO: figure out how to build a DataFrame Vertex '[4]
--}
+    createFilledBufferFromPrimBytes device physicalDeviceMemoryProperties transferCommandPool transferQueue VK_BUFFER_USAGE_VERTEX_BUFFER_BIT $
+      fromFlatList (dims :: Dims '[4]) undefined [
+        (Vertex (vec2 (-0.5) (-0.5)) (vec2 1 0)),
+        (Vertex (vec2 (0.5) (-0.5)) (vec2 0 0)),
+        (Vertex (vec2 (0.5) (0.5)) (vec2 0 1)),
+        (Vertex (vec2 (-0.5) (0.5)) (vec2 1 1))
+      ]
+  ioPutStrLn "Created and filled vertex buffer."
+
   return ()
 
 extensions :: [CString]
@@ -333,7 +334,7 @@ throwAppExM message = throwM $ ApplicationException message
 
 data Vertex =
   Vertex {
-    vtxPos :: Vec3f,
+    vtxPos :: Vec2f,
     vtxTexCoord :: Vec2f
   } deriving (Eq, Show, Generic)
 
