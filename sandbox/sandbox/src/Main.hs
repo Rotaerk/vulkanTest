@@ -284,14 +284,31 @@ resourceMain = do
   ioPutStrLn "Loaded KTX texture to an image."
 
   (vertexBuffer, vertexBufferMemory) <-
-    createFilledBufferFromPrimBytes device physicalDeviceMemoryProperties transferCommandPool transferQueue VK_BUFFER_USAGE_VERTEX_BUFFER_BIT $
-      fromFlatList (dims :: Dims '[4]) undefined [
-        (Vertex (vec2 (-0.5) (-0.5)) (vec2 1 0)),
-        (Vertex (vec2 (0.5) (-0.5)) (vec2 0 0)),
-        (Vertex (vec2 (0.5) (0.5)) (vec2 0 1)),
-        (Vertex (vec2 (-0.5) (0.5)) (vec2 1 1))
-      ]
+    createFilledBufferFromPrimBytes
+      device
+      physicalDeviceMemoryProperties
+      transferCommandPool
+      transferQueue
+      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+      (
+        fromFlatList (dims :: Dims '[4]) undefined [
+          (Vertex (vec2 (-0.5) (-0.5)) (vec2 1 0)),
+          (Vertex (vec2 (0.5) (-0.5)) (vec2 0 0)),
+          (Vertex (vec2 (0.5) (0.5)) (vec2 0 1)),
+          (Vertex (vec2 (-0.5) (0.5)) (vec2 1 1))
+        ]
+      )
   ioPutStrLn "Created and filled vertex buffer."
+
+  (indexBuffer, indexBufferMemory) <-
+    createFilledBufferFromPrimBytes
+      device
+      physicalDeviceMemoryProperties
+      transferCommandPool
+      transferQueue
+      VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+      (packDF @Double @6 @'[] 0 1 2 2 3 0)
+  ioPutStrLn "Created and filled index buffer."
 
   return ()
 
