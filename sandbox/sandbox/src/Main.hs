@@ -291,12 +291,11 @@ resourceMain = do
       transferQueue
       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
       (
-        fromFlatList (dims :: Dims '[4]) undefined [
-          (Vertex (vec2 (-0.5) (-0.5)) (vec2 1 0)),
-          (Vertex (vec2 (0.5) (-0.5)) (vec2 0 0)),
-          (Vertex (vec2 (0.5) (0.5)) (vec2 0 1)),
-          (Vertex (vec2 (-0.5) (0.5)) (vec2 1 1))
-        ]
+        packDF @Vertex @4 @'[]
+          (svertex (vec2 (-0.5) (-0.5)) (vec2 1 0))
+          (svertex (vec2 (0.5) (-0.5)) (vec2 0 0))
+          (svertex (vec2 (0.5) (0.5)) (vec2 0 1))
+          (svertex (vec2 (-0.5) (0.5)) (vec2 1 1))
       )
   ioPutStrLn "Created and filled vertex buffer."
 
@@ -356,6 +355,9 @@ data Vertex =
   } deriving (Eq, Show, Generic)
 
 instance PrimBytes Vertex
+
+svertex :: Vec2f -> Vec2f -> Scalar Vertex
+svertex = S .: Vertex
 
 -- GLFW helpers>
 data GLFWException =
