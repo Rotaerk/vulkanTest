@@ -317,6 +317,57 @@ resourceMain = do
   doWhileM $ runResourceT $ do
     (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
 
+    surfaceCapabilities <- getVk $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
+    ioPutStrLn "Obtained physical device surface capabilities."
+
+    surfaceFormatsArray <- getVkArray $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
+    ioPutStrLn "Obtained physical device surface formats."
+
+    surfacePresentModesArray <- getVkArray $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
+    ioPutStrLn "Obtained physical device surface present modes."
+
+    let
+      idealSurfaceFormat =
+        createVk @VkSurfaceFormatKHR $
+        set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
+        set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+
+    -- Generally I will want to pick the "best" format according to some criteria.
+    -- However, I don't know how those criteria would even look.  So for now, just
+    -- require some ideal format to be supported, and fail if it doesn't.
+    liftIO $ whenM (idealSurfaceFormat `P.notElem` produceElems surfaceFormatsArray) (throwAppEx "Required surface format not supported by device.")
+
+    swapchain <-
+      allocateAcquireVk_ (swapchainResource device) $
+      createVk $
+      initStandardSwapchainCreateInfo &*
+      set @"flags" zeroBits &*
+      set @"surface" windowSurface &*
+      set @"minImageCount" (
+        -- Ideally want one more than the minimum, but can't go over the maximum.
+        -- (Reminder: Maximum of 0 means no maximum.)
+        let
+          idealImageCount = getField @"minImageCount" surfaceCapabilities + 1
+          maxImageCount = getField @"maxImageCount" surfaceCapabilities
+        in
+          if maxImageCount > 0 then
+            min idealImageCount maxImageCount
+          else
+            idealImageCount
+      ) &*
+      set @"imageFormat" (getField @"format" idealSurfaceFormat) &*
+      set @"imageColorSpace" (getField @"colorSpace" idealSurfaceFormat) &*
+      set @"imageExtent" undefined &*
+      set @"imageArrayLayers" undefined &*
+      set @"imageUsage" undefined &*
+      setImageSharingQueueFamilyIndices [] &*
+      set @"preTransform" undefined &*
+      set @"compositeAlpha" undefined &*
+      set @"presentMode" undefined &*
+      set @"clipped" undefined &*
+      set @"oldSwapchain" undefined
+    ioPutStrLn "Swapchain created."
+
     return False
 
   return ()
@@ -569,6 +620,7 @@ initStandardBufferCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &*
   set @"pNext" VK_NULL
 
+-- Generalize this and the next function once the CreateVkStruct type is redesigned.
 setSharingQueueFamilyIndices ::
   (
     CanWriteField "sharingMode" a,
@@ -582,6 +634,25 @@ setSharingQueueFamilyIndices ::
   CreateVkStruct a '["sharingMode", "queueFamilyIndexCount", "pQueueFamilyIndices"] ()
 setSharingQueueFamilyIndices qfis =
   set @"sharingMode" (if null qfis' then VK_SHARING_MODE_EXCLUSIVE else VK_SHARING_MODE_CONCURRENT) &*
+  setListCountAndRef @"queueFamilyIndexCount" @"pQueueFamilyIndices" qfis'
+  where
+    -- If just one QFI is provided, it's the same as providing none; both are exclusive mode,
+    -- and the QFI list is ignored in that case.
+    qfis' = if length qfis > 1 then qfis else []
+
+setImageSharingQueueFamilyIndices ::
+  (
+    CanWriteField "imageSharingMode" a,
+    CanWriteField "queueFamilyIndexCount" a,
+    CanWriteField "pQueueFamilyIndices" a,
+    FieldType "imageSharingMode" a ~ VkSharingMode,
+    FieldType "queueFamilyIndexCount" a ~ Word32,
+    FieldType "pQueueFamilyIndices" a ~ Ptr Word32
+  ) =>
+  [Word32] ->
+  CreateVkStruct a '["imageSharingMode", "queueFamilyIndexCount", "pQueueFamilyIndices"] ()
+setImageSharingQueueFamilyIndices qfis =
+  set @"imageSharingMode" (if null qfis' then VK_SHARING_MODE_EXCLUSIVE else VK_SHARING_MODE_CONCURRENT) &*
   setListCountAndRef @"queueFamilyIndexCount" @"pQueueFamilyIndices" qfis'
   where
     -- If just one QFI is provided, it's the same as providing none; both are exclusive mode,
