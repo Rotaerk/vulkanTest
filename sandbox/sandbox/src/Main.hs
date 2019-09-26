@@ -317,55 +317,73 @@ resourceMain = do
   doWhileM $ runResourceT $ do
     (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
 
-    surfaceCapabilities <- getVk $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
-    ioPutStrLn "Obtained physical device surface capabilities."
+    swapchain <- do
+      surfaceCapabilities <- getVk $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
+      surfaceFormatsArray <- getVkArray $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
+      surfacePresentModesArray <- getVkArray $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
 
-    surfaceFormatsArray <- getVkArray $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
-    ioPutStrLn "Obtained physical device surface formats."
+      let
+        idealSurfaceFormat =
+          createVk @VkSurfaceFormatKHR $
+          set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
+          set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
 
-    surfacePresentModesArray <- getVkArray $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
-    ioPutStrLn "Obtained physical device surface present modes."
+      -- Generally I will want to pick the "best" format according to some criteria.
+      -- However, I don't know how those criteria would even look.  So for now, just
+      -- require some ideal format to be supported, and fail if it isn't.
+      liftIO $ whenM (idealSurfaceFormat `P.notElem` produceElems surfaceFormatsArray) (throwAppEx "Required surface format not supported by device.")
 
-    let
-      idealSurfaceFormat =
-        createVk @VkSurfaceFormatKHR $
-        set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
-        set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+      -- FIFO mode is always supported, but mailbox mode is preferred if available
+      -- because it's lower latency.  We don't want immediate mode, because we have
+      -- no need to present so quickly that there is tearing.
+      swapchainPresentMode <-
+        liftIO $
+        fromMaybe VK_PRESENT_MODE_FIFO_KHR <$>
+        P.find (== VK_PRESENT_MODE_MAILBOX_KHR) (produceElems surfacePresentModesArray)
 
-    -- Generally I will want to pick the "best" format according to some criteria.
-    -- However, I don't know how those criteria would even look.  So for now, just
-    -- require some ideal format to be supported, and fail if it doesn't.
-    liftIO $ whenM (idealSurfaceFormat `P.notElem` produceElems surfaceFormatsArray) (throwAppEx "Required surface format not supported by device.")
-
-    swapchain <-
       allocateAcquireVk_ (swapchainResource device) $
-      createVk $
-      initStandardSwapchainCreateInfo &*
-      set @"flags" zeroBits &*
-      set @"surface" windowSurface &*
-      set @"minImageCount" (
-        -- Ideally want one more than the minimum, but can't go over the maximum.
-        -- (Reminder: Maximum of 0 means no maximum.)
-        let
-          idealImageCount = getField @"minImageCount" surfaceCapabilities + 1
-          maxImageCount = getField @"maxImageCount" surfaceCapabilities
-        in
-          if maxImageCount > 0 then
-            min idealImageCount maxImageCount
-          else
-            idealImageCount
-      ) &*
-      set @"imageFormat" (getField @"format" idealSurfaceFormat) &*
-      set @"imageColorSpace" (getField @"colorSpace" idealSurfaceFormat) &*
-      set @"imageExtent" undefined &*
-      set @"imageArrayLayers" undefined &*
-      set @"imageUsage" undefined &*
-      setImageSharingQueueFamilyIndices [] &*
-      set @"preTransform" undefined &*
-      set @"compositeAlpha" undefined &*
-      set @"presentMode" undefined &*
-      set @"clipped" undefined &*
-      set @"oldSwapchain" undefined
+        createVk $
+        initStandardSwapchainCreateInfo &*
+        set @"flags" zeroBits &*
+        set @"surface" windowSurface &*
+        set @"minImageCount" (
+          -- Ideally want one more than the minimum, but can't go over the maximum.
+          -- (Reminder: Maximum of 0 means no maximum.)
+          let
+            idealImageCount = getField @"minImageCount" surfaceCapabilities + 1
+            maxImageCount = getField @"maxImageCount" surfaceCapabilities
+          in
+            if maxImageCount > 0 then
+              min idealImageCount maxImageCount
+            else
+              idealImageCount
+        ) &*
+        set @"imageFormat" (getField @"format" idealSurfaceFormat) &*
+        set @"imageColorSpace" (getField @"colorSpace" idealSurfaceFormat) &*
+        set @"imageExtent" (
+          -- Reminder: If currentExtent is (maxBound, maxBound), the surface extent is
+          -- flexible, so we can use the window framebuffer extent clamped to the
+          -- extent bounds of the surface.  Otherwise, we have to use currentExtent.
+          let
+            currentExtent = getField @"currentExtent" surfaceCapabilities
+            minImageExtent = getField @"minImageExtent" surfaceCapabilities
+            maxImageExtent = getField @"maxImageExtent" surfaceCapabilities
+          in
+            if getField @"width" currentExtent /= maxBound then
+              currentExtent
+            else
+              createVk $
+              set @"width" (fromIntegral windowFramebufferWidth & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
+              set @"height" (fromIntegral windowFramebufferHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
+        ) &*
+        set @"imageArrayLayers" 1 &*
+        set @"imageUsage" VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &*
+        setImageSharingQueueFamilyIndices (nub [graphicsQfi, presentQfi]) &*
+        set @"preTransform" (getField @"currentTransform" surfaceCapabilities) &*
+        set @"compositeAlpha" VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR &*
+        set @"presentMode" swapchainPresentMode &*
+        set @"clipped" VK_TRUE &*
+        set @"oldSwapchain" VK_NULL
     ioPutStrLn "Swapchain created."
 
     return False
@@ -1374,6 +1392,13 @@ ioPutStrLn = liftIO . putStrLn
 replace :: Eq a => a -> a -> a -> a
 replace match replacement value | value == match = replacement
 replace _ _ value = value
+
+clamp :: Ord a => a -> a -> a -> a
+clamp a b =
+  case compare a b of
+    LT -> min b . max a
+    GT -> min a . max b
+    EQ -> const a
 
 assertM_ :: Monad m => Bool -> m ()
 assertM_ cond = assert cond (return ())
