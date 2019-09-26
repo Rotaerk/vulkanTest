@@ -17,6 +17,10 @@ import Safe.Foldable
 (.:) = (.) . (.)
 infixr 9 .:
 
+(.:.) :: (d -> e) -> (a -> b -> c -> d) -> a -> b -> c -> e
+(.:.) = (.:) . (.)
+infixr 9 .:.
+
 type Predicate a = a -> Bool
 type Comparison a = a -> a -> Ordering
 type Qualification a = (Predicate a, Comparison a)

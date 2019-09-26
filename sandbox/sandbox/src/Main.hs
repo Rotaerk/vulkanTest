@@ -4,8 +4,10 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MagicHash #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -33,7 +35,7 @@ import Control.Monad.Loops
 import Control.Monad.Reader
 import Control.Monad.Trans.Resource
 import Data.Acquire.Local
-import Data.Array.Base
+import Data.Array.Base as DAB
 import Data.Array.MArray.Local
 import Data.Array.Storable
 import Data.Array.Unsafe
@@ -388,29 +390,32 @@ resourceMain = do
       set @"oldSwapchain" VK_NULL
     ioPutStrLn "Swapchain created."
 
-    swapchainImages <- liftIO $ getElems <=< getVkArray $ vkaGetSwapchainImagesKHR device swapchain
+    swapchainImagesArray <- getVkArray $ vkaGetSwapchainImagesKHR device swapchain
 
     swapchainImageViews <-
-      forM swapchainImages $ \image ->
-      allocateAcquireVk_ (imageViewResource device) $
-      createVk $
-      initStandardImageViewCreateInfo &*
-      set @"flags" zeroBits &*
-      set @"image" image &*
-      set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
-      set @"format" swapchainImageFormat &*
-      setVk @"components" (
-        set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
-        set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
-        set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
-        set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
-      ) &*
-      setVk @"subresourceRange" (
-        set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
-        set @"baseMipLevel" 0 &*
-        set @"levelCount" 1 &*
-        set @"baseArrayLayer" 0 &*
-        set @"layerCount" 1
+      P.toListM $
+      produceElems swapchainImagesArray >->
+      P.mapM (\image ->
+        allocateAcquireVk_ (imageViewResource device) $
+        createVk $
+        initStandardImageViewCreateInfo &*
+        set @"flags" zeroBits &*
+        set @"image" image &*
+        set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
+        set @"format" swapchainImageFormat &*
+        setVk @"components" (
+          set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
+          set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
+          set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
+          set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
+        ) &*
+        setVk @"subresourceRange" (
+          set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+          set @"baseMipLevel" 0 &*
+          set @"levelCount" 1 &*
+          set @"baseArrayLayer" 0 &*
+          set @"layerCount" 1
+        )
       )
     ioPutStrLn "Swapchain image views created."
 
@@ -1439,4 +1444,14 @@ assertPred p a = assert (p a) a
 
 doWhileM :: Monad m => m Bool -> m ()
 doWhileM a = fix $ \loop -> a >>= bool (return ()) loop
+
+instance (MArray a e m, MonadTrans t, Monad (t m)) => MArray a e (t m) where
+  getBounds = lift . getBounds
+  getNumElements = lift . getNumElements
+  newArray = lift .: DAB.newArray
+  newArray_ = lift . newArray_
+  unsafeNewArray_ = lift . unsafeNewArray_
+  unsafeRead = lift .: unsafeRead
+  unsafeWrite = lift .:. unsafeWrite
+
 -- Other helpers<
