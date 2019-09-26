@@ -269,7 +269,7 @@ resourceMain = do
     setListCountAndRef @"pushConstantRangeCount" @"pPushConstantRanges" []
   ioPutStrLn "Pipeline layout created."
 
-  (image, imageMemory, imageView, sampler) <-
+  (textureImage, textureImageMemory, textureImageView, textureSampler) <-
     createImageFromKtxTexture
       device
       physicalDeviceMemoryProperties
@@ -317,74 +317,102 @@ resourceMain = do
   doWhileM $ runResourceT $ do
     (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
 
-    swapchain <- do
-      surfaceCapabilities <- getVk $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
-      surfaceFormatsArray <- getVkArray $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
-      surfacePresentModesArray <- getVkArray $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
+    surfaceCapabilities <- getVk $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
+    surfaceFormatsArray <- getVkArray $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
+    surfacePresentModesArray <- getVkArray $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
 
-      let
-        idealSurfaceFormat =
-          createVk @VkSurfaceFormatKHR $
-          set @"format" VK_FORMAT_B8G8R8A8_UNORM &*
-          set @"colorSpace" VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-
-      -- Generally I will want to pick the "best" format according to some criteria.
-      -- However, I don't know how those criteria would even look.  So for now, just
-      -- require some ideal format to be supported, and fail if it isn't.
-      liftIO $ whenM (idealSurfaceFormat `P.notElem` produceElems surfaceFormatsArray) (throwAppEx "Required surface format not supported by device.")
-
-      -- FIFO mode is always supported, but mailbox mode is preferred if available
-      -- because it's lower latency.  We don't want immediate mode, because we have
-      -- no need to present so quickly that there is tearing.
-      swapchainPresentMode <-
-        liftIO $
-        fromMaybe VK_PRESENT_MODE_FIFO_KHR <$>
-        P.find (== VK_PRESENT_MODE_MAILBOX_KHR) (produceElems surfacePresentModesArray)
-
-      allocateAcquireVk_ (swapchainResource device) $
+    let
+      swapchainImageFormat = VK_FORMAT_B8G8R8A8_UNORM
+      swapchainImageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+      swapchainSurfaceFormat =
         createVk $
-        initStandardSwapchainCreateInfo &*
-        set @"flags" zeroBits &*
-        set @"surface" windowSurface &*
-        set @"minImageCount" (
-          -- Ideally want one more than the minimum, but can't go over the maximum.
-          -- (Reminder: Maximum of 0 means no maximum.)
-          let
-            idealImageCount = getField @"minImageCount" surfaceCapabilities + 1
-            maxImageCount = getField @"maxImageCount" surfaceCapabilities
-          in
-            if maxImageCount > 0 then
-              min idealImageCount maxImageCount
-            else
-              idealImageCount
-        ) &*
-        set @"imageFormat" (getField @"format" idealSurfaceFormat) &*
-        set @"imageColorSpace" (getField @"colorSpace" idealSurfaceFormat) &*
-        set @"imageExtent" (
-          -- Reminder: If currentExtent is (maxBound, maxBound), the surface extent is
-          -- flexible, so we can use the window framebuffer extent clamped to the
-          -- extent bounds of the surface.  Otherwise, we have to use currentExtent.
-          let
-            currentExtent = getField @"currentExtent" surfaceCapabilities
-            minImageExtent = getField @"minImageExtent" surfaceCapabilities
-            maxImageExtent = getField @"maxImageExtent" surfaceCapabilities
-          in
-            if getField @"width" currentExtent /= maxBound then
-              currentExtent
-            else
-              createVk $
-              set @"width" (fromIntegral windowFramebufferWidth & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
-              set @"height" (fromIntegral windowFramebufferHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
-        ) &*
-        set @"imageArrayLayers" 1 &*
-        set @"imageUsage" VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &*
-        setImageSharingQueueFamilyIndices (nub [graphicsQfi, presentQfi]) &*
-        set @"preTransform" (getField @"currentTransform" surfaceCapabilities) &*
-        set @"compositeAlpha" VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR &*
-        set @"presentMode" swapchainPresentMode &*
-        set @"clipped" VK_TRUE &*
-        set @"oldSwapchain" VK_NULL
+        set @"format" swapchainImageFormat &*
+        set @"colorSpace" swapchainImageColorSpace
+
+    -- Generally I will want to pick the "best" format according to some criteria.
+    -- However, I don't know how those criteria would even look.  So for now, just
+    -- require some ideal format to be supported, and fail if it isn't.
+    liftIO $ whenM (swapchainSurfaceFormat `P.notElem` produceElems surfaceFormatsArray) (throwAppEx "Required surface format not supported by device.")
+
+    -- FIFO mode is always supported, but mailbox mode is preferred if available
+    -- because it's lower latency.  We don't want immediate mode, because we have
+    -- no need to present so quickly that there is tearing.
+    swapchainPresentMode <-
+      liftIO $
+      fromMaybe VK_PRESENT_MODE_FIFO_KHR <$>
+      P.find (== VK_PRESENT_MODE_MAILBOX_KHR) (produceElems surfacePresentModesArray)
+
+    swapchain <-
+      allocateAcquireVk_ (swapchainResource device) $
+      createVk $
+      initStandardSwapchainCreateInfo &*
+      set @"flags" zeroBits &*
+      set @"surface" windowSurface &*
+      set @"minImageCount" (
+        -- Ideally want one more than the minimum, but can't go over the maximum.
+        -- (Reminder: Maximum of 0 means no maximum.)
+        let
+          idealImageCount = getField @"minImageCount" surfaceCapabilities + 1
+          maxImageCount = getField @"maxImageCount" surfaceCapabilities
+        in
+          if maxImageCount > 0 then
+            min idealImageCount maxImageCount
+          else
+            idealImageCount
+      ) &*
+      set @"imageFormat" swapchainImageFormat &*
+      set @"imageColorSpace" swapchainImageColorSpace &*
+      set @"imageExtent" (
+        -- Reminder: If currentExtent is (maxBound, maxBound), the surface extent is
+        -- flexible, so we can use the window framebuffer extent clamped to the
+        -- extent bounds of the surface.  Otherwise, we have to use currentExtent.
+        let
+          currentExtent = getField @"currentExtent" surfaceCapabilities
+          minImageExtent = getField @"minImageExtent" surfaceCapabilities
+          maxImageExtent = getField @"maxImageExtent" surfaceCapabilities
+        in
+          if getField @"width" currentExtent /= maxBound then
+            currentExtent
+          else
+            createVk $
+            set @"width" (fromIntegral windowFramebufferWidth & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
+            set @"height" (fromIntegral windowFramebufferHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
+      ) &*
+      set @"imageArrayLayers" 1 &*
+      set @"imageUsage" VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT &*
+      setImageSharingQueueFamilyIndices (nub [graphicsQfi, presentQfi]) &*
+      set @"preTransform" (getField @"currentTransform" surfaceCapabilities) &*
+      set @"compositeAlpha" VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR &*
+      set @"presentMode" swapchainPresentMode &*
+      set @"clipped" VK_TRUE &*
+      set @"oldSwapchain" VK_NULL
     ioPutStrLn "Swapchain created."
+
+    swapchainImages <- liftIO $ getElems <=< getVkArray $ vkaGetSwapchainImagesKHR device swapchain
+
+    swapchainImageViews <-
+      forM swapchainImages $ \image ->
+      allocateAcquireVk_ (imageViewResource device) $
+      createVk $
+      initStandardImageViewCreateInfo &*
+      set @"flags" zeroBits &*
+      set @"image" image &*
+      set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
+      set @"format" swapchainImageFormat &*
+      setVk @"components" (
+        set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
+        set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
+        set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
+        set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
+      ) &*
+      setVk @"subresourceRange" (
+        set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
+        set @"baseMipLevel" 0 &*
+        set @"levelCount" 1 &*
+        set @"baseArrayLayer" 0 &*
+        set @"layerCount" 1
+      )
+    ioPutStrLn "Swapchain image views created."
 
     return False
 
@@ -1350,6 +1378,9 @@ vkaGetPhysicalDeviceSurfaceFormatsKHR = onArrayFillerFailureThrow "vkGetPhysical
 
 vkaGetPhysicalDeviceSurfacePresentModesKHR :: VkPhysicalDevice -> VkSurfaceKHR -> VkaArrayFiller VkPresentModeKHR VkResult
 vkaGetPhysicalDeviceSurfacePresentModesKHR = onArrayFillerFailureThrow "vkGetPhysicalDeviceSurfacePresentModesKHR" [VK_SUCCESS] .: vkGetPhysicalDeviceSurfacePresentModesKHR
+
+vkaGetSwapchainImagesKHR :: VkDevice -> VkSwapchainKHR -> VkaArrayFiller VkImage VkResult
+vkaGetSwapchainImagesKHR = onArrayFillerFailureThrow "vkGetSwapchainImagesKHR" [VK_SUCCESS] .: vkGetSwapchainImagesKHR
 
 pdmpDeviceLocalMemorySize :: VkPhysicalDeviceMemoryProperties -> VkDeviceSize
 pdmpDeviceLocalMemorySize memoryProperties =
