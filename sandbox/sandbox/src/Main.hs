@@ -419,6 +419,25 @@ resourceMain = do
       )
     ioPutStrLn "Swapchain image views created."
 
+    swapchainImageCount <- fromIntegral . rangeSize <$> getBounds swapchainImagesArray
+
+    descriptorPool <-
+      allocateAcquireVk_ (descriptorPoolResource device) $
+      createVk $
+      initStandardDescriptorPoolCreateInfo &*
+      set @"flags" zeroBits &*
+      set @"maxSets" swapchainImageCount &*
+      setListCountAndRef @"poolSizeCount" @"pPoolSizes" (
+        createVk <$> [
+          set @"type" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+          set @"descriptorCount" swapchainImageCount,
+
+          set @"type" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
+          set @"descriptorCount" swapchainImageCount
+        ]
+      )
+    ioPutStrLn "Descriptor pool created."
+
     return False
 
   return ()
@@ -473,6 +492,15 @@ instance PrimBytes Vertex
 
 svertex :: Vec2f -> Vec2f -> Scalar Vertex
 svertex = S .: Vertex
+
+data UniformBufferObject =
+  UniformBufferObject {
+    uboModel :: Mat44f,
+    uboView :: Mat44f,
+    uboProj :: Mat44f
+  } deriving (Eq, Show, Generic)
+
+instance PrimBytes UniformBufferObject
 
 data FrameSync =
   FrameSync {
@@ -1007,6 +1035,14 @@ swapchainResource device = simpleVkaResource (vkCreateSwapchainKHR device) (vkDe
 initStandardSwapchainCreateInfo :: CreateVkStruct VkSwapchainCreateInfoKHR '["sType", "pNext"] ()
 initStandardSwapchainCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR &*
+  set @"pNext" VK_NULL
+
+descriptorPoolResource :: VkDevice -> VkaResource VkDescriptorPoolCreateInfo VkDescriptorPool
+descriptorPoolResource device = simpleVkaResource (vkCreateDescriptorPool device) (vkDestroyDescriptorPool device) "vkCCreateDescriptorPool" [VK_SUCCESS]
+
+initStandardDescriptorPoolCreateInfo :: CreateVkStruct VkDescriptorPoolCreateInfo '["sType", "pNext"] ()
+initStandardDescriptorPoolCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO &*
   set @"pNext" VK_NULL
 
 executeCommands :: (MonadUnliftIO m, MonadFail m) => VkDevice -> VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
