@@ -6,7 +6,8 @@ module Data.Array.MArray.Local (
   produceAssocs,
   produceElems,
   listAssocs,
-  listElems
+  listElems,
+  getArraySize
 ) where
 
 import Data.Array.Base
@@ -29,3 +30,6 @@ listElems = fmap snd . listAssocs
 
 produceElems :: forall a i e m. (Monad m, MArray a e m, Ix i) => a i e -> Producer e m ()
 produceElems = enumerate . listElems
+
+getArraySize :: forall a i e m. (Monad m, MArray a e m, Ix i) => a i e -> m Int
+getArraySize = fmap rangeSize . getBounds

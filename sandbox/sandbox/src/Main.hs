@@ -150,11 +150,11 @@ resourceMain = do
   ioPutStrLn "Vulkan debug callback registered."
 #endif
 
-  physicalDevicesArray <- getVkArray (vkaEnumeratePhysicalDevices vulkanInstance)
+  physicalDeviceArray <- getVkArray (vkaEnumeratePhysicalDevices vulkanInstance)
 
   (physicalDevice, physicalDeviceProperties, physicalDeviceMemoryProperties) <-
     liftIO $
-    getElems physicalDevicesArray >>=
+    getElems physicalDeviceArray >>=
     mapM (\pd ->
       liftM2 (pd,,)
         (getVk . vkGetPhysicalDeviceProperties $ pd)
@@ -320,8 +320,8 @@ resourceMain = do
     (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
 
     surfaceCapabilities <- getVk $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
-    surfaceFormatsArray <- getVkArray $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
-    surfacePresentModesArray <- getVkArray $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
+    surfaceFormatArray <- getVkArray $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
+    surfacePresentModeArray <- getVkArray $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
 
     let
       swapchainImageFormat = VK_FORMAT_B8G8R8A8_UNORM
@@ -334,7 +334,7 @@ resourceMain = do
     -- Generally I will want to pick the "best" format according to some criteria.
     -- However, I don't know how those criteria would even look.  So for now, just
     -- require some ideal format to be supported, and fail if it isn't.
-    liftIO $ whenM (swapchainSurfaceFormat `P.notElem` produceElems surfaceFormatsArray) (throwAppEx "Required surface format not supported by device.")
+    liftIO $ whenM (swapchainSurfaceFormat `P.notElem` produceElems surfaceFormatArray) (throwAppEx "Required surface format not supported by device.")
 
     -- FIFO mode is always supported, but mailbox mode is preferred if available
     -- because it's lower latency.  We don't want immediate mode, because we have
@@ -342,7 +342,7 @@ resourceMain = do
     swapchainPresentMode <-
       liftIO $
       fromMaybe VK_PRESENT_MODE_FIFO_KHR <$>
-      P.find (== VK_PRESENT_MODE_MAILBOX_KHR) (produceElems surfacePresentModesArray)
+      P.find (== VK_PRESENT_MODE_MAILBOX_KHR) (produceElems surfacePresentModeArray)
 
     swapchain <-
       allocateAcquireVk_ (swapchainResource device) $
@@ -390,11 +390,11 @@ resourceMain = do
       set @"oldSwapchain" VK_NULL
     ioPutStrLn "Swapchain created."
 
-    swapchainImagesArray <- getVkArray $ vkaGetSwapchainImagesKHR device swapchain
+    swapchainImageArray <- getVkArray $ vkaGetSwapchainImagesKHR device swapchain
 
     swapchainImageViews <-
       P.toListM $
-      produceElems swapchainImagesArray >->
+      produceElems swapchainImageArray >->
       P.mapM (\image ->
         allocateAcquireVk_ (imageViewResource device) $
         createVk $
@@ -419,24 +419,33 @@ resourceMain = do
       )
     ioPutStrLn "Swapchain image views created."
 
-    swapchainImageCount <- fromIntegral . rangeSize <$> getBounds swapchainImagesArray
+    swapchainImageCount@(fromIntegral -> swapchainImageCountWord32) <- fromIntegral <$> getArraySize swapchainImageArray
 
     descriptorPool <-
       allocateAcquireVk_ (descriptorPoolResource device) $
       createVk $
       initStandardDescriptorPoolCreateInfo &*
       set @"flags" zeroBits &*
-      set @"maxSets" swapchainImageCount &*
+      set @"maxSets" swapchainImageCountWord32 &*
       setListCountAndRef @"poolSizeCount" @"pPoolSizes" (
         createVk <$> [
           set @"type" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
-          set @"descriptorCount" swapchainImageCount,
+          set @"descriptorCount" swapchainImageCountWord32,
 
           set @"type" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
-          set @"descriptorCount" swapchainImageCount
+          set @"descriptorCount" swapchainImageCountWord32
         ]
       )
     ioPutStrLn "Descriptor pool created."
+
+    descriptorSetArray <-
+      liftIO $
+      allocateDescriptorSets device $
+      createVk $
+      initStandardDescriptorSetAllocateInfo &*
+      set @"descriptorPool" descriptorPool &*
+      setListCountAndRef @"descriptorSetCount" @"pSetLayouts" (replicate swapchainImageCount descriptorSetLayout)
+    ioPutStrLn "Descriptor sets allocated."
 
     return False
 
@@ -973,6 +982,41 @@ initPrimaryCommandBufferBeginInfo :: CreateVkStruct VkCommandBufferBeginInfo '["
 initPrimaryCommandBufferBeginInfo =
   initStandardCommandBufferBeginInfo &*
   set @"pInheritanceInfo" VK_NULL
+
+-- Warning: This will free the descriptor sets at the end of the ResourceT scope.  Only use this if the descriptor
+-- pool was created with the VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT flag set.  If you don't have that
+-- set, use allocateDescriptorSets instead.
+allocatedDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> Acquire (StorableArray Word32 VkDescriptorSet)
+allocatedDescriptorSets device allocateInfo =
+  allocateDescriptorSets device allocateInfo
+  `mkAcquire`
+  if descriptorSetCount > 0 then
+    \descriptorSetArray ->
+      void $ withStorableArray descriptorSetArray (vkFreeDescriptorSets device descriptorPool descriptorSetCount) &
+        onVkFailureThrow "vkFreeDescriptorSets" [VK_SUCCESS]
+  else
+    const $ return ()
+
+  where
+    descriptorSetCount = getField @"descriptorSetCount" allocateInfo
+    descriptorPool = getField @"descriptorPool" allocateInfo
+
+allocateDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (StorableArray Word32 VkDescriptorSet)
+allocateDescriptorSets device allocateInfo = do
+  array <- newArray_ (0, descriptorSetCount-1)
+  when (descriptorSetCount > 0) $
+    withPtr allocateInfo $ \allocateInfoPtr ->
+      void $ withStorableArray array (vkAllocateDescriptorSets device allocateInfoPtr) &
+        onVkFailureThrow "vkAllocateDescriptorSets" [VK_SUCCESS]
+  return array
+
+  where
+    descriptorSetCount = getField @"descriptorSetCount" allocateInfo
+
+initStandardDescriptorSetAllocateInfo :: CreateVkStruct VkDescriptorSetAllocateInfo '["sType", "pNext"] ()
+initStandardDescriptorSetAllocateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO &*
+  set @"pNext" VK_NULL
 
 vkaQueueWaitIdle :: VkQueue -> IO ()
 vkaQueueWaitIdle queue = void $ vkQueueWaitIdle queue & onVkFailureThrow "vkQueueWaitIdle" [VK_SUCCESS]
