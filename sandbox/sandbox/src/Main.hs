@@ -36,7 +36,6 @@ import Control.Monad.Reader
 import Control.Monad.Trans.Resource
 import Data.Acquire.Local
 import Data.Array.Base as DAB
-import Data.Array.MArray.Local
 import Data.Array.Storable
 import Data.Array.Unsafe
 import Data.Bits.Local
@@ -78,9 +77,6 @@ import Graphics.Vulkan.Marshal.Create.DataFrame
 import Numeric.DataFrame as DF
 import Numeric.Dimensions
 import Numeric.PrimBytes
-
-import Pipes
-import qualified Pipes.Prelude.Local as P
 
 import Safe.Foldable
 import System.Clock
@@ -154,8 +150,7 @@ resourceMain = do
 
   (physicalDevice, physicalDeviceProperties, physicalDeviceMemoryProperties) <-
     liftIO $
-    getElems physicalDeviceArray >>=
-    mapM (\pd ->
+    forM (vkaElems physicalDeviceArray) (\pd ->
       liftM2 (pd,,)
         (getVk . vkGetPhysicalDeviceProperties $ pd)
         (getVk . vkGetPhysicalDeviceMemoryProperties $ pd)
@@ -185,7 +180,6 @@ resourceMain = do
   physicalDeviceQueueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
 
   qfis@[graphicsQfi, computeQfi, transferQfi, presentQfi] <-
-    liftIO $
     pickQueueFamilyIndexCombo [
       (
         return . someAreSet VK_QUEUE_GRAPHICS_BIT . getField @"queueFlags" . snd,
@@ -336,15 +330,12 @@ resourceMain = do
     -- Generally I will want to pick the "best" format according to some criteria.
     -- However, I don't know how those criteria would even look.  So for now, just
     -- require some ideal format to be supported, and fail if it isn't.
-    liftIO $ whenM (swapchainSurfaceFormat `P.notElem` produceElems surfaceFormatArray) (throwAppEx "Required surface format not supported by device.")
+    when (swapchainSurfaceFormat `notElem` vkaElems surfaceFormatArray) (throwAppEx "Required surface format not supported by device.")
 
     -- FIFO mode is always supported, but mailbox mode is preferred if available
     -- because it's lower latency.  We don't want immediate mode, because we have
     -- no need to present so quickly that there is tearing.
-    swapchainPresentMode <-
-      liftIO $
-      fromMaybe VK_PRESENT_MODE_FIFO_KHR <$>
-      P.find (== VK_PRESENT_MODE_MAILBOX_KHR) (produceElems surfacePresentModeArray)
+    let swapchainPresentMode = fromMaybe VK_PRESENT_MODE_FIFO_KHR $ find (== VK_PRESENT_MODE_MAILBOX_KHR) (vkaElems surfacePresentModeArray)
 
     swapchain <-
       allocateAcquireVk_ (swapchainResource device) $
@@ -395,9 +386,7 @@ resourceMain = do
     swapchainImageArray <- getVkArray $ vkaGetSwapchainImagesKHR device swapchain
 
     swapchainImageViews <-
-      P.toListM $
-      produceElems swapchainImageArray >->
-      P.mapM (\image ->
+      forM (vkaElems swapchainImageArray) $ \image ->
         allocateAcquireVk_ (imageViewResource device) $
         createVk $
         initStandardImageViewCreateInfo &*
@@ -418,10 +407,9 @@ resourceMain = do
           set @"baseArrayLayer" 0 &*
           set @"layerCount" 1
         )
-      )
     ioPutStrLn "Swapchain image views created."
 
-    swapchainImageCount@(fromIntegral -> swapchainImageCountWord32) <- fromIntegral <$> getArraySize swapchainImageArray
+    let swapchainImageCount@(fromIntegral -> swapchainImageCountWord32) = fromIntegral $ vkaNumElements swapchainImageArray
 
     (uniformBuffers, uniformBufferMemories) <-
       fmap unzip . replicateM swapchainImageCount $
@@ -454,42 +442,44 @@ resourceMain = do
       setListCountAndRef @"descriptorSetCount" @"pSetLayouts" (replicate swapchainImageCount descriptorSetLayout)
     ioPutStrLn "Descriptor sets allocated."
 
-    descriptorSetWrites <-
-      P.toListM $
-      for (P.zip (each uniformBuffers) (produceElems descriptorSetArray)) $ \(uniformBuffer, descriptorSet) ->
-      each $ createVk <$> [
-        initStandardWriteDescriptorSet &*
-        set @"dstSet" descriptorSet &*
-        set @"dstBinding" 0 &*
-        set @"dstArrayElement" 0 &*
-        set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
-        set @"descriptorCount" 1 &*
-        setListRef @"pBufferInfo" [
-          createVk $
-          set @"buffer" uniformBuffer &*
-          set @"offset" 0 &*
-          set @"range" (fromIntegral $ bSizeOf @UniformBufferObject undefined)
-        ] &*
-        set @"pImageInfo" VK_NULL &*
-        set @"pTexelBufferView" VK_NULL,
+    liftIO $
+      vkaUpdateDescriptorSets device
+        (
+          zip uniformBuffers (vkaElems descriptorSetArray) >>= \(uniformBuffer, descriptorSet) ->
+          createVk <$> [
+            initStandardWriteDescriptorSet &*
+            set @"dstSet" descriptorSet &*
+            set @"dstBinding" 0 &*
+            set @"dstArrayElement" 0 &*
+            set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+            set @"descriptorCount" 1 &*
+            setListRef @"pBufferInfo" [
+              createVk $
+              set @"buffer" uniformBuffer &*
+              set @"offset" 0 &*
+              set @"range" (fromIntegral $ bSizeOf @UniformBufferObject undefined)
+            ] &*
+            set @"pImageInfo" VK_NULL &*
+            set @"pTexelBufferView" VK_NULL,
 
-        initStandardWriteDescriptorSet &*
-        set @"dstSet" descriptorSet &*
-        set @"dstBinding" 1 &*
-        set @"dstArrayElement" 0 &*
-        set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
-        set @"descriptorCount" 1 &*
-        set @"pBufferInfo" VK_NULL &*
-        setListRef @"pImageInfo" [
-          createVk $
-          set @"imageLayout" VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &*
-          set @"imageView" textureImageView &*
-          set @"sampler" textureSampler
-        ] &*
-        set @"pTexelBufferView" VK_NULL
-      ]
+            initStandardWriteDescriptorSet &*
+            set @"dstSet" descriptorSet &*
+            set @"dstBinding" 1 &*
+            set @"dstArrayElement" 0 &*
+            set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
+            set @"descriptorCount" 1 &*
+            set @"pBufferInfo" VK_NULL &*
+            setListRef @"pImageInfo" [
+              createVk $
+              set @"imageLayout" VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &*
+              set @"imageView" textureImageView &*
+              set @"sampler" textureSampler
+            ] &*
+            set @"pTexelBufferView" VK_NULL
+          ]
+        )
+        []
 
-    liftIO $ vkaUpdateDescriptorSets device descriptorSetWrites []
     ioPutStrLn "Descriptor sets written"
 
     return False
@@ -1012,8 +1002,9 @@ initStandardSamplerCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO &*
   set @"pNext" VK_NULL
 
-allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (StorableArray Word32 VkCommandBuffer)
+allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (VkaIArray VkCommandBuffer)
 allocatedCommandBuffers device allocateInfo =
+  fmap VkaIArray $
   do
     array <- newArray_ (0, commandBufferCount-1)
     when (commandBufferCount > 0) $
@@ -1062,9 +1053,10 @@ initPrimaryCommandBufferBeginInfo =
 -- Warning: This will free the descriptor sets at the end of the ResourceT scope.  Only use this if the descriptor
 -- pool was created with the VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT flag set.  If you don't have that
 -- set, use allocateDescriptorSets instead.
-allocatedDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> Acquire (StorableArray Word32 VkDescriptorSet)
+allocatedDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> Acquire (VkaIArray VkDescriptorSet)
 allocatedDescriptorSets device allocateInfo =
-  allocateDescriptorSets device allocateInfo
+  fmap VkaIArray $
+  allocateDescriptorSetsSA device allocateInfo
   `mkAcquire`
   if descriptorSetCount > 0 then
     \descriptorSetArray ->
@@ -1077,8 +1069,11 @@ allocatedDescriptorSets device allocateInfo =
     descriptorSetCount = getField @"descriptorSetCount" allocateInfo
     descriptorPool = getField @"descriptorPool" allocateInfo
 
-allocateDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (StorableArray Word32 VkDescriptorSet)
-allocateDescriptorSets device allocateInfo = do
+allocateDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (VkaIArray VkDescriptorSet)
+allocateDescriptorSets device allocateInfo = VkaIArray <$> allocateDescriptorSetsSA device allocateInfo
+
+allocateDescriptorSetsSA :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (StorableArray Word32 VkDescriptorSet)
+allocateDescriptorSetsSA device allocateInfo = do
   array <- newArray_ (0, descriptorSetCount-1)
   when (descriptorSetCount > 0) $
     withPtr allocateInfo $ \allocateInfoPtr ->
@@ -1174,7 +1169,7 @@ initStandardSwapchainCreateInfo =
   set @"pNext" VK_NULL
 
 descriptorPoolResource :: VkDevice -> VkaResource VkDescriptorPoolCreateInfo VkDescriptorPool
-descriptorPoolResource device = simpleVkaResource (vkCreateDescriptorPool device) (vkDestroyDescriptorPool device) "vkCCreateDescriptorPool" [VK_SUCCESS]
+descriptorPoolResource device = simpleVkaResource (vkCreateDescriptorPool device) (vkDestroyDescriptorPool device) "vkCreateDescriptorPool" [VK_SUCCESS]
 
 initStandardDescriptorPoolCreateInfo :: CreateVkStruct VkDescriptorPoolCreateInfo '["sType", "pNext"] ()
 initStandardDescriptorPoolCreateInfo =
@@ -1184,14 +1179,13 @@ initStandardDescriptorPoolCreateInfo =
 executeCommands :: (MonadUnliftIO m, MonadFail m) => VkDevice -> VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
 executeCommands device commandPool submissionQueue fillCommandBuffer = runResourceT $ do
   [commandBuffer] <-
-    liftIO . getElems =<< (
-      allocateAcquire_ $ allocatedCommandBuffers device $
-      createVk $
-      initStandardCommandBufferAllocateInfo &*
-      set @"commandPool" commandPool &*
-      set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
-      set @"commandBufferCount" 1
-    )
+    fmap vkaElems $
+    allocateAcquire_ $ allocatedCommandBuffers device $
+    createVk $
+    initStandardCommandBufferAllocateInfo &*
+    set @"commandPool" commandPool &*
+    set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
+    set @"commandBufferCount" 1
 
   result <-
     with_ (
@@ -1523,9 +1517,20 @@ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface =
   vkGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface &
   onGetterFailureThrow "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" [VK_SUCCESS]
 
+newtype VkaIArray vk = VkaIArray { unVkaIArray :: StorableArray Word32 vk }
+
+vkaNumElements :: Storable vk => VkaIArray vk -> Word32
+vkaNumElements = fromIntegral . unsafePerformIO . getNumElements . unVkaIArray
+
+vkaElems :: Storable vk => VkaIArray vk -> [vk]
+vkaElems = unsafePerformIO . getElems . unVkaIArray
+
+vkaAssocs :: Storable vk => VkaIArray vk -> [(Word32, vk)]
+vkaAssocs = unsafePerformIO . getAssocs . unVkaIArray
+
 type VkaArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
 
-getVkArrayWithResult :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (r, StorableArray Word32 vk)
+getVkArrayWithResult :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (r, VkaIArray vk)
 getVkArrayWithResult fillArray =
   liftIO $
   alloca $ \countPtr -> do
@@ -1535,11 +1540,11 @@ getVkArrayWithResult fillArray =
     array <- newArray_ (0, count-1)
     if count > 0 then do
       fillArrayResult <- withStorableArray array fillArray'
-      return (fillArrayResult, array)
+      return (fillArrayResult, VkaIArray array)
     else
-      return (getCountResult, array)
+      return (getCountResult, VkaIArray array)
 
-getVkArray :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (StorableArray Word32 vk)
+getVkArray :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (VkaIArray vk)
 getVkArray = fmap snd . getVkArrayWithResult
 
 -- When a VkaArrayFiller is used with getVkArray[WithResult], VK_INCOMPLETE should never be returned, since
@@ -1571,10 +1576,10 @@ pdmpDeviceLocalMemorySize memoryProperties =
     isDeviceLocal = (zeroBits /=) . (VK_MEMORY_HEAP_DEVICE_LOCAL_BIT .&.) . getField @"flags"
     memoryHeapCount = fromIntegral $ getField @"memoryHeapCount" memoryProperties
 
-pickQueueFamilyIndexCombo :: forall i. Ix i => [QualificationM IO (i, VkQueueFamilyProperties)] -> StorableArray i VkQueueFamilyProperties -> IO [i]
+pickQueueFamilyIndexCombo :: Monad m => [QualificationM m (Word32, VkQueueFamilyProperties)] -> VkaIArray VkQueueFamilyProperties -> m [Word32]
 pickQueueFamilyIndexCombo qualifications qfpArray =
   fmap (fmap fst . comboWithFewestDistinct) . sequence $
-  P.picksByM <$> qualifications <*> pure (produceAssocs qfpArray)
+  picksByM <$> qualifications <*> pure (vkaAssocs qfpArray)
 
 getFieldArrayAssocs :: forall fname a. CanReadFieldArray fname a => a -> [(Int, FieldType fname a)]
 getFieldArrayAssocs a = [0 .. fieldArrayLength @fname @a] <&> \i -> (i, getFieldArrayUnsafe @fname i a)

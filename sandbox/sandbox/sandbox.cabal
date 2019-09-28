@@ -18,9 +18,7 @@ executable sandbox
   main-is: Main.hs
   other-modules:
     Data.Acquire.Local
-    Data.Array.MArray.Local
     Data.Bits.Local
-    Pipes.Prelude.Local
     Prelude.Local
   ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches -fno-ignore-asserts
   build-depends:
@@ -35,7 +33,6 @@ executable sandbox
     ktx-rw,
     monad-loops,
     mtl,
-    pipes,
     reflection,
     resourcet,
     safe,
