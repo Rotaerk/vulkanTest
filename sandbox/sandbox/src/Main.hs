@@ -1013,6 +1013,22 @@ allocateDescriptorSets device allocateInfo = do
   where
     descriptorSetCount = getField @"descriptorSetCount" allocateInfo
 
+vkaUpdateDescriptorSets :: VkDevice -> [VkWriteDescriptorSet] -> [VkCopyDescriptorSet] -> IO ()
+vkaUpdateDescriptorSets device writes copies =
+  withArray writes $ \writesPtr ->
+  withArray copies $ \copiesPtr ->
+    vkUpdateDescriptorSets device (lengthNum writes) writesPtr (lengthNum copies) copiesPtr
+
+initStandardWriteDescriptorSet :: CreateVkStruct VkWriteDescriptorSet '["sType", "pNext"] ()
+initStandardWriteDescriptorSet =
+  set @"sType" VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET &*
+  set @"pNext" VK_NULL
+
+initStandardCopyDescriptorSet :: CreateVkStruct VkCopyDescriptorSet '["sType", "pNext"] ()
+initStandardCopyDescriptorSet =
+  set @"sType" VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET &*
+  set @"pNext" VK_NULL
+
 initStandardDescriptorSetAllocateInfo :: CreateVkStruct VkDescriptorSetAllocateInfo '["sType", "pNext"] ()
 initStandardDescriptorSetAllocateInfo =
   set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO &*
