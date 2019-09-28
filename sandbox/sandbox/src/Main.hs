@@ -454,6 +454,44 @@ resourceMain = do
       setListCountAndRef @"descriptorSetCount" @"pSetLayouts" (replicate swapchainImageCount descriptorSetLayout)
     ioPutStrLn "Descriptor sets allocated."
 
+    descriptorSetWrites <-
+      P.toListM $
+      for (P.zip (each uniformBuffers) (produceElems descriptorSetArray)) $ \(uniformBuffer, descriptorSet) ->
+      each $ createVk <$> [
+        initStandardWriteDescriptorSet &*
+        set @"dstSet" descriptorSet &*
+        set @"dstBinding" 0 &*
+        set @"dstArrayElement" 0 &*
+        set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
+        set @"descriptorCount" 1 &*
+        setListRef @"pBufferInfo" [
+          createVk $
+          set @"buffer" uniformBuffer &*
+          set @"offset" 0 &*
+          set @"range" (fromIntegral $ bSizeOf @UniformBufferObject undefined)
+        ] &*
+        set @"pImageInfo" VK_NULL &*
+        set @"pTexelBufferView" VK_NULL,
+
+        initStandardWriteDescriptorSet &*
+        set @"dstSet" descriptorSet &*
+        set @"dstBinding" 1 &*
+        set @"dstArrayElement" 0 &*
+        set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
+        set @"descriptorCount" 1 &*
+        set @"pBufferInfo" VK_NULL &*
+        setListRef @"pImageInfo" [
+          createVk $
+          set @"imageLayout" VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &*
+          set @"imageView" textureImageView &*
+          set @"sampler" textureSampler
+        ] &*
+        set @"pTexelBufferView" VK_NULL
+      ]
+
+    liftIO $ vkaUpdateDescriptorSets device descriptorSetWrites []
+    ioPutStrLn "Descriptor sets written"
+
     return False
 
   return ()
