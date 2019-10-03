@@ -479,8 +479,21 @@ resourceMain = do
           ]
         )
         []
-
     ioPutStrLn "Descriptor sets written"
+
+    -- Per nVidia, we should prefer a 24-bit depth format, and we should prefer packed.
+    -- Source: https://devblogs.nvidia.com/vulkan-dos-donts/
+    --
+    -- I might build this list of preferred formats differently depending on the GPU.
+    -- (AMD and Intel might have their own recommendations.)
+    depthFormat <-
+      [VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D24_UNORM_S8_UINT] &
+      findM (
+        fmap (allAreSet VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT . getField @"optimalTilingFeatures") .
+        getVk . vkGetPhysicalDeviceFormatProperties physicalDevice
+      ) &
+      fromMaybeM (throwAppEx "None of the desired depth-bearing formats support being used by a depth attachment on this device.")
+    ioPutStrLn $ "Depth format chosen: " ++ show depthFormat
 
     return False
 
@@ -1280,10 +1293,10 @@ depthBearingFormats :: Set VkFormat
 depthBearingFormats =
   Set.fromList [
     VK_FORMAT_D16_UNORM,
-    VK_FORMAT_X8_D24_UNORM_PACK32,
-    VK_FORMAT_D32_SFLOAT,
     VK_FORMAT_D16_UNORM_S8_UINT,
+    VK_FORMAT_X8_D24_UNORM_PACK32,
     VK_FORMAT_D24_UNORM_S8_UINT,
+    VK_FORMAT_D32_SFLOAT,
     VK_FORMAT_D32_SFLOAT_S8_UINT
   ]
 
