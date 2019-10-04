@@ -479,9 +479,9 @@ resourceMain = do
           ]
         )
         []
-    ioPutStrLn "Descriptor sets written"
+    ioPutStrLn "Descriptor sets written."
 
-    -- Per nVidia, we should prefer a 24-bit depth format, and we should prefer packed.
+    -- Per nVidia, for optimal performance, we should prefer a 24-bit depth format, and we should prefer packed.
     -- Source: https://devblogs.nvidia.com/vulkan-dos-donts/
     --
     -- I might build this list of preferred formats differently depending on the GPU.
@@ -492,8 +492,66 @@ resourceMain = do
         fmap (allAreSet VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT . getField @"optimalTilingFeatures") .
         getVk . vkGetPhysicalDeviceFormatProperties physicalDevice
       ) &
-      fromMaybeM (throwAppEx "None of the desired depth-bearing formats support being used by a depth attachment on this device.")
-    ioPutStrLn $ "Depth format chosen: " ++ show depthFormat
+      fromMaybeM (throwAppEx "No 24-bit depth formats support being used by a depth attachment on this device.")
+    ioPutStrLn $ "Depth format chosen: " ++ show depthFormat ++ "."
+
+    renderPass <-
+      allocateAcquireVk_ (renderPassResource device) $
+      createVk $
+      initStandardRenderPassCreateInfo &*
+      setListCountAndRef @"attachmentCount" @"pAttachments" (
+        createVk <$> [
+          -- Attachment 0: Color buffer
+          set @"format" swapchainImageFormat &*
+          set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+          set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
+          set @"storeOp" VK_ATTACHMENT_STORE_OP_STORE &*
+          set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
+          set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+          set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+          set @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+
+          -- Attachment 1: Depth buffer
+          set @"format" depthFormat &*
+          set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+          set @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR &*
+          set @"storeOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+          set @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE &*
+          set @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE &*
+          set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+          set @"finalLayout" VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        ]
+      ) &*
+      setListCountAndRef @"subpassCount" @"pSubpasses" (
+        createVk <$> [
+          set @"pipelineBindPoint" VK_PIPELINE_BIND_POINT_GRAPHICS &*
+          setListCountAndRef @"colorAttachmentCount" @"pColorAttachments" (
+            createVk <$> [
+              set @"attachment" 0 &*
+              set @"layout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+            ]
+          ) &*
+          setVkRef @"pDepthStencilAttachment" (
+            createVk $
+            set @"attachment" 1 &*
+            set @"layout" VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+          ) &*
+          set @"pResolveAttachments" VK_NULL &*
+          set @"pInputAttachments" VK_NULL &*
+          set @"pPreserveAttachments" VK_NULL
+        ]
+      ) &*
+      setListCountAndRef @"dependencyCount" @"pDependencies" (
+        createVk <$> [
+          set @"srcSubpass" VK_SUBPASS_EXTERNAL &*
+          set @"dstSubpass" 0 &*
+          set @"srcStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
+          set @"srcAccessMask" zeroBits &*
+          set @"dstStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT &*
+          set @"dstAccessMask" (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+        ]
+      )
+    ioPutStrLn "Render pass created."
 
     return False
 
@@ -1188,6 +1246,15 @@ initStandardDescriptorPoolCreateInfo :: CreateVkStruct VkDescriptorPoolCreateInf
 initStandardDescriptorPoolCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO &*
   set @"pNext" VK_NULL
+
+renderPassResource :: VkDevice -> VkaResource VkRenderPassCreateInfo VkRenderPass
+renderPassResource device = simpleVkaResource (vkCreateRenderPass device) (vkDestroyRenderPass device) "vkCreateRenderPass" [VK_SUCCESS]
+
+initStandardRenderPassCreateInfo :: CreateVkStruct VkRenderPassCreateInfo '["sType", "pNext", "flags"] ()
+initStandardRenderPassCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"flags" zeroBits
 
 executeCommands :: (MonadUnliftIO m, MonadFail m) => VkDevice -> VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
 executeCommands device commandPool submissionQueue fillCommandBuffer = runResourceT $ do
