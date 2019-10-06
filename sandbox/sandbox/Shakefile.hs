@@ -31,7 +31,7 @@ shadersSrcDir :: FilePath
 shadersSrcDir = "shaders"
 
 shadersOutDir :: FilePath
-shadersOutDir = shadersSrcDir </> "spv"
+shadersOutDir = "data/shaders"
 
 shaderSrcPathToOutPath :: FilePath -> FilePath
 shaderSrcPathToOutPath srcPath = shadersOutDir </> takeFileName srcPath <.> "spv"

@@ -13,8 +13,9 @@ extra-source-files:
   ChangeLog.md
   shaders/*.vert
   shaders/*.frag
+data-dir: data
 data-files:
-  shaders/spv/*.spv
+  shaders/*.spv
 
 executable sandbox
   hs-source-dirs: src
@@ -22,6 +23,7 @@ executable sandbox
   other-modules:
     Data.Acquire.Local
     Data.Bits.Local
+    Foreign.Marshal.Array.Sized
     Prelude.Local
     Paths_sandbox
   ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches -fno-ignore-asserts
@@ -42,6 +44,7 @@ executable sandbox
     safe,
     typelits-witnesses,
     unliftio,
+    unliftio-core,
     vulkan-api,
 
     base >=4.12 && <4.13

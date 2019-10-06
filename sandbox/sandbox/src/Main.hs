@@ -21,6 +21,8 @@ module Main where
 
 import Prelude.Local
 
+import Paths_sandbox
+
 import qualified Codec.Image.Ktx.Read as KTX
 import qualified Codec.Image.Ktx.VkConstants as KTX
 import Control.Applicative
@@ -34,6 +36,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Loops
 import Control.Monad.Reader
 import Control.Monad.Trans.Resource
+import Control.Monad.IO.Unlift
 import Data.Acquire.Local
 import Data.Array.Base as DAB
 import Data.Array.Storable
@@ -56,6 +59,7 @@ import Foreign.C.String
 import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Array
+import Foreign.Marshal.Array.Sized
 import Foreign.Ptr
 import Foreign.Storable
 
@@ -74,15 +78,16 @@ import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
 
-import Numeric.DataFrame as DF
+import Numeric.DataFrame hiding (sortBy)
+import qualified Numeric.DataFrame as DF
 import Numeric.Dimensions
 import Numeric.PrimBytes
 
 import Safe.Foldable
 import System.Clock
+import System.IO
 import System.IO.Unsafe
 import UnliftIO.Exception
-import UnliftIO.IO
 
 main :: IO ()
 main =
@@ -224,15 +229,16 @@ resourceMain = do
   ioPutStrLn "Vulkan device created."
 
   [(graphicsQueue, graphicsCommandPool), (computeQueue, computeCommandPool), (transferQueue, transferCommandPool), (presentQueue, presentCommandPool)] <-
-    let
-      createCommandPool qfi =
-        allocateAcquireVk_ (commandPoolResource device) $
-        createVk $
-        initStandardCommandPoolCreateInfo &*
-        set @"flags" zeroBits &*
-        set @"queueFamilyIndex" qfi
-    in
-      forM qfis $ \qfi -> liftM2 (,) (getVk $ vkGetDeviceQueue device qfi 0) (createCommandPool qfi)
+    forM qfis $ \qfi ->
+      liftM2 (,)
+        (getVk $ vkGetDeviceQueue device qfi 0)
+        (
+          allocateAcquireVk_ (commandPoolResource device) $
+          createVk $
+          initStandardCommandPoolCreateInfo &*
+          set @"flags" zeroBits &*
+          set @"queueFamilyIndex" qfi
+        )
   ioPutStrLn "Device queues obtained, and corresponding command pools created."
 
   descriptorSetLayout <-
@@ -553,6 +559,23 @@ resourceMain = do
       )
     ioPutStrLn "Render pass created."
 
+    vertShaderModule <- createShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.vert.spv")
+    ioPutStrLn "Vertex shader module created."
+    fragShaderModule <- createShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.frag.spv")
+    ioPutStrLn "Fragment shader module created."
+
+{-
+    [graphicsPipeline] <-
+      liftIO $ vkaElems <$> vkaCreateGraphicsPipelines device VK_NULL_HANDLE (
+        createVk <$> [
+          initStandardGraphicsPipelineCreateInfo &*
+          undefined
+        ]
+      )
+    registerGraphicsPipelineForDestruction_ device graphicsPipeline
+    ioPutStrLn "Graphics pipeline created."
+-}
+
     return False
 
   return ()
@@ -692,7 +715,7 @@ throwVkaExceptionM = throwM . VkaException
 vkaRegisterDebugCallback :: MonadUnliftIO io => VkInstance -> VkDebugReportFlagsEXT -> HS_vkDebugReportCallbackEXT -> ResourceT io ()
 vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
   debugCallbackPtr <- allocateAcquire_ . newFunPtrFrom . newVkDebugReportCallbackEXT $ debugCallback
-  void . allocateAcquire_ . newVk (registeredDebugReportCallbackResource vulkanInstance) $
+  void . allocateAcquireVk_ (registeredDebugReportCallbackResource vulkanInstance) $
     createVk $
     set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
     set @"pNext" VK_NULL &*
@@ -701,10 +724,10 @@ vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
 
 data VkaResource ci vk =
   VkaResource {
-    vkaResource'getCreate :: IO (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult),
-    vkaResource'getDestroy :: IO (vk -> Ptr VkAllocationCallbacks -> IO ()),
-    vkaResource'createName :: String,
-    vkaResource'successResults :: [VkResult]
+    vkr'getCreate :: IO (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult),
+    vkr'getDestroy :: IO (vk -> Ptr VkAllocationCallbacks -> IO ()),
+    vkr'createName :: String,
+    vkr'successResults :: [VkResult]
   }
 
 simpleVkaResource ::
@@ -715,26 +738,33 @@ simpleVkaResource ::
   VkaResource ci vk
 simpleVkaResource create destroy = VkaResource (return create) (return destroy)
 
-newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire (VkResult, vk)
-newVkWithResult (VkaResource getCreate getDestroy functionName successResults) createInfo =
-  liftIO (liftM2 (,) getCreate getDestroy) >>= \(create, destroy) ->
-    (
-      withPtr createInfo $ \createInfoPtr ->
-      alloca $ \vkPtr -> do
-        result <- create createInfoPtr VK_NULL vkPtr & onVkFailureThrow functionName successResults
-        (result,) <$> peek vkPtr
-    )
-    `mkAcquire`
-    \(_, vk) -> destroy vk VK_NULL
+newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO (VkResult, vk)
+newVkWithResult VkaResource{..} createInfo =
+  withPtr createInfo $ \createInfoPtr ->
+  alloca $ \vkPtr -> do
+    create <- vkr'getCreate
+    result <- create createInfoPtr VK_NULL vkPtr & onVkFailureThrow vkr'createName vkr'successResults
+    (result,) <$> peek vkPtr
 
-newVk :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire vk
-newVk vr ci = snd <$> newVkWithResult vr ci
+newVk :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO vk
+newVk = fmap snd .: newVkWithResult
 
-allocateAcquireVk_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m vk
-allocateAcquireVk_ = (allocateAcquire_ .) . newVk
+acquireVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire (VkResult, vk)
+acquireVkWithResult r createInfo =
+  newVkWithResult r createInfo
+  `mkAcquire`
+  \(_, vk) -> do
+    destroy <- vkr'getDestroy r
+    destroy vk VK_NULL
+
+acquireVk :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire vk
+acquireVk = fmap snd .: acquireVkWithResult
 
 allocateAcquireVk :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m (ReleaseKey, vk)
-allocateAcquireVk = (allocateAcquire .) . newVk
+allocateAcquireVk = allocateAcquire .: acquireVk
+
+allocateAcquireVk_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m vk
+allocateAcquireVk_ = allocateAcquire_ .: acquireVk
 
 vulkanInstanceResource :: VkaResource VkInstanceCreateInfo VkInstance
 vulkanInstanceResource = simpleVkaResource vkCreateInstance vkDestroyInstance "vkCreateInstance" [VK_SUCCESS]
@@ -1256,6 +1286,60 @@ initStandardRenderPassCreateInfo =
   set @"pNext" VK_NULL &*
   set @"flags" zeroBits
 
+vkaCreateGraphicsPipelines :: VkDevice -> VkPipelineCache -> [VkGraphicsPipelineCreateInfo] -> IO (VkaIArray VkPipeline)
+vkaCreateGraphicsPipelines device pipelineCache createInfos@(lengthNum -> count) =
+  withArray createInfos $ \createInfosPtr -> do
+    array <- newArray_ (0, count-1)
+    when (count > 0) $
+      void $ withStorableArray array (vkCreateGraphicsPipelines device pipelineCache count createInfosPtr VK_NULL) &
+        onVkFailureThrow "vkCreateGraphicsPipelines" [VK_SUCCESS]
+    return $ VkaIArray array
+
+registerGraphicsPipelineForDestruction :: MonadResource m => VkDevice -> VkPipeline -> m ReleaseKey
+registerGraphicsPipelineForDestruction device pipeline = register $ vkDestroyPipeline device pipeline VK_NULL
+
+registerGraphicsPipelineForDestruction_ :: MonadResource m => VkDevice -> VkPipeline -> m ()
+registerGraphicsPipelineForDestruction_ = void .: registerGraphicsPipelineForDestruction
+
+initStandardGraphicsPipelineCreateInfo :: CreateVkStruct VkGraphicsPipelineCreateInfo '["sType", "pNext"] ()
+initStandardGraphicsPipelineCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO &*
+  set @"pNext" VK_NULL
+
+shaderModuleResource :: VkDevice -> VkaResource VkShaderModuleCreateInfo VkShaderModule
+shaderModuleResource device = simpleVkaResource (vkCreateShaderModule device) (vkDestroyShaderModule device) "vkCreateShaderModule" [VK_SUCCESS]
+
+initStandardShaderModuleCreateInfo :: CreateVkStruct VkShaderModuleCreateInfo '["sType", "pNext", "flags"] ()
+initStandardShaderModuleCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO &*
+  set @"pNext" VK_NULL &*
+  set @"flags" zeroBits
+
+createShaderModuleFromFile :: MonadUnliftIO m => VkDevice -> FilePath -> ResourceT m VkShaderModule
+createShaderModuleFromFile device filePath = runResourceT $ do
+  SizedArray{..} <- fillArrayFromSpirvFile filePath
+  lift $ allocateAcquireVk_ (shaderModuleResource device) $
+    createVk $
+    initStandardShaderModuleCreateInfo &*
+    set @"codeSize" (fromIntegral arraySize) &*
+    set @"pCode" (castPtr arrayPtr)
+
+fillArrayFromSpirvFile :: MonadUnliftIO m => FilePath -> ResourceT m (SizedArray Word8)
+fillArrayFromSpirvFile filePath = runResourceT $ do
+  h <- allocate_ (openBinaryFile filePath ReadMode) hClose
+
+  -- Vulkan requires SPIR-V bytecode to have an alignment of 4 bytes.
+  alignedSize <- liftIO $ alignTo 4 . fromIntegral <$> hFileSize h
+  array <- lift $ allocateAcquire_ (acquireSizedArray @Word8 alignedSize)
+
+  let ptr = arrayPtr array
+
+  liftIO $ do
+    bytesRead <- hGetBuf h ptr alignedSize
+    pokeArray @Word8 (plusPtr ptr bytesRead) $ replicate (alignedSize - bytesRead) 0
+
+  return array
+
 executeCommands :: (MonadUnliftIO m, MonadFail m) => VkDevice -> VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
 executeCommands device commandPool submissionQueue fillCommandBuffer = runResourceT $ do
   [commandBuffer] <-
@@ -1692,6 +1776,12 @@ clamp a b =
     LT -> min b . max a
     GT -> min a . max b
     EQ -> const a
+
+alignTo :: Integral n => n -> n -> n
+alignTo b n =
+  case n `rem` b of
+    0 -> n
+    x -> n + b - x
 
 assertM_ :: Monad m => Bool -> m ()
 assertM_ cond = assert cond (return ())
