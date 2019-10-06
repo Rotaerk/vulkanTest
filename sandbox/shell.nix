@@ -4,11 +4,12 @@ let
   inherit (lib) makeLibraryPath;
   hs = haskell.packages.ghc865;
   tools = [
-    hs.ghc
+    (hs.ghcWithPackages (ps: [ps.shake]))
     hs.cabal-install
     hs.ghcid
     hs.hpack
     vulkan-tools
+    glslang
   ];
   libraries = [
 #    vulkan-headers
