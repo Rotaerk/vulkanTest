@@ -712,6 +712,30 @@ resourceMain = do
     registerGraphicsPipelineForDestruction_ device graphicsPipeline
     ioPutStrLn "Graphics pipeline created."
 
+    (framebufferDepthImage, framebufferDepthImageMemory) <-
+      createBoundImage device physicalDeviceMemoryProperties (
+        return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
+        \_ _ -> return EQ
+      ) $
+      createVk $
+      initStandardImageCreateInfo &*
+      set @"flags" zeroBits &*
+      set @"imageType" VK_IMAGE_TYPE_2D &*
+      set @"format" depthFormat &*
+      setVk @"extent" (
+        set @"width" (fromIntegral . getField @"width" $ swapchainImageExtent) &*
+        set @"height" (fromIntegral . getField @"height" $ swapchainImageExtent) &*
+        set @"depth" 1
+      ) &*
+      set @"mipLevels" 1 &*
+      set @"arrayLayers" 1 &*
+      set @"samples" VK_SAMPLE_COUNT_1_BIT &*
+      set @"tiling" VK_IMAGE_TILING_OPTIMAL &*
+      set @"usage" VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT &*
+      setSharingQueueFamilyIndices [graphicsQfi] &*
+      set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED
+    ioPutStrLn "Framebuffer depth image created."
+
     return False
 
   return ()
