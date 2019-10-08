@@ -558,156 +558,157 @@ resourceMain = do
       )
     ioPutStrLn "Render pass created."
 
-    vertShaderModule <- createShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.vert.spv")
-    ioPutStrLn "Vertex shader module created."
-    fragShaderModule <- createShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.frag.spv")
-    ioPutStrLn "Fragment shader module created."
+    [graphicsPipeline] <- runResourceT $ do
+      vertShaderModule <- createShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.vert.spv")
+      ioPutStrLn "Vertex shader module created."
+      fragShaderModule <- createShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.frag.spv")
+      ioPutStrLn "Fragment shader module created."
 
-    [graphicsPipeline] <-
-      liftIO $ vkaElems <$> vkaCreateGraphicsPipelines device VK_NULL_HANDLE (
-        createVk . (initStandardGraphicsPipelineCreateInfo &*) <$> [
-          setListCountAndRef @"stageCount" @"pStages" (
-            createVk . (
-              initStandardPipelineShaderStageCreateInfo &*
-              set @"flags" zeroBits &*
-              setStrRef @"pName" "main" &*
-              set @"pSpecializationInfo" VK_NULL &*
-            ) <$> [
-              set @"stage" VK_SHADER_STAGE_VERTEX_BIT &*
-              set @"module" vertShaderModule,
+      liftIO $
+        vkaElems <$> vkaCreateGraphicsPipelines device VK_NULL_HANDLE (
+          createVk . (initStandardGraphicsPipelineCreateInfo &*) <$> [
+            setListCountAndRef @"stageCount" @"pStages" (
+              createVk . (
+                initStandardPipelineShaderStageCreateInfo &*
+                set @"flags" zeroBits &*
+                setStrRef @"pName" "main" &*
+                set @"pSpecializationInfo" VK_NULL &*
+              ) <$> [
+                set @"stage" VK_SHADER_STAGE_VERTEX_BIT &*
+                set @"module" vertShaderModule,
 
-              set @"stage" VK_SHADER_STAGE_FRAGMENT_BIT &*
-              set @"module" fragShaderModule
-            ]
-          ) &*
-          setVkRef @"pVertexInputState" (
-            createVk $
-            initStandardPipelineVertexInputStateCreateInfo &*
-            setListCountAndRef @"vertexBindingDescriptionCount" @"pVertexBindingDescriptions" (
-              createVk <$> [
-                set @"binding" 0 &*
-                set @"stride" (fromIntegral $ bSizeOf @SVertex undefined) &*
-                set @"inputRate" VK_VERTEX_INPUT_RATE_VERTEX
+                set @"stage" VK_SHADER_STAGE_FRAGMENT_BIT &*
+                set @"module" fragShaderModule
               ]
             ) &*
-            setListCountAndRef @"vertexAttributeDescriptionCount" @"pVertexAttributeDescriptions" (
-              createVk . (set @"binding" 0 &*) <$> [
-                set @"location" 0 &*
-                set @"format" VK_FORMAT_R32G32_SFLOAT &*
-                set @"offset" (bFieldOffsetOf @"vtxPos" @Vertex undefined),
+            setVkRef @"pVertexInputState" (
+              createVk $
+              initStandardPipelineVertexInputStateCreateInfo &*
+              setListCountAndRef @"vertexBindingDescriptionCount" @"pVertexBindingDescriptions" (
+                createVk <$> [
+                  set @"binding" 0 &*
+                  set @"stride" (fromIntegral $ bSizeOf @SVertex undefined) &*
+                  set @"inputRate" VK_VERTEX_INPUT_RATE_VERTEX
+                ]
+              ) &*
+              setListCountAndRef @"vertexAttributeDescriptionCount" @"pVertexAttributeDescriptions" (
+                createVk . (set @"binding" 0 &*) <$> [
+                  set @"location" 0 &*
+                  set @"format" VK_FORMAT_R32G32_SFLOAT &*
+                  set @"offset" (bFieldOffsetOf @"vtxPos" @Vertex undefined),
 
-                set @"location" 1 &*
-                set @"format" VK_FORMAT_R32G32_SFLOAT &*
-                set @"offset" (bFieldOffsetOf @"vtxTexCoord" @Vertex undefined)
-              ]
-            )
-          ) &*
-          setVkRef @"pInputAssemblyState" (
-            createVk $
-            initStandardPipelineInputAssemblyStateCreateInfo &*
-            set @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &*
-            set @"primitiveRestartEnable" VK_TRUE
-          ) &*
-          setVkRef @"pViewportState" (
-            createVk $
-            initStandardPipelineViewportStateCreateInfo &*
-            setListCountAndRef @"viewportCount" @"pViewports" (
-              createVk <$> [
-                set @"x" 0 &*
-                set @"y" 0 &*
-                set @"width" (fromIntegral . getField @"width" $ swapchainImageExtent) &*
-                set @"height" (fromIntegral . getField @"height" $ swapchainImageExtent) &*
-                set @"minDepth" 0 &*
-                set @"maxDepth" 1
-              ]
+                  set @"location" 1 &*
+                  set @"format" VK_FORMAT_R32G32_SFLOAT &*
+                  set @"offset" (bFieldOffsetOf @"vtxTexCoord" @Vertex undefined)
+                ]
+              )
             ) &*
-            setListCountAndRef @"scissorCount" @"pScissors" (
-              createVk <$> [
-                setVk @"offset" (set @"x" 0 &* set @"y" 0) &*
-                set @"extent" swapchainImageExtent
-              ]
-            )
-          ) &*
-          setVkRef @"pRasterizationState" (
-            createVk $
-            initStandardPipelineRasterizationStateCreateInfo &*
-            set @"depthClampEnable" VK_FALSE &*
-            set @"rasterizerDiscardEnable" VK_FALSE &*
-            set @"polygonMode" VK_POLYGON_MODE_FILL &*
-            set @"lineWidth" 1 &*
-            set @"cullMode" VK_CULL_MODE_BACK_BIT &*
-            set @"frontFace" VK_FRONT_FACE_COUNTER_CLOCKWISE &*
-            set @"depthBiasEnable" VK_FALSE &*
-            set @"depthBiasConstantFactor" 0 &*
-            set @"depthBiasClamp" 0 &*
-            set @"depthBiasSlopeFactor" 0
-          ) &*
-          setVkRef @"pMultisampleState" (
-            createVk $
-            initStandardPipelineMultisampleStateCreateInfo &*
-            set @"sampleShadingEnable" VK_FALSE &*
-            set @"rasterizationSamples" VK_SAMPLE_COUNT_1_BIT &*
-            set @"minSampleShading" 1 &*
-            set @"pSampleMask" VK_NULL &*
-            set @"alphaToCoverageEnable" VK_FALSE &*
-            set @"alphaToOneEnable" VK_FALSE
-          ) &*
-          setVkRef @"pDepthStencilState" (
-            createVk $
-            initStandardPipelineDepthStencilStateCreateInfo &*
-            set @"depthTestEnable" VK_TRUE &*
-            set @"depthWriteEnable" VK_TRUE &*
-            set @"depthCompareOp" VK_COMPARE_OP_LESS &*
-            set @"depthBoundsTestEnable" VK_FALSE &*
-            set @"minDepthBounds" 0 &*
-            set @"maxDepthBounds" 1 &*
-            set @"stencilTestEnable" VK_FALSE &*
-            setVk @"front" (
-              set @"failOp" VK_STENCIL_OP_KEEP &*
-              set @"passOp" VK_STENCIL_OP_KEEP &*
-              set @"depthFailOp" VK_STENCIL_OP_KEEP &*
-              set @"compareOp" VK_COMPARE_OP_NEVER &*
-              set @"compareMask" 0 &*
-              set @"writeMask" 0 &*
-              set @"reference" 0
+            setVkRef @"pInputAssemblyState" (
+              createVk $
+              initStandardPipelineInputAssemblyStateCreateInfo &*
+              set @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &*
+              set @"primitiveRestartEnable" VK_TRUE
             ) &*
-            setVk @"back" (
-              set @"failOp" VK_STENCIL_OP_KEEP &*
-              set @"passOp" VK_STENCIL_OP_KEEP &*
-              set @"depthFailOp" VK_STENCIL_OP_KEEP &*
-              set @"compareOp" VK_COMPARE_OP_NEVER &*
-              set @"compareMask" 0 &*
-              set @"writeMask" 0 &*
-              set @"reference" 0
-            )
-          ) &*
-          setVkRef @"pColorBlendState" (
-            createVk $
-            initStandardPipelineColorBlendStateCreateInfo &*
-            set @"logicOpEnable" VK_FALSE &*
-            set @"logicOp" VK_LOGIC_OP_COPY &*
-            setListCountAndRef @"attachmentCount" @"pAttachments" (
-              createVk <$> [
-                set @"colorWriteMask" (VK_COLOR_COMPONENT_R_BIT .|. VK_COLOR_COMPONENT_G_BIT .|. VK_COLOR_COMPONENT_B_BIT .|. VK_COLOR_COMPONENT_A_BIT) &*
-                set @"blendEnable" VK_FALSE &*
-                set @"srcColorBlendFactor" VK_BLEND_FACTOR_ONE &*
-                set @"dstColorBlendFactor" VK_BLEND_FACTOR_ZERO &*
-                set @"colorBlendOp" VK_BLEND_OP_ADD &*
-                set @"srcAlphaBlendFactor" VK_BLEND_FACTOR_ONE &*
-                set @"dstAlphaBlendFactor" VK_BLEND_FACTOR_ZERO &*
-                set @"alphaBlendOp" VK_BLEND_OP_ADD
-              ]
+            setVkRef @"pViewportState" (
+              createVk $
+              initStandardPipelineViewportStateCreateInfo &*
+              setListCountAndRef @"viewportCount" @"pViewports" (
+                createVk <$> [
+                  set @"x" 0 &*
+                  set @"y" 0 &*
+                  set @"width" (fromIntegral . getField @"width" $ swapchainImageExtent) &*
+                  set @"height" (fromIntegral . getField @"height" $ swapchainImageExtent) &*
+                  set @"minDepth" 0 &*
+                  set @"maxDepth" 1
+                ]
+              ) &*
+              setListCountAndRef @"scissorCount" @"pScissors" (
+                createVk <$> [
+                  setVk @"offset" (set @"x" 0 &* set @"y" 0) &*
+                  set @"extent" swapchainImageExtent
+                ]
+              )
             ) &*
-            setVec @"blendConstants" (vec4 0 0 0 0)
-          ) &*
-          set @"pDynamicState" VK_NULL &*
-          set @"renderPass" renderPass &*
-          set @"subpass" 0 &*
-          set @"layout" pipelineLayout &*
-          set @"basePipelineHandle" VK_NULL_HANDLE &*
-          set @"basePipelineIndex" (-1)
-        ]
-      )
+            setVkRef @"pRasterizationState" (
+              createVk $
+              initStandardPipelineRasterizationStateCreateInfo &*
+              set @"depthClampEnable" VK_FALSE &*
+              set @"rasterizerDiscardEnable" VK_FALSE &*
+              set @"polygonMode" VK_POLYGON_MODE_FILL &*
+              set @"lineWidth" 1 &*
+              set @"cullMode" VK_CULL_MODE_BACK_BIT &*
+              set @"frontFace" VK_FRONT_FACE_COUNTER_CLOCKWISE &*
+              set @"depthBiasEnable" VK_FALSE &*
+              set @"depthBiasConstantFactor" 0 &*
+              set @"depthBiasClamp" 0 &*
+              set @"depthBiasSlopeFactor" 0
+            ) &*
+            setVkRef @"pMultisampleState" (
+              createVk $
+              initStandardPipelineMultisampleStateCreateInfo &*
+              set @"sampleShadingEnable" VK_FALSE &*
+              set @"rasterizationSamples" VK_SAMPLE_COUNT_1_BIT &*
+              set @"minSampleShading" 1 &*
+              set @"pSampleMask" VK_NULL &*
+              set @"alphaToCoverageEnable" VK_FALSE &*
+              set @"alphaToOneEnable" VK_FALSE
+            ) &*
+            setVkRef @"pDepthStencilState" (
+              createVk $
+              initStandardPipelineDepthStencilStateCreateInfo &*
+              set @"depthTestEnable" VK_TRUE &*
+              set @"depthWriteEnable" VK_TRUE &*
+              set @"depthCompareOp" VK_COMPARE_OP_LESS &*
+              set @"depthBoundsTestEnable" VK_FALSE &*
+              set @"minDepthBounds" 0 &*
+              set @"maxDepthBounds" 1 &*
+              set @"stencilTestEnable" VK_FALSE &*
+              setVk @"front" (
+                set @"failOp" VK_STENCIL_OP_KEEP &*
+                set @"passOp" VK_STENCIL_OP_KEEP &*
+                set @"depthFailOp" VK_STENCIL_OP_KEEP &*
+                set @"compareOp" VK_COMPARE_OP_NEVER &*
+                set @"compareMask" 0 &*
+                set @"writeMask" 0 &*
+                set @"reference" 0
+              ) &*
+              setVk @"back" (
+                set @"failOp" VK_STENCIL_OP_KEEP &*
+                set @"passOp" VK_STENCIL_OP_KEEP &*
+                set @"depthFailOp" VK_STENCIL_OP_KEEP &*
+                set @"compareOp" VK_COMPARE_OP_NEVER &*
+                set @"compareMask" 0 &*
+                set @"writeMask" 0 &*
+                set @"reference" 0
+              )
+            ) &*
+            setVkRef @"pColorBlendState" (
+              createVk $
+              initStandardPipelineColorBlendStateCreateInfo &*
+              set @"logicOpEnable" VK_FALSE &*
+              set @"logicOp" VK_LOGIC_OP_COPY &*
+              setListCountAndRef @"attachmentCount" @"pAttachments" (
+                createVk <$> [
+                  set @"colorWriteMask" (VK_COLOR_COMPONENT_R_BIT .|. VK_COLOR_COMPONENT_G_BIT .|. VK_COLOR_COMPONENT_B_BIT .|. VK_COLOR_COMPONENT_A_BIT) &*
+                  set @"blendEnable" VK_FALSE &*
+                  set @"srcColorBlendFactor" VK_BLEND_FACTOR_ONE &*
+                  set @"dstColorBlendFactor" VK_BLEND_FACTOR_ZERO &*
+                  set @"colorBlendOp" VK_BLEND_OP_ADD &*
+                  set @"srcAlphaBlendFactor" VK_BLEND_FACTOR_ONE &*
+                  set @"dstAlphaBlendFactor" VK_BLEND_FACTOR_ZERO &*
+                  set @"alphaBlendOp" VK_BLEND_OP_ADD
+                ]
+              ) &*
+              setVec @"blendConstants" (vec4 0 0 0 0)
+            ) &*
+            set @"pDynamicState" VK_NULL &*
+            set @"renderPass" renderPass &*
+            set @"subpass" 0 &*
+            set @"layout" pipelineLayout &*
+            set @"basePipelineHandle" VK_NULL_HANDLE &*
+            set @"basePipelineIndex" (-1)
+          ]
+        )
     registerGraphicsPipelineForDestruction_ device graphicsPipeline
     ioPutStrLn "Graphics pipeline created."
 
