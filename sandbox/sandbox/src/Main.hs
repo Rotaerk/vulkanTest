@@ -734,7 +734,54 @@ resourceMain = do
       set @"usage" VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT &*
       setSharingQueueFamilyIndices [graphicsQfi] &*
       set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED
+
+    executeCommands device graphicsCommandPool graphicsQueue $ \commandBuffer -> liftIO $ do
+      vkaCmdPipelineBarrier commandBuffer
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+        zeroBits [] []
+        [
+          createVk $
+          initStandardImageMemoryBarrier &*
+          set @"srcAccessMask" zeroBits &*
+          set @"dstAccessMask" (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT .|. VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT) &*
+          set @"oldLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
+          set @"newLayout" VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &*
+          set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+          set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+          set @"image" framebufferDepthImage &*
+          setVk @"subresourceRange" (
+            set @"aspectMask" VK_IMAGE_ASPECT_DEPTH_BIT &*
+            set @"baseMipLevel" 0 &*
+            set @"levelCount" 1 &*
+            set @"baseArrayLayer" 0 &*
+            set @"layerCount" 1
+          )
+        ]
     ioPutStrLn "Framebuffer depth image created."
+
+    framebufferDepthImageView <-
+      allocateAcquireVk_ (imageViewResource device) $
+      createVk $
+      initStandardImageViewCreateInfo &*
+      set @"flags" zeroBits &*
+      set @"image" framebufferDepthImage &*
+      set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
+      set @"format" depthFormat &*
+      setVk @"components" (
+        set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
+        set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
+        set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
+        set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
+      ) &*
+      setVk @"subresourceRange" (
+        set @"aspectMask" VK_IMAGE_ASPECT_DEPTH_BIT &*
+        set @"baseMipLevel" 0 &*
+        set @"levelCount" 1 &*
+        set @"baseArrayLayer" 0 &*
+        set @"layerCount" 1
+      )
+    ioPutStrLn "Framebuffer depth image view created."
 
     return False
 
