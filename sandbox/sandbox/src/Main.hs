@@ -437,10 +437,8 @@ resourceMain = do
       )
     ioPutStrLn "Descriptor pool created."
 
-    descriptorSetArray <-
-      liftIO $
-      allocateDescriptorSets device $
-      createVk $
+    descriptorSets <-
+      liftIO . fmap vkaElems . allocateDescriptorSets device . createVk $
       initStandardDescriptorSetAllocateInfo &*
       set @"descriptorPool" descriptorPool &*
       setListCountAndRef @"descriptorSetCount" @"pSetLayouts" (replicate swapchainImageCount descriptorSetLayout)
@@ -449,7 +447,7 @@ resourceMain = do
     liftIO $
       vkaUpdateDescriptorSets device
         (
-          zip uniformBuffers (vkaElems descriptorSetArray) >>= \(uniformBuffer, descriptorSet) ->
+          zip uniformBuffers descriptorSets >>= \(uniformBuffer, descriptorSet) ->
           createVk <$> [
             initStandardWriteDescriptorSet &*
             set @"dstSet" descriptorSet &*
@@ -795,12 +793,46 @@ resourceMain = do
     ioPutStrLn "Swapchain framebuffers created."
 
     swapchainCommandBuffers <-
-      allocateAcquire_ . allocatedCommandBuffers device . createVk $
+      fmap vkaElems . allocateAcquire_ . allocatedCommandBuffers device . createVk $
       initStandardCommandBufferAllocateInfo &*
       set @"commandPool" graphicsCommandPool &*
       set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
       set @"commandBufferCount" (lengthNum swapchainImageViews)
     ioPutStrLn "Swapchain command buffers created."
+
+    forM_ (zip3 swapchainCommandBuffers swapchainFramebuffers descriptorSets) $ \(commandBuffer, framebuffer, descriptorSet) ->
+      with_ (
+        recordingCommandBuffer commandBuffer . createVk $
+        initPrimaryCommandBufferBeginInfo &*
+        set @"flags" VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
+      ) $ liftIO $ do
+        vkaCmdBeginRenderPass commandBuffer VK_SUBPASS_CONTENTS_INLINE . createVk $
+          initStandardRenderPassBeginInfo &*
+          set @"renderPass" renderPass &*
+          set @"framebuffer" framebuffer &*
+          setVk @"renderArea" (
+            setVk @"offset" (set @"x" 0 &* set @"y" 0) &*
+            set @"extent" swapchainImageExtent
+          ) &*
+          setListCountAndRef @"clearValueCount" @"pClearValues" [
+              createVk $ setVk @"color" (setVec @"float32" $ vec4 0 0 0 1),
+              createVk $ setVk @"depthStencil" (set @"depth" 1 &* set @"stencil" 0)
+          ]
+        vkCmdBindPipeline commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS graphicsPipeline
+        vkaCmdBindVertexBuffers commandBuffer 0 [(vertexBuffer, 0)]
+        vkCmdBindIndexBuffer commandBuffer indexBuffer 0 VK_INDEX_TYPE_UINT32
+        vkaCmdBindDescriptorSets commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS pipelineLayout 0 [descriptorSet] []
+        vkCmdDrawIndexed commandBuffer 6 1 0 0 0 -- 6 is the length of the dataframe used to fill the index buffer earlier.
+        vkCmdEndRenderPass commandBuffer
+    ioPutStrLn "Swapchain command buffers filled."
+
+    renderStartTime <-
+      liftIO $ readIORef renderStartTimeRef >>= \case
+        Just t -> return t
+        Nothing -> do
+          time <- getTime Monotonic
+          writeIORef renderStartTimeRef $ Just time
+          return time
 
     return False
 
@@ -1715,6 +1747,27 @@ vkaCmdCopyBufferToImage ::
 vkaCmdCopyBufferToImage commandBuffer buffer image imageLayout bufferImageCopies =
   withArray bufferImageCopies $ \bufferImageCopiesPtr ->
   vkCmdCopyBufferToImage commandBuffer buffer image imageLayout (lengthNum bufferImageCopies) bufferImageCopiesPtr
+
+vkaCmdBeginRenderPass :: VkCommandBuffer -> VkSubpassContents -> VkRenderPassBeginInfo -> IO ()
+vkaCmdBeginRenderPass commandBuffer contents beginInfo =
+  withPtr beginInfo $ \beginInfoPtr -> vkCmdBeginRenderPass commandBuffer beginInfoPtr contents
+
+initStandardRenderPassBeginInfo :: CreateVkStruct VkRenderPassBeginInfo '["sType", "pNext"] ()
+initStandardRenderPassBeginInfo =
+  set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO &*
+  set @"pNext" VK_NULL
+
+vkaCmdBindVertexBuffers :: VkCommandBuffer -> Word32 -> [(VkBuffer, VkDeviceSize)] -> IO ()
+vkaCmdBindVertexBuffers commandBuffer firstBinding bindings =
+  withArray (fst <$> bindings) $ \buffersPtr ->
+  withArray (snd <$> bindings) $ \offsetsPtr ->
+  vkCmdBindVertexBuffers commandBuffer firstBinding (lengthNum bindings) buffersPtr offsetsPtr
+
+vkaCmdBindDescriptorSets :: VkCommandBuffer -> VkPipelineBindPoint -> VkPipelineLayout -> Word32 -> [VkDescriptorSet] -> [Word32] -> IO ()
+vkaCmdBindDescriptorSets commandBuffer bindPoint pipelineLayout firstSet descriptorSets dynamicOffsets =
+  withArray descriptorSets $ \descriptorSetsPtr ->
+  withArray dynamicOffsets $ \dynamicOffsetsPtr ->
+  vkCmdBindDescriptorSets commandBuffer bindPoint pipelineLayout firstSet (lengthNum descriptorSets) descriptorSetsPtr (lengthNum dynamicOffsets) dynamicOffsetsPtr
 
 depthBearingFormats :: Set VkFormat
 depthBearingFormats =
