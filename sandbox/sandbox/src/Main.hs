@@ -229,16 +229,15 @@ resourceMain = do
   ioPutStrLn "Vulkan device created."
 
   [(graphicsQueue, graphicsCommandPool), (computeQueue, computeCommandPool), (transferQueue, transferCommandPool), (presentQueue, presentCommandPool)] <-
-    forM qfis $ \qfi ->
-      liftM2 (,)
-        (getVk $ vkGetDeviceQueue device qfi 0)
-        (
-          allocateAcquireVk_ (commandPoolResource device) $
-          createVk $
-          initStandardCommandPoolCreateInfo &*
-          set @"flags" zeroBits &*
-          set @"queueFamilyIndex" qfi
-        )
+    forM qfis $ \qfi -> liftM2 (,)
+      (getVk $ vkGetDeviceQueue device qfi 0)
+      (
+        allocateAcquireVk_ (commandPoolResource device) $
+        createVk $
+        initStandardCommandPoolCreateInfo &*
+        set @"flags" zeroBits &*
+        set @"queueFamilyIndex" qfi
+      )
   ioPutStrLn "Device queues obtained, and corresponding command pools created."
 
   descriptorSetLayout <-
@@ -712,7 +711,7 @@ resourceMain = do
     registerGraphicsPipelineForDestruction_ device graphicsPipeline
     ioPutStrLn "Graphics pipeline created."
 
-    (framebufferDepthImage, framebufferDepthImageMemory) <-
+    (depthImage, depthImageMemory) <-
       createBoundImage device physicalDeviceMemoryProperties (
         return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
         \_ _ -> return EQ
@@ -749,7 +748,7 @@ resourceMain = do
           set @"newLayout" VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &*
           set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
           set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
-          set @"image" framebufferDepthImage &*
+          set @"image" depthImage &*
           setVk @"subresourceRange" (
             set @"aspectMask" VK_IMAGE_ASPECT_DEPTH_BIT &*
             set @"baseMipLevel" 0 &*
@@ -758,14 +757,14 @@ resourceMain = do
             set @"layerCount" 1
           )
         ]
-    ioPutStrLn "Framebuffer depth image created."
+    ioPutStrLn "Depth image created."
 
-    framebufferDepthImageView <-
+    depthImageView <-
       allocateAcquireVk_ (imageViewResource device) $
       createVk $
       initStandardImageViewCreateInfo &*
       set @"flags" zeroBits &*
-      set @"image" framebufferDepthImage &*
+      set @"image" depthImage &*
       set @"viewType" VK_IMAGE_VIEW_TYPE_2D &*
       set @"format" depthFormat &*
       setVk @"components" (
@@ -781,7 +780,27 @@ resourceMain = do
         set @"baseArrayLayer" 0 &*
         set @"layerCount" 1
       )
-    ioPutStrLn "Framebuffer depth image view created."
+    ioPutStrLn "Depth image view created."
+
+    swapchainFramebuffers <-
+      forM swapchainImageViews $ \swapchainImageView ->
+      allocateAcquireVk_ (framebufferResource device) $
+      createVk $
+      initStandardFramebufferCreateInfo &*
+      set @"renderPass" renderPass &*
+      setListCountAndRef @"attachmentCount" @"pAttachments" [swapchainImageView, depthImageView] &*
+      set @"width" (getField @"width" swapchainImageExtent) &*
+      set @"height" (getField @"height" swapchainImageExtent) &*
+      set @"layers" 1
+    ioPutStrLn "Swapchain framebuffers created."
+
+    swapchainCommandBuffers <-
+      allocateAcquire_ . allocatedCommandBuffers device . createVk $
+      initStandardCommandBufferAllocateInfo &*
+      set @"commandPool" graphicsCommandPool &*
+      set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
+      set @"commandBufferCount" (lengthNum swapchainImageViews)
+    ioPutStrLn "Swapchain command buffers created."
 
     return False
 
@@ -1587,6 +1606,14 @@ initStandardPipelineDepthStencilStateCreateInfo =
 initStandardPipelineColorBlendStateCreateInfo :: CreateVkStruct VkPipelineColorBlendStateCreateInfo '["sType", "pNext"] ()
 initStandardPipelineColorBlendStateCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO &*
+  set @"pNext" VK_NULL
+
+framebufferResource :: VkDevice -> VkaResource VkFramebufferCreateInfo VkFramebuffer
+framebufferResource device = simpleVkaResource (vkCreateFramebuffer device) (vkDestroyFramebuffer device) "vkCreateFramebuffer" [VK_SUCCESS]
+
+initStandardFramebufferCreateInfo :: CreateVkStruct VkFramebufferCreateInfo '["sType", "pNext"] ()
+initStandardFramebufferCreateInfo =
+  set @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO &*
   set @"pNext" VK_NULL
 
 executeCommands :: (MonadUnliftIO m, MonadFail m) => VkDevice -> VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
