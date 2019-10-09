@@ -1469,8 +1469,8 @@ initStandardDescriptorSetAllocateInfo =
 vkaQueueWaitIdle :: VkQueue -> IO ()
 vkaQueueWaitIdle queue = void $ vkQueueWaitIdle queue & onVkFailureThrow "vkQueueWaitIdle" [VK_SUCCESS]
 
-vkaQueueSubmit :: VkQueue -> [VkSubmitInfo] -> VkFence -> IO ()
-vkaQueueSubmit queue submitInfos fence =
+vkaQueueSubmit :: VkQueue -> VkFence -> [VkSubmitInfo] -> IO ()
+vkaQueueSubmit queue fence submitInfos =
   withArray submitInfos $ \submitInfosPtr ->
   void $ vkQueueSubmit queue (lengthNum submitInfos) submitInfosPtr fence &
     onVkFailureThrow "vkQueueSubmit" [VK_SUCCESS]
@@ -1675,16 +1675,14 @@ executeCommands device commandPool submissionQueue fillCommandBuffer = runResour
     setFenceSignaled False
 
   liftIO $ do
-    vkaQueueSubmit submissionQueue
+    vkaQueueSubmit submissionQueue executionCompleteFence
       [
-        createVk (
-          initStandardSubmitInfo &*
-          setSubmitWaitSemaphoresAndStageFlags [] &*
-          setListCountAndRef @"commandBufferCount" @"pCommandBuffers" [commandBuffer] &*
-          setListCountAndRef @"signalSemaphoreCount" @"pSignalSemaphores" []
-        )
+        createVk $
+        initStandardSubmitInfo &*
+        setSubmitWaitSemaphoresAndStageFlags [] &*
+        setListCountAndRef @"commandBufferCount" @"pCommandBuffers" [commandBuffer] &*
+        setListCountAndRef @"signalSemaphoreCount" @"pSignalSemaphores" []
       ]
-      executionCompleteFence
     vkaWaitForFence device executionCompleteFence maxBound
 
   return result
