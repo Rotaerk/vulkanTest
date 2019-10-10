@@ -835,13 +835,15 @@ resourceMain = do
           writeIORef renderStartTimeRef $ Just time
           return time
 
-    let windowEventFrame' = windowEventFrame window lastWindowResizeTimeRef
+    ioPutStrLn "Render loop starting."
+    Just shouldRebuildSwapchain <- liftIO $ flip firstJustM (cycle frameSyncs) $ \frameSync ->
+      getWindowStatus window lastWindowResizeTimeRef >>= \case
+        WindowResized -> return $ Just True
+        WindowClosed -> return $ Just False
+        WindowReady -> do
+          return Nothing
 
-    ioPutStrLn "Window event loop starting."
-    Just shouldRebuildSwapchain <- liftIO $ flip firstJustM (cycle frameSyncs) $ \frameSync -> windowEventFrame' $ do
-      return False
-
-    ioPutStrLn "Window event loop ended.  Waiting for device to idle."
+    ioPutStrLn "Render loop ended.  Waiting for device to idle."
     liftIO $ vkDeviceWaitIdle device
 
     ioPutStrLn "Cleaning up swapchain-related objects."
@@ -954,26 +956,20 @@ newVulkanGLFWWindowSurface vulkanInstance window =
   `mkAcquire`
   \surface -> vkDestroySurfaceKHR vulkanInstance surface VK_NULL
 
-windowEventFrame ::
-  GLFW.Window ->
-  IORef (Maybe TimeSpec) ->
-  -- | Action to perform during window frame. The returned Bool should indicate whether the swapchain needs to be rebuilt.
-  IO Bool ->
-  -- | Returns Nothing if the frame ran normally.  Otherwise, returns True if the swapchain needs to be rebuilt, or False
-  -- if the window has closed.
-  IO (Maybe Bool)
-windowEventFrame window lastResizeTimeRef body =
+data WindowStatus = WindowReady | WindowResized | WindowClosed
+
+getWindowStatus :: GLFW.Window -> IORef (Maybe TimeSpec) -> IO WindowStatus
+getWindowStatus window lastResizeTimeRef =
   GLFW.windowShouldClose window >>= \case
-    True -> return $ Just False
+    True -> return WindowClosed
     False -> do
       GLFW.pollEvents
-      bool Nothing (Just True) <$> do
-        currentTime <- getTime Monotonic
-        -- GLFW sends many resize events during the resizing process, and doesn't say when the user is done resizing.
-        -- Thus, only rebuild the swapchain after some time has passed after the last resize event.
-        atomicModifyIORef lastResizeTimeRef $ \case
-          Just lastResizeTime | currentTime - lastResizeTime >= resizeDelay -> (Nothing, True)
-          v -> (v, False)
+      currentTime <- getTime Monotonic
+      -- GLFW sends many resize events during the resizing process, and doesn't say when the user is done resizing.
+      -- Thus, only consider it resized after some time has passed since the last event.
+      atomicModifyIORef lastResizeTimeRef $ \case
+        Just lastResizeTime | currentTime - lastResizeTime >= resizeDelay -> (Nothing, WindowResized)
+        v -> (v, WindowReady)
   where
     resizeDelay = fromNanoSecs (100 * 1000 * 1000) -- 100 milliseconds
 -- GLFW helpers<
