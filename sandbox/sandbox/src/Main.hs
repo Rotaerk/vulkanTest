@@ -35,6 +35,7 @@ import Control.Monad.FileReader
 import Control.Monad.IO.Class
 import Control.Monad.Loops
 import Control.Monad.Reader
+import Control.Monad.State
 import Control.Monad.Trans.Resource
 import Control.Monad.IO.Unlift
 import Data.Acquire.Local
@@ -834,9 +835,19 @@ resourceMain = do
           writeIORef renderStartTimeRef $ Just time
           return time
 
-    return False
+    let windowEventFrame' = windowEventFrame window lastWindowResizeTimeRef
 
-  return ()
+    ioPutStrLn "Window event loop starting."
+    Just shouldRebuildSwapchain <- liftIO $ flip firstJustM (cycle frameSyncs) $ \frameSync -> windowEventFrame' $ do
+      return False
+
+    ioPutStrLn "Window event loop ended.  Waiting for device to idle."
+    liftIO $ vkDeviceWaitIdle device
+
+    ioPutStrLn "Cleaning up swapchain-related objects."
+    return shouldRebuildSwapchain
+
+  ioPutStrLn "Cleaning up the rest"
 
 extensions :: [CString]
 extensions =
@@ -942,6 +953,29 @@ newVulkanGLFWWindowSurface vulkanInstance window =
   )
   `mkAcquire`
   \surface -> vkDestroySurfaceKHR vulkanInstance surface VK_NULL
+
+windowEventFrame ::
+  GLFW.Window ->
+  IORef (Maybe TimeSpec) ->
+  -- | Action to perform during window frame. The returned Bool should indicate whether the swapchain needs to be rebuilt.
+  IO Bool ->
+  -- | Returns Nothing if the frame ran normally.  Otherwise, returns True if the swapchain needs to be rebuilt, or False
+  -- if the window has closed.
+  IO (Maybe Bool)
+windowEventFrame window lastResizeTimeRef body =
+  GLFW.windowShouldClose window >>= \case
+    True -> return $ Just False
+    False -> do
+      GLFW.pollEvents
+      bool Nothing (Just True) <$> do
+        currentTime <- getTime Monotonic
+        -- GLFW sends many resize events during the resizing process, and doesn't say when the user is done resizing.
+        -- Thus, only rebuild the swapchain after some time has passed after the last resize event.
+        atomicModifyIORef lastResizeTimeRef $ \case
+          Just lastResizeTime | currentTime - lastResizeTime >= resizeDelay -> (Nothing, True)
+          v -> (v, False)
+  where
+    resizeDelay = fromNanoSecs (100 * 1000 * 1000) -- 100 milliseconds
 -- GLFW helpers<
 
 -- Vulkan helpers>
