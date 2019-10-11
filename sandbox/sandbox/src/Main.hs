@@ -36,6 +36,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Loops
 import Control.Monad.Reader
 import Control.Monad.State
+import qualified Control.Monad.ST as ST
 import Control.Monad.Trans.Resource
 import Control.Monad.IO.Unlift
 import Data.Acquire.Local
@@ -81,6 +82,7 @@ import Graphics.Vulkan.Marshal.Create.DataFrame
 
 import Numeric.DataFrame hiding (sortBy)
 import qualified Numeric.DataFrame as DF
+import qualified Numeric.DataFrame.ST as ST
 import Numeric.Dimensions
 import Numeric.PrimBytes
 
@@ -275,8 +277,8 @@ resourceMain = do
     createImageFromKtxTexture
       device
       physicalDeviceMemoryProperties
-      transferCommandPool
-      transferQueue
+      graphicsCommandPool
+      graphicsQueue
       VK_SAMPLE_COUNT_1_BIT
       VK_IMAGE_TILING_OPTIMAL
       (VK_IMAGE_USAGE_TRANSFER_SRC_BIT .|. VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
@@ -310,7 +312,7 @@ resourceMain = do
       transferQueue
       VK_BUFFER_USAGE_INDEX_BUFFER_BIT
       [graphicsQfi]
-      (packDF @Double @6 @'[] 0 1 2 2 3 0)
+      (packDF @Word32 @6 @'[] 0 2 1 0 3 2)
   ioPutStrLn "Index buffer created."
 
   frameSyncs <- replicateM maxFramesInFlight $ FrameSync <$> createFence device True <*> createSemaphore device <*> createSemaphore device
@@ -604,8 +606,8 @@ resourceMain = do
             setVkRef @"pInputAssemblyState" (
               createVk $
               initStandardPipelineInputAssemblyStateCreateInfo &*
-              set @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &*
-              set @"primitiveRestartEnable" VK_TRUE
+              set @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &*
+              set @"primitiveRestartEnable" VK_FALSE
             ) &*
             setVkRef @"pViewportState" (
               createVk $
@@ -836,12 +838,52 @@ resourceMain = do
           return time
 
     ioPutStrLn "Render loop starting."
-    Just shouldRebuildSwapchain <- liftIO $ flip firstJustM (cycle frameSyncs) $ \frameSync ->
+    Just shouldRebuildSwapchain <- liftIO $ flip firstJustM (cycle frameSyncs) $ \FrameSync {..} ->
       getWindowStatus window lastWindowResizeTimeRef >>= \case
-        WindowResized -> return $ Just True
-        WindowClosed -> return $ Just False
-        WindowReady -> do
-          return Nothing
+        WindowResized -> do
+          putStrLn "Window resized!"
+          return $ Just True
+        WindowClosed -> do
+          putStrLn "Window closed!"
+          return $ Just False
+        WindowReady ->
+          handleJust
+            (guard . (VK_ERROR_OUT_OF_DATE_KHR ==) . vkaResultException'result)
+            (const $ return $ Just True)
+          $ do
+            vkaWaitForFence device frameSync'inFlightFence maxBound
+            vkaResetFence device frameSync'inFlightFence
+
+            nextImageIndexWord32@(fromIntegral -> nextImageIndex) <- getVk $ vkaAcquireNextImageKHR device swapchain maxBound frameSync'imageAvailableSemaphore VK_NULL_HANDLE
+
+            -- Obviously there is no point in updating the UBO to the same value every time, but I'm leaving this here
+            -- so that I can later easily transform the rendered image over time.
+            with (mappedMemory device (uniformBufferMemories !! nextImageIndex) 0 (bSizeOf @UniformBufferObject undefined)) $ \ptr ->
+              poke (castPtr ptr) . S $
+              UniformBufferObject eye eye eye
+
+            vkaQueueSubmit graphicsQueue frameSync'inFlightFence
+              [
+                createVk $
+                initStandardSubmitInfo &*
+                setListCountAndRef @"waitSemaphoreCount" @"pWaitSemaphores" [frameSync'imageAvailableSemaphore] &*
+                setListRef @"pWaitDstStageMask" [VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT] &*
+                setListCountAndRef @"commandBufferCount" @"pCommandBuffers" [swapchainCommandBuffers !! nextImageIndex] &*
+                setListCountAndRef @"signalSemaphoreCount" @"pSignalSemaphores" [frameSync'renderFinishedSemaphore]
+              ]
+
+            queuePresentResult <-
+              vkaQueuePresentKHR presentQueue $
+                createVk $
+                initStandardPresentInfoKHR &*
+                setListCountAndRef @"waitSemaphoreCount" @"pWaitSemaphores" [frameSync'renderFinishedSemaphore] &*
+                setListCountAndRef @"swapchainCount" @"pSwapchains" [swapchain] &*
+                setListRef @"pImageIndices" [nextImageIndexWord32] &*
+                set @"pResults" VK_NULL
+
+            case queuePresentResult of
+              VK_SUBOPTIMAL_KHR -> return $ Just True
+              _ -> return Nothing
 
     ioPutStrLn "Render loop ended.  Waiting for device to idle."
     liftIO $ vkDeviceWaitIdle device
@@ -906,18 +948,18 @@ svertex = S .: Vertex
 
 data UniformBufferObject =
   UniformBufferObject {
-    uboModel :: Mat44f,
-    uboView :: Mat44f,
-    uboProj :: Mat44f
+    uniformBufferObject'model :: Mat44f,
+    uniformBufferObject'view :: Mat44f,
+    uniformBufferObject'proj :: Mat44f
   } deriving (Eq, Show, Generic)
 
 instance PrimBytes UniformBufferObject
 
 data FrameSync =
   FrameSync {
-    fsInFlightFence :: VkFence,
-    fsImageAvailableSemaphore :: VkSemaphore,
-    fsRenderFinishedSemaphore :: VkSemaphore
+    frameSync'inFlightFence :: VkFence,
+    frameSync'imageAvailableSemaphore :: VkSemaphore,
+    frameSync'renderFinishedSemaphore :: VkSemaphore
   }
 
 -- GLFW helpers>
@@ -1510,6 +1552,17 @@ initStandardSubmitInfo =
   set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
   set @"pNext" VK_NULL
 
+vkaQueuePresentKHR :: VkQueue -> VkPresentInfoKHR -> IO VkResult
+vkaQueuePresentKHR queue presentInfo =
+  withPtr presentInfo $ \presentInfoPtr ->
+  vkQueuePresentKHR queue presentInfoPtr &
+    onVkFailureThrow "vkQueuePresentKHR" [VK_SUCCESS, VK_SUBOPTIMAL_KHR]
+
+initStandardPresentInfoKHR :: CreateVkStruct VkPresentInfoKHR '["sType", "pNext"] ()
+initStandardPresentInfoKHR =
+  set @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR &*
+  set @"pNext" VK_NULL
+
 setSubmitWaitSemaphoresAndStageFlags ::
   [(VkSemaphore, VkPipelineStageFlags)] ->
   CreateVkStruct VkSubmitInfo '["waitSemaphoreCount", "pWaitSemaphores", "pWaitDstStageMask"] ()
@@ -1539,6 +1592,15 @@ vkaWaitForFences device fences waitAll timeout =
 
 vkaWaitForFence :: VkDevice -> VkFence -> Word64 -> IO VkResult
 vkaWaitForFence device fence timeout = vkaWaitForFences device [fence] VK_TRUE timeout
+
+vkaResetFences :: VkDevice -> [VkFence] -> IO ()
+vkaResetFences device fences =
+  withArray fences $ \fencesPtr ->
+  void $ vkResetFences device (lengthNum fences) fencesPtr &
+    onVkFailureThrow "vkResetFences" [VK_SUCCESS]
+
+vkaResetFence :: VkDevice -> VkFence -> IO ()
+vkaResetFence device fence = vkaResetFences device [fence]
 
 semaphoreResource :: VkDevice -> VkaResource VkSemaphoreCreateInfo VkSemaphore
 semaphoreResource device = simpleVkaResource (vkCreateSemaphore device) (vkDestroySemaphore device) "vkCreateSemaphore" [VK_SUCCESS]
@@ -1963,6 +2025,29 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
             setVk @"imageExtent" (set @"width" 0 &* set @"height" 0 &* set @"depth" 0)
           -}
 
+    vkaCmdPipelineBarrier commandBuffer
+      VK_PIPELINE_STAGE_TRANSFER_BIT
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+      zeroBits [] []
+      [
+        createVk $
+        initStandardImageMemoryBarrier &*
+        set @"srcAccessMask" VK_ACCESS_TRANSFER_WRITE_BIT &*
+        set @"dstAccessMask" VK_ACCESS_SHADER_READ_BIT &*
+        set @"oldLayout" VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &*
+        set @"newLayout" VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &*
+        set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+        set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
+        set @"image" image &*
+        setVk @"subresourceRange" (
+          set @"aspectMask" aspectMask &*
+          set @"baseMipLevel" 0 &*
+          set @"levelCount" numMipLevels &*
+          set @"baseArrayLayer" 0 &*
+          set @"layerCount" numArrayLayers
+        )
+      ]
+
   imageView <-
     lift . allocateAcquireVk_ (imageViewResource device) $
     createVk $
@@ -2038,6 +2123,11 @@ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface =
   vkGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface &
   onGetterFailureThrow "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" [VK_SUCCESS]
 
+vkaAcquireNextImageKHR :: VkDevice -> VkSwapchainKHR -> Word64 -> VkSemaphore -> VkFence -> VkaGetter Word32 VkResult
+vkaAcquireNextImageKHR device swapchain timeout semaphore fence =
+  vkAcquireNextImageKHR device swapchain timeout semaphore fence &
+  onGetterFailureThrow "vkAcquireNextImageKHR" [VK_SUCCESS, VK_TIMEOUT, VK_NOT_READY, VK_SUBOPTIMAL_KHR]
+
 newtype VkaIArray vk = VkaIArray { unVkaIArray :: StorableArray Word32 vk }
 
 vkaNumElements :: Storable vk => VkaIArray vk -> Word32
@@ -2107,6 +2197,14 @@ getFieldArrayAssocs a = [0 .. fieldArrayLength @fname @a] <&> \i -> (i, getField
 
 getFieldArrayElems :: forall fname a. CanReadFieldArray fname a => a -> [(FieldType fname a)]
 getFieldArrayElems = fmap snd . getFieldArrayAssocs @fname @a
+
+glToVkProjection :: Mat44f
+glToVkProjection = mat44f
+  1 0    0   0
+  0 (-1) 0   0
+  0 0    0.5 0.5
+  0 0    0   1
+
 -- Vulkan helpers<
 
 -- Other helpers>
@@ -2158,4 +2256,35 @@ instance (MArray a e m, MonadTrans t, Monad (t m)) => MArray a e (t m) where
   unsafeRead = lift .: unsafeRead
   unsafeWrite = lift .:. unsafeWrite
 
+{-# INLINE mat44f #-}
+mat44f ::
+  Scf -> Scf -> Scf -> Scf ->
+  Scf -> Scf -> Scf -> Scf ->
+  Scf -> Scf -> Scf -> Scf ->
+  Scf -> Scf -> Scf -> Scf ->
+  Mat44f
+mat44f
+  _11 _12 _13 _14
+  _21 _22 _23 _24
+  _31 _32 _33 _34
+  _41 _42 _43 _44
+  = ST.runST $ do
+    df <- ST.newDataFrame
+    ST.writeDataFrameOff df 0 _11
+    ST.writeDataFrameOff df 1 _21
+    ST.writeDataFrameOff df 2 _31
+    ST.writeDataFrameOff df 3 _41
+    ST.writeDataFrameOff df 4 _12
+    ST.writeDataFrameOff df 5 _22
+    ST.writeDataFrameOff df 6 _32
+    ST.writeDataFrameOff df 7 _42
+    ST.writeDataFrameOff df 8 _13
+    ST.writeDataFrameOff df 9 _23
+    ST.writeDataFrameOff df 10 _33
+    ST.writeDataFrameOff df 11 _43
+    ST.writeDataFrameOff df 12 _14
+    ST.writeDataFrameOff df 13 _24
+    ST.writeDataFrameOff df 14 _34
+    ST.writeDataFrameOff df 15 _44
+    ST.unsafeFreezeDataFrame df
 -- Other helpers<
