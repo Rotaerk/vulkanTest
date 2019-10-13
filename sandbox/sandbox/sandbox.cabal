@@ -21,6 +21,7 @@ executable sandbox
   hs-source-dirs: src
   main-is: Main.hs
   other-modules:
+    Control.Monad.Trans.Resource.Local
     Data.Acquire.Local
     Data.Bits.Local
     Foreign.Marshal.Array.Sized
@@ -42,6 +43,7 @@ executable sandbox
     reflection,
     resourcet,
     safe,
+    transformers,
     typelits-witnesses,
     unliftio,
     unliftio-core,

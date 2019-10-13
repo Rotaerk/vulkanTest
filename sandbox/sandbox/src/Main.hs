@@ -32,13 +32,11 @@ import Control.Monad.Extra
 import Control.Monad.Fail
 import Control.Monad.IO.Class
 import Control.Monad.Reader
-import qualified Control.Monad.ST as ST
-import Control.Monad.Trans.Resource
+import Control.Monad.Trans.Resource.Local
 import Data.Acquire.Local
 import Data.Array.Base as DAB
 import Data.Array.Storable
 import Data.Bits.Local
-import Data.Bool
 import Data.Foldable
 import Data.Function
 import Data.Functor
@@ -70,7 +68,6 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
 
 import Numeric.DataFrame hiding (sortBy)
-import qualified Numeric.DataFrame.ST as ST
 import Numeric.Dimensions
 
 import System.Clock
@@ -174,7 +171,7 @@ resourceMain = do
   physicalDeviceQueueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
 
   qfis@[graphicsQfi, computeQfi, transferQfi, presentQfi] <-
-    pickQueueFamilyIndexCombo [
+    fmap fst . minimumBy (compare `on` length . nub) <$> selectionsFromM (vkaAssocs physicalDeviceQueueFamilyPropertiesArray) [
       (
         return . someAreSet VK_QUEUE_GRAPHICS_BIT . getField @"queueFlags" . snd,
         preferWhereM [
@@ -198,7 +195,6 @@ resourceMain = do
         \_ _ -> return EQ
       )
     ]
-      physicalDeviceQueueFamilyPropertiesArray
   ioPutStrLn "Queue family indices selected."
 
   device <-
@@ -1035,7 +1031,7 @@ throwVkaExceptionM = throwM . VkaException
 
 vkaRegisterDebugCallback :: MonadUnliftIO io => VkInstance -> VkDebugReportFlagsEXT -> HS_vkDebugReportCallbackEXT -> ResourceT io ()
 vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
-  debugCallbackPtr <- allocateAcquire_ . newFunPtrFrom . newVkDebugReportCallbackEXT $ debugCallback
+  debugCallbackPtr <- allocate_ (newVkDebugReportCallbackEXT debugCallback) freeHaskellFunPtr
   void . allocateAcquireVk_ (registeredDebugReportCallbackResource vulkanInstance) $
     createVk $
     set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
@@ -2190,98 +2186,9 @@ pdmpDeviceLocalMemorySize memoryProperties =
     isDeviceLocal = (zeroBits /=) . (VK_MEMORY_HEAP_DEVICE_LOCAL_BIT .&.) . getField @"flags"
     memoryHeapCount = fromIntegral $ getField @"memoryHeapCount" memoryProperties
 
-pickQueueFamilyIndexCombo :: Monad m => [QualificationM m (Word32, VkQueueFamilyProperties)] -> VkaIArray VkQueueFamilyProperties -> m [Word32]
-pickQueueFamilyIndexCombo qualifications qfpArray =
-  fmap (fmap fst . comboWithFewestDistinct) . sequence $
-  picksByM <$> qualifications <*> pure (vkaAssocs qfpArray)
-
 getFieldArrayAssocs :: forall fname a. CanReadFieldArray fname a => a -> [(Int, FieldType fname a)]
 getFieldArrayAssocs a = [0 .. fieldArrayLength @fname @a] <&> \i -> (i, getFieldArrayUnsafe @fname i a)
 
 getFieldArrayElems :: forall fname a. CanReadFieldArray fname a => a -> [(FieldType fname a)]
 getFieldArrayElems = fmap snd . getFieldArrayAssocs @fname @a
-
-glToVkProjection :: Mat44f
-glToVkProjection = mat44f
-  1 0    0   0
-  0 (-1) 0   0
-  0 0    0.5 0.5
-  0 0    0   1
-
 -- Vulkan helpers<
-
--- Other helpers>
-newFunPtrFrom :: IO (FunPtr f) -> Acquire (FunPtr f)
-newFunPtrFrom = flip mkAcquire freeHaskellFunPtr
-
-register_ :: MonadResource m => IO () -> m ()
-register_ = void . register
-
-lengthNum :: (Foldable t, Num n) => t a -> n
-lengthNum = fromIntegral . length
-{-# INLINE lengthNum #-}
-
-comboWithFewestDistinct :: Eq a => [[a]] -> [a]
-comboWithFewestDistinct = minimumBy (compare `on` length . nub) . sequence
-
-ioPutStrLn :: MonadIO io => String -> io ()
-ioPutStrLn = liftIO . putStrLn
-
-replace :: Eq a => a -> a -> a -> a
-replace match replacement value | value == match = replacement
-replace _ _ value = value
-
-clamp :: Ord a => a -> a -> a -> a
-clamp a b =
-  case compare a b of
-    LT -> min b . max a
-    GT -> min a . max b
-    EQ -> const a
-
-alignTo :: Integral n => n -> n -> n
-alignTo b n =
-  case n `rem` b of
-    0 -> n
-    x -> n + b - x
-
-assertM_ :: Monad m => Bool -> m ()
-assertM_ cond = assert cond (return ())
-
-assertPred :: (a -> Bool) -> a -> a
-assertPred p a = assert (p a) a
-
-doWhileM :: Monad m => m Bool -> m ()
-doWhileM a = fix $ \loop -> a >>= bool (return ()) loop
-
-{-# INLINE mat44f #-}
-mat44f ::
-  Scf -> Scf -> Scf -> Scf ->
-  Scf -> Scf -> Scf -> Scf ->
-  Scf -> Scf -> Scf -> Scf ->
-  Scf -> Scf -> Scf -> Scf ->
-  Mat44f
-mat44f
-  _11 _12 _13 _14
-  _21 _22 _23 _24
-  _31 _32 _33 _34
-  _41 _42 _43 _44
-  = ST.runST $ do
-    df <- ST.newDataFrame
-    ST.writeDataFrameOff df 0 _11
-    ST.writeDataFrameOff df 1 _21
-    ST.writeDataFrameOff df 2 _31
-    ST.writeDataFrameOff df 3 _41
-    ST.writeDataFrameOff df 4 _12
-    ST.writeDataFrameOff df 5 _22
-    ST.writeDataFrameOff df 6 _32
-    ST.writeDataFrameOff df 7 _42
-    ST.writeDataFrameOff df 8 _13
-    ST.writeDataFrameOff df 9 _23
-    ST.writeDataFrameOff df 10 _33
-    ST.writeDataFrameOff df 11 _43
-    ST.writeDataFrameOff df 12 _14
-    ST.writeDataFrameOff df 13 _24
-    ST.writeDataFrameOff df 14 _34
-    ST.writeDataFrameOff df 15 _44
-    ST.unsafeFreezeDataFrame df
--- Other helpers<
