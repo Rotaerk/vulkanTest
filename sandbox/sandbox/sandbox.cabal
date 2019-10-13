@@ -25,6 +25,7 @@ executable sandbox
     Data.Acquire.Local
     Data.Bits.Local
     Foreign.Marshal.Array.Sized
+    Graphics.VulkanAux.VkaIArray
     Prelude.Local
     Paths_sandbox
   ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches -fno-ignore-asserts

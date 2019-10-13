@@ -34,8 +34,6 @@ import Control.Monad.IO.Class
 import Control.Monad.Reader
 import Control.Monad.Trans.Resource.Local
 import Data.Acquire.Local
-import Data.Array.Base as DAB
-import Data.Array.Storable
 import Data.Bits.Local
 import Data.Foldable
 import Data.Function
@@ -66,13 +64,13 @@ import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
+import Graphics.VulkanAux.VkaIArray
 
 import Numeric.DataFrame hiding (sortBy)
 import Numeric.Dimensions
 
 import System.Clock
 import System.IO
-import System.IO.Unsafe
 import UnliftIO.Exception
 
 main :: IO ()
@@ -2117,37 +2115,6 @@ vkaAcquireNextImageKHR :: VkDevice -> VkSwapchainKHR -> Word64 -> VkSemaphore ->
 vkaAcquireNextImageKHR device swapchain timeout semaphore fence =
   vkAcquireNextImageKHR device swapchain timeout semaphore fence &
   onGetterFailureThrow "vkAcquireNextImageKHR" [VK_SUCCESS, VK_TIMEOUT, VK_NOT_READY, VK_SUBOPTIMAL_KHR]
-
-newtype VkaIArray vk = VkaIArray { unVkaIArray :: StorableArray Word32 vk }
-
-newVkaIArray :: Storable vk => Word32 -> (Ptr vk -> IO r) -> IO (r, VkaIArray vk)
-newVkaIArray count fill = do
-  sarr <- newArray_ (0, count-1)
-  (, VkaIArray sarr) <$> withStorableArray sarr fill
-
-newVkaIArray_ :: Storable vk => Word32 -> (Ptr vk -> IO ()) -> IO (VkaIArray vk)
-newVkaIArray_ = fmap snd .: newVkaIArray
-
-acquireVkaIArray :: Storable vk => Word32 -> (Ptr vk -> IO r) -> (Ptr vk -> IO ()) -> Acquire (r, VkaIArray vk)
-acquireVkaIArray count fill destroy =
-  second VkaIArray <$>
-  do
-    sarr <- newArray_ (0, count-1)
-    (, sarr) <$> withStorableArray sarr fill
-  `mkAcquire`
-  (flip withStorableArray destroy . snd)
-
-acquireVkaIArray_ :: Storable vk => Word32 -> (Ptr vk -> IO ()) -> (Ptr vk -> IO ()) -> Acquire (VkaIArray vk)
-acquireVkaIArray_ = fmap snd .:. acquireVkaIArray
-
-vkaNumElements :: Storable vk => VkaIArray vk -> Word32
-vkaNumElements = fromIntegral . unsafePerformIO . getNumElements . unVkaIArray
-
-vkaElems :: Storable vk => VkaIArray vk -> [vk]
-vkaElems = unsafePerformIO . getElems . unVkaIArray
-
-vkaAssocs :: Storable vk => VkaIArray vk -> [(Word32, vk)]
-vkaAssocs = unsafePerformIO . getAssocs . unVkaIArray
 
 type VkaArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
 
