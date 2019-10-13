@@ -401,7 +401,7 @@ resourceMain = do
         )
     ioPutStrLn "Swapchain image views created."
 
-    let swapchainImageCount@(fromIntegral -> swapchainImageCountWord32) = fromIntegral $ vkaNumElements swapchainImageArray
+    let swapchainImageCountWord32@(fromIntegral -> swapchainImageCount) = vkaNumElements swapchainImageArray
 
     (uniformBuffers, uniformBufferMemories) <-
       fmap unzip . replicateM swapchainImageCount $
@@ -423,7 +423,7 @@ resourceMain = do
     ioPutStrLn "Descriptor pool created."
 
     descriptorSets <-
-      liftIO . fmap vkaElems . allocateDescriptorSets device . createVk $
+      liftIO . fmap vkaElems . vkaAllocateDescriptorSets device . createVk $
       initStandardDescriptorSetAllocateInfo &*
       set @"descriptorPool" descriptorPool &*
       setListCountAndRef @"descriptorSetCount" @"pSetLayouts" (replicate swapchainImageCount descriptorSetLayout)
@@ -1443,18 +1443,15 @@ initStandardSamplerCreateInfo =
 
 allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (VkaIArray VkCommandBuffer)
 allocatedCommandBuffers device allocateInfo =
-  fmap VkaIArray $
-  do
-    array <- newArray_ (0, commandBufferCount-1)
-    when (commandBufferCount > 0) $
-      withPtr allocateInfo $ \allocateInfoPtr ->
-        withStorableArray array (vkAllocateCommandBuffers device allocateInfoPtr) & onVkFailureThrow_ "vkAllocateCommandBuffers"
-    return array
-  `mkAcquire`
   if commandBufferCount > 0 then
-    \commandBufferArray -> withStorableArray commandBufferArray $ vkFreeCommandBuffers device commandPool commandBufferCount
+    acquireVkaIArray_ commandBufferCount
+      (\arrayPtr ->
+        withPtr allocateInfo $ \allocateInfoPtr ->
+          vkAllocateCommandBuffers device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateCommandBuffers"
+      )
+      (vkFreeCommandBuffers device commandPool commandBufferCount)
   else
-    const $ return ()
+    throwVkaException "Cannot allocate 0 command buffers."
 
   where
     commandBufferCount = getField @"commandBufferCount" allocateInfo
@@ -1488,32 +1485,33 @@ initPrimaryCommandBufferBeginInfo =
 
 -- Warning: This will free the descriptor sets at the end of the ResourceT scope.  Only use this if the descriptor
 -- pool was created with the VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT flag set.  If you don't have that
--- set, use allocateDescriptorSets instead.
+-- set, use vkaAllocateDescriptorSets instead.
 allocatedDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> Acquire (VkaIArray VkDescriptorSet)
 allocatedDescriptorSets device allocateInfo =
-  fmap VkaIArray $
-  allocateDescriptorSetsSA device allocateInfo
-  `mkAcquire`
   if descriptorSetCount > 0 then
-    \descriptorSetArray ->
-      withStorableArray descriptorSetArray (vkFreeDescriptorSets device descriptorPool descriptorSetCount) & onVkFailureThrow_ "vkFreeDescriptorSets"
+    acquireVkaIArray_ descriptorSetCount
+      (\arrayPtr ->
+        withPtr allocateInfo $ \allocateInfoPtr ->
+          vkAllocateDescriptorSets device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateDescriptorSets"
+      )
+      (\arrayPtr ->
+        vkFreeDescriptorSets device descriptorPool descriptorSetCount arrayPtr & onVkFailureThrow_ "vkFreeDescriptorSets"
+      )
   else
-    const $ return ()
+    throwVkaException "Cannot allocate 0 descriptor sets."
 
   where
     descriptorSetCount = getField @"descriptorSetCount" allocateInfo
     descriptorPool = getField @"descriptorPool" allocateInfo
 
-allocateDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (VkaIArray VkDescriptorSet)
-allocateDescriptorSets device allocateInfo = VkaIArray <$> allocateDescriptorSetsSA device allocateInfo
-
-allocateDescriptorSetsSA :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (StorableArray Word32 VkDescriptorSet)
-allocateDescriptorSetsSA device allocateInfo = do
-  array <- newArray_ (0, descriptorSetCount-1)
-  when (descriptorSetCount > 0) $
-    withPtr allocateInfo $ \allocateInfoPtr ->
-      withStorableArray array (vkAllocateDescriptorSets device allocateInfoPtr) & onVkFailureThrow_ "vkAllocateDescriptorSets"
-  return array
+vkaAllocateDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (VkaIArray VkDescriptorSet)
+vkaAllocateDescriptorSets device allocateInfo =
+  if descriptorSetCount > 0 then
+    newVkaIArray_ descriptorSetCount $ \arrayPtr ->
+      withPtr allocateInfo $ \allocateInfoPtr ->
+        vkAllocateDescriptorSets device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateDescriptorSets"
+  else
+    throwVkaException "Cannot allocate 0 descriptor sets."
 
   where
     descriptorSetCount = getField @"descriptorSetCount" allocateInfo
@@ -1640,11 +1638,12 @@ initStandardRenderPassCreateInfo =
 
 vkaCreateGraphicsPipelines :: VkDevice -> VkPipelineCache -> [VkGraphicsPipelineCreateInfo] -> IO (VkaIArray VkPipeline)
 vkaCreateGraphicsPipelines device pipelineCache createInfos@(lengthNum -> count) =
-  withArray createInfos $ \createInfosPtr -> do
-    array <- newArray_ (0, count-1)
-    when (count > 0) $
-      withStorableArray array (vkCreateGraphicsPipelines device pipelineCache count createInfosPtr VK_NULL) & onVkFailureThrow_ "vkCreateGraphicsPipelines"
-    return $ VkaIArray array
+  if count > 0 then
+    withArray createInfos $ \createInfosPtr ->
+      newVkaIArray_ count $ \arrayPtr ->
+        vkCreateGraphicsPipelines device pipelineCache count createInfosPtr VK_NULL arrayPtr & onVkFailureThrow_ "vkCreateGraphicsPipelines"
+  else
+    throwVkaException "Cannot allocate 0 graphics pipelines."
 
 registerGraphicsPipelineForDestruction :: MonadResource m => VkDevice -> VkPipeline -> m ReleaseKey
 registerGraphicsPipelineForDestruction device pipeline = register $ vkDestroyPipeline device pipeline VK_NULL
@@ -1878,18 +1877,6 @@ stencilBearingFormats =
     VK_FORMAT_D32_SFLOAT_S8_UINT
   ]
 
-stageKtxTexture ::
-  (MonadUnliftIO m, MonadThrow m) =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  FilePath ->
-  ResourceT m (KTX.Header, KTX.BufferRegions, VkBuffer, VkDeviceMemory)
-stageKtxTexture device pdmp filePath =
-  KTX.readKtxFile filePath KTX.skipMetadata $ \header () (fromIntegral -> textureDataSize) readTextureDataInto -> do
-    (buffer, bufferMemory) <- lift . lift $ createStagingBuffer device pdmp [] textureDataSize
-    bufferRegions <- with (mappedMemory device bufferMemory 0 textureDataSize) $ readTextureDataInto . castPtr
-    return (header, bufferRegions, buffer, bufferMemory)
-
 createImageFromKtxTexture ::
   (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
   VkDevice ->
@@ -1904,7 +1891,11 @@ createImageFromKtxTexture ::
   FilePath ->
   ResourceT m (VkImage, VkDeviceMemory, VkImageView, VkSampler)
 createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tiling usageFlags qfis initialLayout filePath = runResourceT $ do
-  (h@KTX.Header{..}, stagingBufferRegions, stagingBuffer, stagingBufferMemory) <- stageKtxTexture device pdmp filePath
+  (h@KTX.Header{..}, stagingBufferRegions, stagingBuffer, stagingBufferMemory) <-
+    KTX.readKtxFile filePath KTX.skipMetadata $ \header () (fromIntegral -> textureDataSize) readTextureDataInto -> do
+      (buffer, bufferMemory) <- lift . lift $ createStagingBuffer device pdmp [] textureDataSize
+      bufferRegions <- with (mappedMemory device bufferMemory 0 textureDataSize) $ readTextureDataInto . castPtr
+      return (header, bufferRegions, buffer, bufferMemory)
 
   let
     isCubeMap = KTX.isCubeMap h
@@ -2129,6 +2120,26 @@ vkaAcquireNextImageKHR device swapchain timeout semaphore fence =
 
 newtype VkaIArray vk = VkaIArray { unVkaIArray :: StorableArray Word32 vk }
 
+newVkaIArray :: Storable vk => Word32 -> (Ptr vk -> IO r) -> IO (r, VkaIArray vk)
+newVkaIArray count fill = do
+  sarr <- newArray_ (0, count-1)
+  (, VkaIArray sarr) <$> withStorableArray sarr fill
+
+newVkaIArray_ :: Storable vk => Word32 -> (Ptr vk -> IO ()) -> IO (VkaIArray vk)
+newVkaIArray_ = fmap snd .: newVkaIArray
+
+acquireVkaIArray :: Storable vk => Word32 -> (Ptr vk -> IO r) -> (Ptr vk -> IO ()) -> Acquire (r, VkaIArray vk)
+acquireVkaIArray count fill destroy =
+  second VkaIArray <$>
+  do
+    sarr <- newArray_ (0, count-1)
+    (, sarr) <$> withStorableArray sarr fill
+  `mkAcquire`
+  (flip withStorableArray destroy . snd)
+
+acquireVkaIArray_ :: Storable vk => Word32 -> (Ptr vk -> IO ()) -> (Ptr vk -> IO ()) -> Acquire (VkaIArray vk)
+acquireVkaIArray_ = fmap snd .:. acquireVkaIArray
+
 vkaNumElements :: Storable vk => VkaIArray vk -> Word32
 vkaNumElements = fromIntegral . unsafePerformIO . getNumElements . unVkaIArray
 
@@ -2147,12 +2158,7 @@ getVkArrayWithResult fillArray =
     let fillArray' = fillArray countPtr
     getCountResult <- fillArray' VK_NULL
     count <- peek countPtr
-    array <- newArray_ (0, count-1)
-    if count > 0 then do
-      fillArrayResult <- withStorableArray array fillArray'
-      return (fillArrayResult, VkaIArray array)
-    else
-      return (getCountResult, VkaIArray array)
+    newVkaIArray count $ \arrPtr -> if count > 0 then fillArray' arrPtr else return getCountResult
 
 getVkArray :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (VkaIArray vk)
 getVkArray = fmap snd . getVkArrayWithResult
