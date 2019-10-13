@@ -135,14 +135,14 @@ resourceMain = do
   ioPutStrLn "Vulkan debug callback registered."
 #endif
 
-  physicalDeviceArray <- getVkArray (vkaEnumeratePhysicalDevices vulkanInstance)
+  physicalDeviceArray <- vkaGetArray_ (vkaEnumeratePhysicalDevices vulkanInstance)
 
   (physicalDevice, physicalDeviceProperties, physicalDeviceMemoryProperties) <-
     liftIO $
     forM (vkaElems physicalDeviceArray) (\pd ->
       liftM2 (pd,,)
-        (getVk . vkGetPhysicalDeviceProperties $ pd)
-        (getVk . vkGetPhysicalDeviceMemoryProperties $ pd)
+        (vkaGet_ . vkGetPhysicalDeviceProperties $ pd)
+        (vkaGet_ . vkGetPhysicalDeviceMemoryProperties $ pd)
     ) <&>
     sortBy (
       mconcat [
@@ -166,7 +166,7 @@ resourceMain = do
   windowSurface <- allocateAcquire_ $ newVulkanGLFWWindowSurface vulkanInstance window
   ioPutStrLn "Window surface created."
 
-  physicalDeviceQueueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
+  physicalDeviceQueueFamilyPropertiesArray <- vkaGetArray_ (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
 
   qfis@[graphicsQfi, computeQfi, transferQfi, presentQfi] <-
     minimumBy (compare `on` length . nub) . fmap (fmap fst) <$> selectionsFromM (vkaAssocs physicalDeviceQueueFamilyPropertiesArray) [
@@ -189,7 +189,7 @@ resourceMain = do
         ]
       ),
       (
-        \(qfi, _) -> (VK_TRUE ==) <$> getVk (vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi windowSurface),
+        \(qfi, _) -> (VK_TRUE ==) <$> vkaGet_ (vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi windowSurface),
         \_ _ -> return EQ
       )
     ]
@@ -213,7 +213,7 @@ resourceMain = do
 
   [(graphicsQueue, graphicsCommandPool), (computeQueue, computeCommandPool), (transferQueue, transferCommandPool), (presentQueue, presentCommandPool)] <-
     forM qfis $ \qfi -> liftM2 (,)
-      (getVk $ vkGetDeviceQueue device qfi 0)
+      (vkaGet_ $ vkGetDeviceQueue device qfi 0)
       (
         allocateAcquireVk_ (commandPoolResource device) $
         createVk $
@@ -303,9 +303,9 @@ resourceMain = do
   doWhileM $ runResourceT $ do
     (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
 
-    surfaceCapabilities <- getVk $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
-    surfaceFormatArray <- getVkArray $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
-    surfacePresentModeArray <- getVkArray $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
+    surfaceCapabilities <- vkaGet_ $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
+    surfaceFormatArray <- vkaGetArray_ $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
+    surfacePresentModeArray <- vkaGetArray_ $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
 
     let
       swapchainImageFormat = VK_FORMAT_B8G8R8A8_UNORM
@@ -373,7 +373,7 @@ resourceMain = do
       set @"oldSwapchain" VK_NULL
     ioPutStrLn "Swapchain created."
 
-    swapchainImageArray <- getVkArray $ vkaGetSwapchainImagesKHR device swapchain
+    swapchainImageArray <- vkaGetArray_ $ vkaGetSwapchainImagesKHR device swapchain
 
     swapchainImageViews <-
       forM (vkaElems swapchainImageArray) $ \image ->
@@ -475,7 +475,7 @@ resourceMain = do
       [VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D24_UNORM_S8_UINT] &
       findM (
         fmap (allAreSet VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT . getField @"optimalTilingFeatures") .
-        getVk . vkGetPhysicalDeviceFormatProperties physicalDevice
+        vkaGet_ . vkGetPhysicalDeviceFormatProperties physicalDevice
       ) &
       fromMaybeM (throwAppEx "No 24-bit depth formats support being used by a depth attachment on this device.")
     ioPutStrLn $ "Depth format chosen: " ++ show depthFormat ++ "."
@@ -834,7 +834,7 @@ resourceMain = do
             vkaWaitForFence device frameSync'inFlightFence maxBound & void
             vkaResetFence device frameSync'inFlightFence
 
-            nextImageIndexWord32@(fromIntegral -> nextImageIndex) <- getVk $ vkaAcquireNextImageKHR device swapchain maxBound frameSync'imageAvailableSemaphore VK_NULL_HANDLE
+            nextImageIndexWord32@(fromIntegral -> nextImageIndex) <- vkaGet_ $ vkaAcquireNextImageKHR device swapchain maxBound frameSync'imageAvailableSemaphore VK_NULL_HANDLE
 
             -- Obviously there is no point in updating the UBO to the same value every time, but I'm leaving this here
             -- so that I can later easily transform the rendered image over time.
@@ -1240,7 +1240,7 @@ allocateAndBindVulkanMemory ::
   QualificationM io (Int, VkMemoryType) ->
   ResourceT io (Maybe VkDeviceMemory)
 allocateAndBindVulkanMemory getMemoryRequirements bindMemory device pdmp obj qualification =
-  getVk (getMemoryRequirements device obj) >>= \memReqs ->
+  vkaGet_ (getMemoryRequirements device obj) >>= \memReqs ->
   lift (
     pickByM qualification .
     filter (testBit (getField @"memoryTypeBits" memReqs) . fst) .
@@ -2087,29 +2087,30 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
 
 type VkaGetter vk r = Ptr vk -> IO r
 
-getVkWithResult :: (MonadIO io, Storable vk) => VkaGetter vk r -> io (r, vk)
-getVkWithResult get =
+vkaGet :: (MonadIO io, Storable vk) => VkaGetter vk r -> io (r, vk)
+vkaGet get =
   liftIO $
   alloca $ \ptr -> do
     result <- get ptr
     value <- peek ptr
     return (result, value)
 
-getVk :: (MonadIO io, Storable vk) => VkaGetter vk r -> io vk
-getVk = fmap snd . getVkWithResult
+vkaGet_ :: (MonadIO io, Storable vk) => VkaGetter vk r -> io vk
+vkaGet_ = fmap snd . vkaGet
 
 onGetterFailureThrow :: String -> [VkResult] -> VkaGetter vk VkResult -> VkaGetter vk VkResult
 onGetterFailureThrow functionName successResults get ptr = get ptr & onVkFailureThrow functionName successResults
 
-vkaGetPhysicalDeviceSurfaceSupportKHR :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> VkaGetter VkBool32 VkResult
-vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface =
-  vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface &
-    onGetterFailureThrow "vkGetPhysicalDeviceSurfaceSupportKHR" [VK_SUCCESS]
+onGetterFailureThrow_ :: String -> VkaGetter vk VkResult -> VkaGetter vk ()
+onGetterFailureThrow_ functionName get ptr = onGetterFailureThrow functionName [VK_SUCCESS] get ptr & void
 
-vkaGetPhysicalDeviceSurfaceCapabilitiesKHR :: VkPhysicalDevice -> VkSurfaceKHR -> VkaGetter VkSurfaceCapabilitiesKHR VkResult
+vkaGetPhysicalDeviceSurfaceSupportKHR :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> VkaGetter VkBool32 ()
+vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface =
+  vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface & onGetterFailureThrow_ "vkGetPhysicalDeviceSurfaceSupportKHR"
+
+vkaGetPhysicalDeviceSurfaceCapabilitiesKHR :: VkPhysicalDevice -> VkSurfaceKHR -> VkaGetter VkSurfaceCapabilitiesKHR ()
 vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface =
-  vkGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface &
-  onGetterFailureThrow "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" [VK_SUCCESS]
+  vkGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface & onGetterFailureThrow_ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"
 
 vkaAcquireNextImageKHR :: VkDevice -> VkSwapchainKHR -> Word64 -> VkSemaphore -> VkFence -> VkaGetter Word32 VkResult
 vkaAcquireNextImageKHR device swapchain timeout semaphore fence =
@@ -2118,8 +2119,8 @@ vkaAcquireNextImageKHR device swapchain timeout semaphore fence =
 
 type VkaArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
 
-getVkArrayWithResult :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (r, VkaIArray vk)
-getVkArrayWithResult fillArray =
+vkaGetArray :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (r, VkaIArray vk)
+vkaGetArray fillArray =
   liftIO $
   alloca $ \countPtr -> do
     let fillArray' = fillArray countPtr
@@ -2127,11 +2128,11 @@ getVkArrayWithResult fillArray =
     count <- peek countPtr
     newVkaIArray count $ \arrPtr -> if count > 0 then fillArray' arrPtr else return getCountResult
 
-getVkArray :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (VkaIArray vk)
-getVkArray = fmap snd . getVkArrayWithResult
+vkaGetArray_ :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (VkaIArray vk)
+vkaGetArray_ = fmap snd . vkaGetArray
 
--- When a VkaArrayFiller is used with getVkArray[WithResult], VK_INCOMPLETE should never be returned, since
--- getVkArray[WithResult] is checking for available count first. Thus, don't provide it as a success result.
+-- When a VkaArrayFiller is used with vkaGetArray, VK_INCOMPLETE will never be returned, since
+-- vkaGetArray is checking for available count first. Thus, don't provide it as a success result.
 onArrayFillerFailureThrow :: String -> [VkResult] -> VkaArrayFiller vk VkResult -> VkaArrayFiller vk VkResult
 onArrayFillerFailureThrow functionName successResults fillArray countPtr arrayPtr = fillArray countPtr arrayPtr & onVkFailureThrow functionName successResults
 
