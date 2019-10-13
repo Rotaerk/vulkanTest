@@ -978,7 +978,7 @@ newVulkanGLFWWindowSurface :: VkInstance -> GLFW.Window -> Acquire VkSurfaceKHR
 newVulkanGLFWWindowSurface vulkanInstance window =
   (
     alloca $ \surfacePtr -> do
-      void $ GLFW.createWindowSurface vulkanInstance window nullPtr surfacePtr & onVkFailureThrow "GLFW.createWindowSurface" [VK_SUCCESS]
+      GLFW.createWindowSurface vulkanInstance window nullPtr surfacePtr & onVkFailureThrow_ "GLFW.createWindowSurface"
       peek surfacePtr
   )
   `mkAcquire`
@@ -1019,6 +1019,9 @@ onVkFailureThrow functionName successResults vkAction = do
   unless (result `elem` successResults) $ throwIO (VkResultException functionName result)
   return result
 
+onVkFailureThrow_ :: String -> IO VkResult -> IO ()
+onVkFailureThrow_ functionName vkAction = onVkFailureThrow functionName [VK_SUCCESS] vkAction & void
+
 data VkaException = VkaException String deriving (Eq, Show, Read)
 
 instance Exception VkaException where
@@ -1056,6 +1059,30 @@ simpleVkaResource ::
   VkaResource ci vk
 simpleVkaResource create destroy = VkaResource (return create) (return destroy)
 
+simpleVkaResource_ ::
+  (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
+  (vk -> Ptr VkAllocationCallbacks -> IO ()) ->
+  String ->
+  VkaResource ci vk
+simpleVkaResource_ create destroy name = simpleVkaResource create destroy name [VK_SUCCESS]
+
+simpleParamVkaResource ::
+  (a -> Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
+  (a -> vk -> Ptr VkAllocationCallbacks -> IO ()) ->
+  String ->
+  [VkResult] ->
+  a ->
+  VkaResource ci vk
+simpleParamVkaResource create destroy name successResults device = simpleVkaResource (create device) (destroy device) name successResults
+
+simpleParamVkaResource_ ::
+  (a -> Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
+  (a -> vk -> Ptr VkAllocationCallbacks -> IO ()) ->
+  String ->
+  a ->
+  VkaResource ci vk
+simpleParamVkaResource_ create destroy name = simpleParamVkaResource create destroy name [VK_SUCCESS]
+
 newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO (VkResult, vk)
 newVkWithResult VkaResource{..} createInfo =
   withPtr createInfo $ \createInfoPtr ->
@@ -1085,7 +1112,7 @@ allocateAcquireVk_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaRes
 allocateAcquireVk_ = allocateAcquire_ .: acquireVk
 
 vulkanInstanceResource :: VkaResource VkInstanceCreateInfo VkInstance
-vulkanInstanceResource = simpleVkaResource vkCreateInstance vkDestroyInstance "vkCreateInstance" [VK_SUCCESS]
+vulkanInstanceResource = simpleVkaResource_ vkCreateInstance vkDestroyInstance "vkCreateInstance"
 
 initStandardInstanceCreateInfo :: CreateVkStruct VkInstanceCreateInfo '["sType", "pNext"] ()
 initStandardInstanceCreateInfo =
@@ -1106,7 +1133,7 @@ registeredDebugReportCallbackResource vulkanInstance =
     [VK_SUCCESS]
 
 deviceResource :: VkPhysicalDevice -> VkaResource VkDeviceCreateInfo VkDevice
-deviceResource physicalDevice = simpleVkaResource (vkCreateDevice physicalDevice) vkDestroyDevice "vkCreateDevice" [VK_SUCCESS]
+deviceResource = simpleParamVkaResource_ vkCreateDevice (const vkDestroyDevice) "vkCreateDevice"
 
 initStandardDeviceCreateInfo :: CreateVkStruct VkDeviceCreateInfo '["sType", "pNext", "flags", "enabledLayerCount", "ppEnabledLayerNames"] ()
 initStandardDeviceCreateInfo =
@@ -1122,7 +1149,7 @@ initStandardDeviceQueueCreateInfo =
   set @"pNext" VK_NULL
 
 commandPoolResource :: VkDevice -> VkaResource VkCommandPoolCreateInfo VkCommandPool
-commandPoolResource device = simpleVkaResource (vkCreateCommandPool device) (vkDestroyCommandPool device) "vkCreateCommandPool" [VK_SUCCESS]
+commandPoolResource = simpleParamVkaResource_ vkCreateCommandPool vkDestroyCommandPool "vkCreateCommandPool"
 
 initStandardCommandPoolCreateInfo :: CreateVkStruct VkCommandPoolCreateInfo '["sType", "pNext"] ()
 initStandardCommandPoolCreateInfo =
@@ -1130,7 +1157,7 @@ initStandardCommandPoolCreateInfo =
   set @"pNext" VK_NULL
 
 descriptorSetLayoutResource :: VkDevice -> VkaResource VkDescriptorSetLayoutCreateInfo VkDescriptorSetLayout
-descriptorSetLayoutResource device = simpleVkaResource (vkCreateDescriptorSetLayout device) (vkDestroyDescriptorSetLayout device) "vkCreateDescriptorSetLayout" [VK_SUCCESS]
+descriptorSetLayoutResource = simpleParamVkaResource_ vkCreateDescriptorSetLayout vkDestroyDescriptorSetLayout "vkCreateDescriptorSetLayout"
 
 initStandardDescriptorSetLayoutCreateInfo :: CreateVkStruct VkDescriptorSetLayoutCreateInfo '["sType", "pNext"] ()
 initStandardDescriptorSetLayoutCreateInfo =
@@ -1138,7 +1165,7 @@ initStandardDescriptorSetLayoutCreateInfo =
   set @"pNext" VK_NULL
 
 pipelineLayoutResource :: VkDevice -> VkaResource VkPipelineLayoutCreateInfo VkPipelineLayout
-pipelineLayoutResource device = simpleVkaResource (vkCreatePipelineLayout device) (vkDestroyPipelineLayout device) "vkCreatePipelineLayout" [VK_SUCCESS]
+pipelineLayoutResource = simpleParamVkaResource_ vkCreatePipelineLayout vkDestroyPipelineLayout "vkCreatePipelineLayout"
 
 initStandardPipelineLayoutCreateInfo :: CreateVkStruct VkPipelineLayoutCreateInfo '["sType", "pNext", "flags"] ()
 initStandardPipelineLayoutCreateInfo =
@@ -1147,7 +1174,7 @@ initStandardPipelineLayoutCreateInfo =
   set @"flags" zeroBits
 
 allocatedMemoryResource :: VkDevice -> VkaResource VkMemoryAllocateInfo VkDeviceMemory
-allocatedMemoryResource device = simpleVkaResource (vkAllocateMemory device) (vkFreeMemory device) "vkAllocateMemory" [VK_SUCCESS]
+allocatedMemoryResource = simpleParamVkaResource_ vkAllocateMemory vkFreeMemory "vkAllocateMemory"
 
 initStandardMemoryAllocateInfo :: CreateVkStruct VkMemoryAllocateInfo '["sType", "pNext"] ()
 initStandardMemoryAllocateInfo =
@@ -1155,7 +1182,7 @@ initStandardMemoryAllocateInfo =
   set @"pNext" VK_NULL
 
 bufferResource :: VkDevice -> VkaResource VkBufferCreateInfo VkBuffer
-bufferResource device = simpleVkaResource (vkCreateBuffer device) (vkDestroyBuffer device) "vkCreateBuffer" [VK_SUCCESS]
+bufferResource = simpleParamVkaResource_ vkCreateBuffer vkDestroyBuffer "vkCreateBuffer"
 
 initStandardBufferCreateInfo :: CreateVkStruct VkBufferCreateInfo '["sType", "pNext"] ()
 initStandardBufferCreateInfo =
@@ -1202,7 +1229,7 @@ setImageSharingQueueFamilyIndices qfis =
     qfis' = if length qfis > 1 then qfis else []
 
 imageResource :: VkDevice -> VkaResource VkImageCreateInfo VkImage
-imageResource device = simpleVkaResource (vkCreateImage device) (vkDestroyImage device) "vkCreateImage" [VK_SUCCESS]
+imageResource = simpleParamVkaResource_ vkCreateImage vkDestroyImage "vkCreateImage"
 
 initStandardImageCreateInfo :: CreateVkStruct VkImageCreateInfo '["sType", "pNext"] ()
 initStandardImageCreateInfo =
@@ -1248,8 +1275,7 @@ allocateAndBindBufferMemory = allocateAndBindVulkanMemory vkGetBufferMemoryRequi
 
 vkaBindBufferMemory :: VkDevice -> VkBuffer -> VkDeviceMemory -> VkDeviceSize -> IO ()
 vkaBindBufferMemory device buffer memory memoryOffset =
-  void $ vkBindBufferMemory device buffer memory memoryOffset &
-    onVkFailureThrow "vkBindBufferMemory" [VK_SUCCESS]
+  vkBindBufferMemory device buffer memory memoryOffset & onVkFailureThrow_ "vkBindBufferMemory"
 
 allocateAndBindImageMemory ::
   MonadUnliftIO io =>
@@ -1262,8 +1288,7 @@ allocateAndBindImageMemory = allocateAndBindVulkanMemory vkGetImageMemoryRequire
 
 vkaBindImageMemory :: VkDevice -> VkImage -> VkDeviceMemory -> VkDeviceSize -> IO ()
 vkaBindImageMemory device buffer memory memoryOffset =
-  void $ vkBindImageMemory device buffer memory memoryOffset &
-    onVkFailureThrow "vkBindImageMemory" [VK_SUCCESS]
+  vkBindImageMemory device buffer memory memoryOffset & onVkFailureThrow_ "vkBindImageMemory"
 
 createBoundBuffer ::
   (MonadUnliftIO m, MonadThrow m) =>
@@ -1395,8 +1420,7 @@ createBoundImage device pdmp qualification imageCreateInfo = runResourceT $ do
 vkaMapMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> VkMemoryMapFlags -> IO (Ptr Void)
 vkaMapMemory device deviceMemory offset size flags =
   alloca $ \ptrPtr -> do
-    void $ vkMapMemory device deviceMemory offset size flags ptrPtr &
-      onVkFailureThrow "vkMapMemory" [VK_SUCCESS]
+    vkMapMemory device deviceMemory offset size flags ptrPtr & onVkFailureThrow_ "vkMapMemory"
     peek ptrPtr
 
 mappedMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> Acquire (Ptr Void)
@@ -1406,7 +1430,7 @@ mappedMemory device deviceMemory offset size =
   const (vkUnmapMemory device deviceMemory)
 
 imageViewResource :: VkDevice -> VkaResource VkImageViewCreateInfo VkImageView
-imageViewResource device = simpleVkaResource (vkCreateImageView device) (vkDestroyImageView device) "vkCreateImageView" [VK_SUCCESS]
+imageViewResource = simpleParamVkaResource_ vkCreateImageView vkDestroyImageView "vkCreateImageView"
 
 initStandardImageViewCreateInfo :: CreateVkStruct VkImageViewCreateInfo '["sType", "pNext"] ()
 initStandardImageViewCreateInfo =
@@ -1414,7 +1438,7 @@ initStandardImageViewCreateInfo =
   set @"pNext" VK_NULL
 
 samplerResource :: VkDevice -> VkaResource VkSamplerCreateInfo VkSampler
-samplerResource device = simpleVkaResource (vkCreateSampler device) (vkDestroySampler device) "vkCreateSampler" [VK_SUCCESS]
+samplerResource = simpleParamVkaResource_ vkCreateSampler vkDestroySampler "vkCreateSampler"
 
 initStandardSamplerCreateInfo :: CreateVkStruct VkSamplerCreateInfo '["sType", "pNext"] ()
 initStandardSamplerCreateInfo =
@@ -1428,8 +1452,7 @@ allocatedCommandBuffers device allocateInfo =
     array <- newArray_ (0, commandBufferCount-1)
     when (commandBufferCount > 0) $
       withPtr allocateInfo $ \allocateInfoPtr ->
-        void $ withStorableArray array (vkAllocateCommandBuffers device allocateInfoPtr) &
-          onVkFailureThrow "vkAllocateCommandBuffers" [VK_SUCCESS]
+        withStorableArray array (vkAllocateCommandBuffers device allocateInfoPtr) & onVkFailureThrow_ "vkAllocateCommandBuffers"
     return array
   `mkAcquire`
   if commandBufferCount > 0 then
@@ -1450,13 +1473,11 @@ recordingCommandBuffer :: VkCommandBuffer -> VkCommandBufferBeginInfo -> Acquire
 recordingCommandBuffer commandBuffer beginInfo =
   (
     withPtr beginInfo $ \beginInfoPtr ->
-      void $ vkBeginCommandBuffer commandBuffer beginInfoPtr &
-        onVkFailureThrow "vkBeginCommandBuffer" [VK_SUCCESS]
+      vkBeginCommandBuffer commandBuffer beginInfoPtr & onVkFailureThrow_ "vkBeginCommandBuffer"
   )
   `mkAcquire`
   const (
-    void $ vkEndCommandBuffer commandBuffer &
-      onVkFailureThrow "vkEndCommandBuffer" [VK_SUCCESS]
+    vkEndCommandBuffer commandBuffer & onVkFailureThrow_ "vkEndCommandBuffer"
   )
 
 initStandardCommandBufferBeginInfo :: CreateVkStruct VkCommandBufferBeginInfo '["sType", "pNext"] ()
@@ -1479,8 +1500,7 @@ allocatedDescriptorSets device allocateInfo =
   `mkAcquire`
   if descriptorSetCount > 0 then
     \descriptorSetArray ->
-      void $ withStorableArray descriptorSetArray (vkFreeDescriptorSets device descriptorPool descriptorSetCount) &
-        onVkFailureThrow "vkFreeDescriptorSets" [VK_SUCCESS]
+      withStorableArray descriptorSetArray (vkFreeDescriptorSets device descriptorPool descriptorSetCount) & onVkFailureThrow_ "vkFreeDescriptorSets"
   else
     const $ return ()
 
@@ -1496,8 +1516,7 @@ allocateDescriptorSetsSA device allocateInfo = do
   array <- newArray_ (0, descriptorSetCount-1)
   when (descriptorSetCount > 0) $
     withPtr allocateInfo $ \allocateInfoPtr ->
-      void $ withStorableArray array (vkAllocateDescriptorSets device allocateInfoPtr) &
-        onVkFailureThrow "vkAllocateDescriptorSets" [VK_SUCCESS]
+      withStorableArray array (vkAllocateDescriptorSets device allocateInfoPtr) & onVkFailureThrow_ "vkAllocateDescriptorSets"
   return array
 
   where
@@ -1525,12 +1544,12 @@ initStandardDescriptorSetAllocateInfo =
   set @"pNext" VK_NULL
 
 vkaQueueWaitIdle :: VkQueue -> IO ()
-vkaQueueWaitIdle queue = void $ vkQueueWaitIdle queue & onVkFailureThrow "vkQueueWaitIdle" [VK_SUCCESS]
+vkaQueueWaitIdle queue = vkQueueWaitIdle queue & onVkFailureThrow_ "vkQueueWaitIdle"
 
 vkaQueueSubmit :: VkQueue -> VkFence -> [VkSubmitInfo] -> IO ()
 vkaQueueSubmit queue fence submitInfos =
   withArray submitInfos $ \submitInfosPtr ->
-  vkQueueSubmit queue (lengthNum submitInfos) submitInfosPtr fence & onVkFailureThrow "vkQueueSubmit" [VK_SUCCESS] & void
+  vkQueueSubmit queue (lengthNum submitInfos) submitInfosPtr fence & onVkFailureThrow_ "vkQueueSubmit"
 
 initStandardSubmitInfo :: CreateVkStruct VkSubmitInfo '["sType", "pNext"] ()
 initStandardSubmitInfo =
@@ -1540,8 +1559,7 @@ initStandardSubmitInfo =
 vkaQueuePresentKHR :: VkQueue -> VkPresentInfoKHR -> IO VkResult
 vkaQueuePresentKHR queue presentInfo =
   withPtr presentInfo $ \presentInfoPtr ->
-  vkQueuePresentKHR queue presentInfoPtr &
-    onVkFailureThrow "vkQueuePresentKHR" [VK_SUCCESS, VK_SUBOPTIMAL_KHR]
+  vkQueuePresentKHR queue presentInfoPtr & onVkFailureThrow "vkQueuePresentKHR" [VK_SUCCESS, VK_SUBOPTIMAL_KHR]
 
 initStandardPresentInfoKHR :: CreateVkStruct VkPresentInfoKHR '["sType", "pNext"] ()
 initStandardPresentInfoKHR =
@@ -1556,7 +1574,7 @@ setSubmitWaitSemaphoresAndStageFlags waitSemaphoresAndStageFlags =
   setListRef @"pWaitDstStageMask" (snd <$> waitSemaphoresAndStageFlags)
 
 fenceResource :: VkDevice -> VkaResource VkFenceCreateInfo VkFence
-fenceResource device = simpleVkaResource (vkCreateFence device) (vkDestroyFence device) "vkCreateFence" [VK_SUCCESS]
+fenceResource = simpleParamVkaResource_ vkCreateFence vkDestroyFence "vkCreateFence"
 
 initStandardFenceCreateInfo :: CreateVkStruct VkFenceCreateInfo '["sType", "pNext"] ()
 initStandardFenceCreateInfo =
@@ -1572,8 +1590,7 @@ createFence device signaled = allocateAcquireVk_ (fenceResource device) $ create
 vkaWaitForFences :: VkDevice -> [VkFence] -> VkBool32 -> Word64 -> IO VkResult
 vkaWaitForFences device fences waitAll timeout =
   withArray fences $ \fencesPtr ->
-  vkWaitForFences device (lengthNum fences) fencesPtr waitAll timeout &
-    onVkFailureThrow "vkWaitForFences" [VK_SUCCESS, VK_TIMEOUT]
+  vkWaitForFences device (lengthNum fences) fencesPtr waitAll timeout & onVkFailureThrow "vkWaitForFences" [VK_SUCCESS, VK_TIMEOUT]
 
 vkaWaitForFence :: VkDevice -> VkFence -> Word64 -> IO VkResult
 vkaWaitForFence device fence timeout = vkaWaitForFences device [fence] VK_TRUE timeout
@@ -1581,17 +1598,16 @@ vkaWaitForFence device fence timeout = vkaWaitForFences device [fence] VK_TRUE t
 vkaResetFences :: VkDevice -> [VkFence] -> IO ()
 vkaResetFences device fences =
   withArray fences $ \fencesPtr ->
-  void $ vkResetFences device (lengthNum fences) fencesPtr &
-    onVkFailureThrow "vkResetFences" [VK_SUCCESS]
+  vkResetFences device (lengthNum fences) fencesPtr & onVkFailureThrow_ "vkResetFences"
 
 vkaResetFence :: VkDevice -> VkFence -> IO ()
 vkaResetFence device fence = vkaResetFences device [fence]
 
 vkaDeviceWaitIdle :: VkDevice -> IO ()
-vkaDeviceWaitIdle device = vkDeviceWaitIdle device & onVkFailureThrow "vkDeviceWaitIdle" [VK_SUCCESS] & void
+vkaDeviceWaitIdle device = vkDeviceWaitIdle device & onVkFailureThrow_ "vkDeviceWaitIdle"
 
 semaphoreResource :: VkDevice -> VkaResource VkSemaphoreCreateInfo VkSemaphore
-semaphoreResource device = simpleVkaResource (vkCreateSemaphore device) (vkDestroySemaphore device) "vkCreateSemaphore" [VK_SUCCESS]
+semaphoreResource = simpleParamVkaResource_ vkCreateSemaphore vkDestroySemaphore "vkCreateSemaphore"
 
 initStandardSemaphoreCreateInfo :: CreateVkStruct VkSemaphoreCreateInfo '["sType", "pNext"] ()
 initStandardSemaphoreCreateInfo =
@@ -1602,7 +1618,7 @@ createSemaphore :: MonadIO m => VkDevice -> ResourceT m VkSemaphore
 createSemaphore device = allocateAcquireVk_ (semaphoreResource device) $ createVk initStandardSemaphoreCreateInfo
 
 swapchainResource :: VkDevice -> VkaResource VkSwapchainCreateInfoKHR VkSwapchainKHR
-swapchainResource device = simpleVkaResource (vkCreateSwapchainKHR device) (vkDestroySwapchainKHR device) "vkCreateSwapchainKHR" [VK_SUCCESS]
+swapchainResource = simpleParamVkaResource_ vkCreateSwapchainKHR vkDestroySwapchainKHR "vkCreateSwapchainKHR"
 
 initStandardSwapchainCreateInfo :: CreateVkStruct VkSwapchainCreateInfoKHR '["sType", "pNext"] ()
 initStandardSwapchainCreateInfo =
@@ -1610,7 +1626,7 @@ initStandardSwapchainCreateInfo =
   set @"pNext" VK_NULL
 
 descriptorPoolResource :: VkDevice -> VkaResource VkDescriptorPoolCreateInfo VkDescriptorPool
-descriptorPoolResource device = simpleVkaResource (vkCreateDescriptorPool device) (vkDestroyDescriptorPool device) "vkCreateDescriptorPool" [VK_SUCCESS]
+descriptorPoolResource = simpleParamVkaResource_ vkCreateDescriptorPool vkDestroyDescriptorPool "vkCreateDescriptorPool"
 
 initStandardDescriptorPoolCreateInfo :: CreateVkStruct VkDescriptorPoolCreateInfo '["sType", "pNext"] ()
 initStandardDescriptorPoolCreateInfo =
@@ -1618,7 +1634,7 @@ initStandardDescriptorPoolCreateInfo =
   set @"pNext" VK_NULL
 
 renderPassResource :: VkDevice -> VkaResource VkRenderPassCreateInfo VkRenderPass
-renderPassResource device = simpleVkaResource (vkCreateRenderPass device) (vkDestroyRenderPass device) "vkCreateRenderPass" [VK_SUCCESS]
+renderPassResource = simpleParamVkaResource_ vkCreateRenderPass vkDestroyRenderPass "vkCreateRenderPass"
 
 initStandardRenderPassCreateInfo :: CreateVkStruct VkRenderPassCreateInfo '["sType", "pNext", "flags"] ()
 initStandardRenderPassCreateInfo =
@@ -1631,8 +1647,7 @@ vkaCreateGraphicsPipelines device pipelineCache createInfos@(lengthNum -> count)
   withArray createInfos $ \createInfosPtr -> do
     array <- newArray_ (0, count-1)
     when (count > 0) $
-      void $ withStorableArray array (vkCreateGraphicsPipelines device pipelineCache count createInfosPtr VK_NULL) &
-        onVkFailureThrow "vkCreateGraphicsPipelines" [VK_SUCCESS]
+      withStorableArray array (vkCreateGraphicsPipelines device pipelineCache count createInfosPtr VK_NULL) & onVkFailureThrow_ "vkCreateGraphicsPipelines"
     return $ VkaIArray array
 
 registerGraphicsPipelineForDestruction :: MonadResource m => VkDevice -> VkPipeline -> m ReleaseKey
@@ -1647,7 +1662,7 @@ initStandardGraphicsPipelineCreateInfo =
   set @"pNext" VK_NULL
 
 shaderModuleResource :: VkDevice -> VkaResource VkShaderModuleCreateInfo VkShaderModule
-shaderModuleResource device = simpleVkaResource (vkCreateShaderModule device) (vkDestroyShaderModule device) "vkCreateShaderModule" [VK_SUCCESS]
+shaderModuleResource = simpleParamVkaResource_ vkCreateShaderModule vkDestroyShaderModule "vkCreateShaderModule"
 
 initStandardShaderModuleCreateInfo :: CreateVkStruct VkShaderModuleCreateInfo '["sType", "pNext", "flags"] ()
 initStandardShaderModuleCreateInfo =
@@ -1721,7 +1736,7 @@ initStandardPipelineColorBlendStateCreateInfo =
   set @"pNext" VK_NULL
 
 framebufferResource :: VkDevice -> VkaResource VkFramebufferCreateInfo VkFramebuffer
-framebufferResource device = simpleVkaResource (vkCreateFramebuffer device) (vkDestroyFramebuffer device) "vkCreateFramebuffer" [VK_SUCCESS]
+framebufferResource = simpleParamVkaResource_ vkCreateFramebuffer vkDestroyFramebuffer "vkCreateFramebuffer"
 
 initStandardFramebufferCreateInfo :: CreateVkStruct VkFramebufferCreateInfo '["sType", "pNext"] ()
 initStandardFramebufferCreateInfo =
