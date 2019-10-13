@@ -171,7 +171,7 @@ resourceMain = do
   physicalDeviceQueueFamilyPropertiesArray <- getVkArray (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
 
   qfis@[graphicsQfi, computeQfi, transferQfi, presentQfi] <-
-    fmap fst . minimumBy (compare `on` length . nub) <$> selectionsFromM (vkaAssocs physicalDeviceQueueFamilyPropertiesArray) [
+    minimumBy (compare `on` length . nub) . fmap (fmap fst) <$> selectionsFromM (vkaAssocs physicalDeviceQueueFamilyPropertiesArray) [
       (
         return . someAreSet VK_QUEUE_GRAPHICS_BIT . getField @"queueFlags" . snd,
         preferWhereM [
