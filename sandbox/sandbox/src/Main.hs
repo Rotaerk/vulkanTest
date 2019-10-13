@@ -28,27 +28,20 @@ import qualified Codec.Image.Ktx.VkConstants as KTX
 import Control.Applicative
 import Control.Exception (throw)
 import Control.Monad
-import Control.Monad.BufferWriter
 import Control.Monad.Extra
 import Control.Monad.Fail
-import Control.Monad.FileReader
 import Control.Monad.IO.Class
-import Control.Monad.Loops
 import Control.Monad.Reader
-import Control.Monad.State
 import qualified Control.Monad.ST as ST
 import Control.Monad.Trans.Resource
-import Control.Monad.IO.Unlift
 import Data.Acquire.Local
 import Data.Array.Base as DAB
 import Data.Array.Storable
-import Data.Array.Unsafe
 import Data.Bits.Local
 import Data.Bool
 import Data.Foldable
 import Data.Function
 import Data.Functor
-import Data.Functor.Identity
 import Data.IORef
 import Data.List
 import Data.Maybe
@@ -56,17 +49,13 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Tuple.Extra
 import Data.Word
-import Debug.Trace
 import Foreign.C.String
-import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Array
 import Foreign.Marshal.Array.Sized
 import Foreign.Ptr
 import Foreign.Storable
 
-import qualified GHC.Base as GHC
-import qualified GHC.ForeignPtr as GHC
 import GHC.Generics (Generic)
 
 import qualified Graphics.UI.GLFW as GLFW
@@ -81,12 +70,9 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
 
 import Numeric.DataFrame hiding (sortBy)
-import qualified Numeric.DataFrame as DF
 import qualified Numeric.DataFrame.ST as ST
 import Numeric.Dimensions
-import Numeric.PrimBytes
 
-import Safe.Foldable
 import System.Clock
 import System.IO
 import System.IO.Unsafe
@@ -284,7 +270,7 @@ resourceMain = do
       (VK_IMAGE_USAGE_TRANSFER_SRC_BIT .|. VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
       [graphicsQfi]
       VK_IMAGE_LAYOUT_UNDEFINED
-      "../ktx-rw/ktx-rw/textures/oak_leafs.ktx"
+      "../ktx-rw/ktx-rw/textures/oak_bark.ktx"
   ioPutStrLn "Loaded KTX texture to an image."
 
   (vertexBuffer, vertexBufferMemory) <-
@@ -462,7 +448,7 @@ resourceMain = do
               createVk $
               set @"buffer" uniformBuffer &*
               set @"offset" 0 &*
-              set @"range" (fromIntegral $ bSizeOf @UniformBufferObject undefined)
+              set @"range" (bSizeOf @UniformBufferObject undefined)
             ] &*
             set @"pImageInfo" VK_NULL &*
             set @"pTexelBufferView" VK_NULL,
@@ -587,7 +573,7 @@ resourceMain = do
               setListCountAndRef @"vertexBindingDescriptionCount" @"pVertexBindingDescriptions" (
                 createVk <$> [
                   set @"binding" 0 &*
-                  set @"stride" (fromIntegral $ bSizeOf @SVertex undefined) &*
+                  set @"stride" (bSizeOf @SVertex undefined) &*
                   set @"inputRate" VK_VERTEX_INPUT_RATE_VERTEX
                 ]
               ) &*
@@ -851,7 +837,7 @@ resourceMain = do
             (guard . (VK_ERROR_OUT_OF_DATE_KHR ==) . vkaResultException'result)
             (const $ return $ Just True)
           $ do
-            vkaWaitForFence device frameSync'inFlightFence maxBound
+            vkaWaitForFence device frameSync'inFlightFence maxBound & void
             vkaResetFence device frameSync'inFlightFence
 
             nextImageIndexWord32@(fromIntegral -> nextImageIndex) <- getVk $ vkaAcquireNextImageKHR device swapchain maxBound frameSync'imageAvailableSemaphore VK_NULL_HANDLE
@@ -886,7 +872,7 @@ resourceMain = do
               _ -> return Nothing
 
     ioPutStrLn "Render loop ended.  Waiting for device to idle."
-    liftIO $ vkDeviceWaitIdle device
+    liftIO $ vkaDeviceWaitIdle device
 
     ioPutStrLn "Cleaning up swapchain-related objects."
     return shouldRebuildSwapchain
@@ -1293,7 +1279,7 @@ createBoundBuffer device pdmp qualification bufferCreateInfo = runResourceT $ do
     fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the buffer.") $
     allocateAndBindBufferMemory device pdmp buffer qualification
   -- To force the buffer to be freed before the memory it's bound to.
-  lift . register =<< fromJust <$> unprotect bufferReleaseKey
+  lift . register_ =<< fromJust <$> unprotect bufferReleaseKey
   return (buffer, memory)
 
 createStagingBuffer ::
@@ -1387,7 +1373,7 @@ createFilledBufferFromPrimBytes ::
   pb ->
   ResourceT m (VkBuffer, VkDeviceMemory)
 createFilledBufferFromPrimBytes device pdmp commandPool queue usageFlags qfis pb =
-  createFilledBuffer device pdmp commandPool queue usageFlags qfis (fromIntegral $ bSizeOf pb) (flip poke pb . castPtr)
+  createFilledBuffer device pdmp commandPool queue usageFlags qfis (bSizeOf pb) (flip poke pb . castPtr)
 
 createBoundImage ::
   (MonadUnliftIO m, MonadThrow m) =>
@@ -1403,7 +1389,7 @@ createBoundImage device pdmp qualification imageCreateInfo = runResourceT $ do
     fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the image.") $
     allocateAndBindImageMemory device pdmp image qualification
   -- To force the image to be freed before the memory it's bound to.
-  lift . register =<< fromJust <$> unprotect imageReleaseKey
+  lift . register_ =<< fromJust <$> unprotect imageReleaseKey
   return (image, memory)
 
 vkaMapMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> VkMemoryMapFlags -> IO (Ptr Void)
@@ -1544,8 +1530,7 @@ vkaQueueWaitIdle queue = void $ vkQueueWaitIdle queue & onVkFailureThrow "vkQueu
 vkaQueueSubmit :: VkQueue -> VkFence -> [VkSubmitInfo] -> IO ()
 vkaQueueSubmit queue fence submitInfos =
   withArray submitInfos $ \submitInfosPtr ->
-  void $ vkQueueSubmit queue (lengthNum submitInfos) submitInfosPtr fence &
-    onVkFailureThrow "vkQueueSubmit" [VK_SUCCESS]
+  vkQueueSubmit queue (lengthNum submitInfos) submitInfosPtr fence & onVkFailureThrow "vkQueueSubmit" [VK_SUCCESS] & void
 
 initStandardSubmitInfo :: CreateVkStruct VkSubmitInfo '["sType", "pNext"] ()
 initStandardSubmitInfo =
@@ -1601,6 +1586,9 @@ vkaResetFences device fences =
 
 vkaResetFence :: VkDevice -> VkFence -> IO ()
 vkaResetFence device fence = vkaResetFences device [fence]
+
+vkaDeviceWaitIdle :: VkDevice -> IO ()
+vkaDeviceWaitIdle device = vkDeviceWaitIdle device & onVkFailureThrow "vkDeviceWaitIdle" [VK_SUCCESS] & void
 
 semaphoreResource :: VkDevice -> VkaResource VkSemaphoreCreateInfo VkSemaphore
 semaphoreResource device = simpleVkaResource (vkCreateSemaphore device) (vkDestroySemaphore device) "vkCreateSemaphore" [VK_SUCCESS]
@@ -1775,7 +1763,7 @@ executeCommands device commandPool submissionQueue fillCommandBuffer = runResour
         setListCountAndRef @"commandBufferCount" @"pCommandBuffers" [commandBuffer] &*
         setListCountAndRef @"signalSemaphoreCount" @"pSignalSemaphores" []
       ]
-    vkaWaitForFence device executionCompleteFence maxBound
+    vkaWaitForFence device executionCompleteFence maxBound & void
 
   return result
 
@@ -2211,6 +2199,9 @@ glToVkProjection = mat44f
 newFunPtrFrom :: IO (FunPtr f) -> Acquire (FunPtr f)
 newFunPtrFrom = flip mkAcquire freeHaskellFunPtr
 
+register_ :: MonadResource m => IO () -> m ()
+register_ = void . register
+
 lengthNum :: (Foldable t, Num n) => t a -> n
 lengthNum = fromIntegral . length
 {-# INLINE lengthNum #-}
@@ -2246,15 +2237,6 @@ assertPred p a = assert (p a) a
 
 doWhileM :: Monad m => m Bool -> m ()
 doWhileM a = fix $ \loop -> a >>= bool (return ()) loop
-
-instance (MArray a e m, MonadTrans t, Monad (t m)) => MArray a e (t m) where
-  getBounds = lift . getBounds
-  getNumElements = lift . getNumElements
-  newArray = lift .: DAB.newArray
-  newArray_ = lift . newArray_
-  unsafeNewArray_ = lift . unsafeNewArray_
-  unsafeRead = lift .: unsafeRead
-  unsafeWrite = lift .:. unsafeWrite
 
 {-# INLINE mat44f #-}
 mat44f ::

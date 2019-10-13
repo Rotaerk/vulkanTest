@@ -6,8 +6,6 @@ module Data.Bits.Local (
   setIf
 ) where
 
-import Prelude.Local
-
 import Data.Bits
 
 allAreSet :: Bits b => b -> b -> Bool

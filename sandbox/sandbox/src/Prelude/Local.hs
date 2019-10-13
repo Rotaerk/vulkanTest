@@ -6,11 +6,8 @@ module Prelude.Local where
 
 import Control.Monad
 import Control.Monad.Loops
-import Data.Foldable
 import Data.Function
 import Data.Functor
-import Data.Functor.Identity
-import Data.Maybe
 import Safe.Foldable
   
 (.:) :: (c -> d) -> (a -> b -> c) -> a -> b -> d
