@@ -1,5 +1,35 @@
 module Graphics.VulkanAux (
-  module Graphics.VulkanAux.Array
+  module Graphics.VulkanAux.Array,
+  module Graphics.VulkanAux.ArrayFiller,
+  module Graphics.VulkanAux.Buffer,
+  module Graphics.VulkanAux.Command,
+  module Graphics.VulkanAux.CommandBuffer,
+  module Graphics.VulkanAux.Exception,
+  module Graphics.VulkanAux.Fence,
+  module Graphics.VulkanAux.Getter,
+  module Graphics.VulkanAux.GLFW,
+  module Graphics.VulkanAux.Image,
+  module Graphics.VulkanAux.ImageView,
+  module Graphics.VulkanAux.KTX,
+  module Graphics.VulkanAux.Memory,
+  module Graphics.VulkanAux.Queue,
+  module Graphics.VulkanAux.Resource,
+  module Graphics.VulkanAux.Sampler
 ) where
 
 import Graphics.VulkanAux.Array
+import Graphics.VulkanAux.ArrayFiller
+import Graphics.VulkanAux.Buffer
+import Graphics.VulkanAux.Command
+import Graphics.VulkanAux.CommandBuffer
+import Graphics.VulkanAux.Exception
+import Graphics.VulkanAux.Fence
+import Graphics.VulkanAux.Getter
+import Graphics.VulkanAux.GLFW
+import Graphics.VulkanAux.Image
+import Graphics.VulkanAux.ImageView
+import Graphics.VulkanAux.KTX
+import Graphics.VulkanAux.Memory
+import Graphics.VulkanAux.Queue
+import Graphics.VulkanAux.Resource
+import Graphics.VulkanAux.Sampler

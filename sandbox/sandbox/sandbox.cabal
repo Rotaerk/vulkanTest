@@ -25,8 +25,25 @@ executable sandbox
     Data.Acquire.Local
     Data.Bits.Local
     Foreign.Marshal.Array.Sized
+    Graphics.UI.GLFWAux
+    Graphics.Vulkan.Marshal.Local
     Graphics.VulkanAux
     Graphics.VulkanAux.Array
+    Graphics.VulkanAux.ArrayFiller
+    Graphics.VulkanAux.Buffer
+    Graphics.VulkanAux.Command
+    Graphics.VulkanAux.CommandBuffer
+    Graphics.VulkanAux.Exception
+    Graphics.VulkanAux.Fence
+    Graphics.VulkanAux.Getter
+    Graphics.VulkanAux.GLFW
+    Graphics.VulkanAux.Image
+    Graphics.VulkanAux.ImageView
+    Graphics.VulkanAux.KTX
+    Graphics.VulkanAux.Memory
+    Graphics.VulkanAux.Queue
+    Graphics.VulkanAux.Resource
+    Graphics.VulkanAux.Sampler
     Prelude.Local
     Paths_sandbox
   ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches -fno-ignore-asserts
@@ -37,6 +54,7 @@ executable sandbox
     dimensions,
     easytensor,
     easytensor-vulkan,
+    exceptions,
     extra,
     GLFW-b,
     ktx-rw,
@@ -52,4 +70,11 @@ executable sandbox
     vulkan-api,
 
     base >=4.12 && <4.13
+  default-extensions:
+    DataKinds,
+    LambdaCase,
+    ScopedTypeVariables,
+    TupleSections,
+    TypeApplications,
+    ViewPatterns
   default-language:    Haskell2010

@@ -1,21 +1,15 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE ViewPatterns #-}
 
 module Main where
 
@@ -55,6 +49,7 @@ import Foreign.Storable
 import GHC.Generics (Generic)
 
 import qualified Graphics.UI.GLFW as GLFW
+import Graphics.UI.GLFWAux
 
 import Graphics.Vulkan
 import Graphics.Vulkan.Core_1_0
@@ -268,7 +263,7 @@ resourceMain = do
   ioPutStrLn "Loaded KTX texture to an image."
 
   (vertexBuffer, vertexBufferMemory) <-
-    createFilledBufferFromPrimBytes
+    vkaCreateFilledBufferFromPrimBytes
       device
       physicalDeviceMemoryProperties
       transferCommandPool
@@ -285,7 +280,7 @@ resourceMain = do
   ioPutStrLn "Vertex buffer created."
 
   (indexBuffer, indexBufferMemory) <-
-    createFilledBufferFromPrimBytes
+    vkaCreateFilledBufferFromPrimBytes
       device
       physicalDeviceMemoryProperties
       transferCommandPool
@@ -295,7 +290,7 @@ resourceMain = do
       (packDF @Word32 @6 @'[] 0 2 1 0 3 2)
   ioPutStrLn "Index buffer created."
 
-  frameSyncs <- replicateM maxFramesInFlight $ FrameSync <$> createFence device True <*> createSemaphore device <*> createSemaphore device
+  frameSyncs <- replicateM maxFramesInFlight $ FrameSync <$> vkaCreateFence device True <*> createSemaphore device <*> createSemaphore device
   ioPutStrLn "Frame syncs created."
 
   renderStartTimeRef <- liftIO $ newIORef Nothing
@@ -377,7 +372,7 @@ resourceMain = do
 
     swapchainImageViews <-
       forM (vkaElems swapchainImageArray) $ \image ->
-        allocateAcquireVk_ (imageViewResource device) $
+        allocateAcquireVk_ (vkaImageViewResource device) $
         createVk $
         initStandardImageViewCreateInfo &*
         set @"flags" zeroBits &*
@@ -403,7 +398,7 @@ resourceMain = do
 
     (uniformBuffers, uniformBufferMemories) <-
       fmap unzip . replicateM swapchainImageCount $
-      createUniformBufferForPrimBytes @UniformBufferObject device physicalDeviceMemoryProperties []
+      vkaCreateUniformBufferForPrimBytes @UniformBufferObject device physicalDeviceMemoryProperties []
     ioPutStrLn "Uniform buffers created."
 
     descriptorPool <-
@@ -693,7 +688,7 @@ resourceMain = do
     ioPutStrLn "Graphics pipeline created."
 
     (depthImage, depthImageMemory) <-
-      createBoundImage device physicalDeviceMemoryProperties (
+      vkaCreateBoundImage device physicalDeviceMemoryProperties (
         return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
         \_ _ -> return EQ
       ) $
@@ -715,7 +710,7 @@ resourceMain = do
       setSharingQueueFamilyIndices [graphicsQfi] &*
       set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED
 
-    executeCommands device graphicsCommandPool graphicsQueue $ \commandBuffer -> liftIO $ do
+    vkaExecuteCommands device graphicsCommandPool graphicsQueue $ \commandBuffer -> liftIO $ do
       vkaCmdPipelineBarrier commandBuffer
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
@@ -741,7 +736,7 @@ resourceMain = do
     ioPutStrLn "Depth image created."
 
     depthImageView <-
-      allocateAcquireVk_ (imageViewResource device) $
+      allocateAcquireVk_ (vkaImageViewResource device) $
       createVk $
       initStandardImageViewCreateInfo &*
       set @"flags" zeroBits &*
@@ -776,7 +771,7 @@ resourceMain = do
     ioPutStrLn "Swapchain framebuffers created."
 
     swapchainCommandBuffers <-
-      fmap vkaElems . allocateAcquire_ . allocatedCommandBuffers device . createVk $
+      fmap vkaElems . allocateAcquire_ . vkaAllocatedCommandBuffers device . createVk $
       initStandardCommandBufferAllocateInfo &*
       set @"commandPool" graphicsCommandPool &*
       set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
@@ -785,7 +780,7 @@ resourceMain = do
 
     forM_ (zip3 swapchainCommandBuffers swapchainFramebuffers descriptorSets) $ \(commandBuffer, framebuffer, descriptorSet) ->
       with_ (
-        recordingCommandBuffer commandBuffer . createVk $
+        vkaRecordingCommandBuffer commandBuffer . createVk $
         initPrimaryCommandBufferBeginInfo &*
         set @"flags" VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
       ) $ liftIO $ do
@@ -838,7 +833,7 @@ resourceMain = do
 
             -- Obviously there is no point in updating the UBO to the same value every time, but I'm leaving this here
             -- so that I can later easily transform the rendered image over time.
-            with (mappedMemory device (uniformBufferMemories !! nextImageIndex) 0 (bSizeOf @UniformBufferObject undefined)) $ \ptr ->
+            with (vkaMappedMemory device (uniformBufferMemories !! nextImageIndex) 0 (bSizeOf @UniformBufferObject undefined)) $ \ptr ->
               poke (castPtr ptr) . S $
               UniformBufferObject eye eye eye
 
@@ -942,91 +937,7 @@ data FrameSync =
     frameSync'renderFinishedSemaphore :: VkSemaphore
   }
 
--- GLFW helpers>
-data GLFWException =
-  GLFWException {
-    glfwexFunctionName :: String
-  } deriving (Eq, Show, Read)
-
-instance Exception GLFWException where
-  displayException (GLFWException functionName) = "GLFWException: " ++ functionName ++ " failed."
-
-throwGLFWExceptionM :: MonadThrow m => String -> m a
-throwGLFWExceptionM = throwM . GLFWException
-
-initializedGLFW :: Acquire ()
-initializedGLFW =
-  unlessM GLFW.init (throwGLFWExceptionM "init")
-  `mkAcquire`
-  const GLFW.terminate
-
-newVulkanGLFWWindow :: Int -> Int -> String -> Acquire GLFW.Window
-newVulkanGLFWWindow width height title =
-  do
-    GLFW.windowHint $ GLFW.WindowHint'ClientAPI GLFW.ClientAPI'NoAPI
-    fromMaybeM (throwGLFWExceptionM "createWindow") (GLFW.createWindow width height title Nothing Nothing)
-  `mkAcquire`
-  GLFW.destroyWindow
-
-newVulkanGLFWWindowSurface :: VkInstance -> GLFW.Window -> Acquire VkSurfaceKHR
-newVulkanGLFWWindowSurface vulkanInstance window =
-  (
-    alloca $ \surfacePtr -> do
-      GLFW.createWindowSurface vulkanInstance window nullPtr surfacePtr & onVkFailureThrow_ "GLFW.createWindowSurface"
-      peek surfacePtr
-  )
-  `mkAcquire`
-  \surface -> vkDestroySurfaceKHR vulkanInstance surface VK_NULL
-
-data WindowStatus = WindowReady | WindowResized | WindowClosed
-
-getWindowStatus :: GLFW.Window -> IORef (Maybe TimeSpec) -> IO WindowStatus
-getWindowStatus window lastResizeTimeRef =
-  GLFW.windowShouldClose window >>= \case
-    True -> return WindowClosed
-    False -> do
-      GLFW.pollEvents
-      currentTime <- getTime Monotonic
-      -- GLFW sends many resize events during the resizing process, and doesn't say when the user is done resizing.
-      -- Thus, only consider it resized after some time has passed since the last event.
-      atomicModifyIORef lastResizeTimeRef $ \case
-        Just lastResizeTime | currentTime - lastResizeTime >= resizeDelay -> (Nothing, WindowResized)
-        v -> (v, WindowReady)
-  where
-    resizeDelay = fromNanoSecs (100 * 1000 * 1000) -- 100 milliseconds
--- GLFW helpers<
-
 -- Vulkan helpers>
-data VkResultException =
-  VkResultException {
-    vkaResultException'functionName :: String,
-    vkaResultException'result :: VkResult
-  } deriving (Eq, Show, Read)
-
-instance Exception VkResultException where
-  displayException (VkResultException functionName result) =
-    functionName ++ " failed with: " ++ show result
-
-onVkFailureThrow :: String -> [VkResult] -> IO VkResult -> IO VkResult
-onVkFailureThrow functionName successResults vkAction = do
-  result <- vkAction
-  unless (result `elem` successResults) $ throwIO (VkResultException functionName result)
-  return result
-
-onVkFailureThrow_ :: String -> IO VkResult -> IO ()
-onVkFailureThrow_ functionName vkAction = onVkFailureThrow functionName [VK_SUCCESS] vkAction & void
-
-data VkaException = VkaException String deriving (Eq, Show, Read)
-
-instance Exception VkaException where
-  displayException (VkaException message) = "VkaException: " ++ message
-
-throwVkaException :: String -> a
-throwVkaException = throw . VkaException
-
-throwVkaExceptionM :: MonadThrow m => String -> m a
-throwVkaExceptionM = throwM . VkaException
-
 vkaRegisterDebugCallback :: MonadUnliftIO io => VkInstance -> VkDebugReportFlagsEXT -> HS_vkDebugReportCallbackEXT -> ResourceT io ()
 vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
   debugCallbackPtr <- allocate_ (newVkDebugReportCallbackEXT debugCallback) freeHaskellFunPtr
@@ -1036,74 +947,6 @@ vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
     set @"pNext" VK_NULL &*
     set @"flags" flags &*
     set @"pfnCallback" debugCallbackPtr
-
-data VkaResource ci vk =
-  VkaResource {
-    vkr'getCreate :: IO (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult),
-    vkr'getDestroy :: IO (vk -> Ptr VkAllocationCallbacks -> IO ()),
-    vkr'createName :: String,
-    vkr'successResults :: [VkResult]
-  }
-
-simpleVkaResource ::
-  (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
-  (vk -> Ptr VkAllocationCallbacks -> IO ()) ->
-  String ->
-  [VkResult] ->
-  VkaResource ci vk
-simpleVkaResource create destroy = VkaResource (return create) (return destroy)
-
-simpleVkaResource_ ::
-  (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
-  (vk -> Ptr VkAllocationCallbacks -> IO ()) ->
-  String ->
-  VkaResource ci vk
-simpleVkaResource_ create destroy name = simpleVkaResource create destroy name [VK_SUCCESS]
-
-simpleParamVkaResource ::
-  (a -> Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
-  (a -> vk -> Ptr VkAllocationCallbacks -> IO ()) ->
-  String ->
-  [VkResult] ->
-  a ->
-  VkaResource ci vk
-simpleParamVkaResource create destroy name successResults device = simpleVkaResource (create device) (destroy device) name successResults
-
-simpleParamVkaResource_ ::
-  (a -> Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
-  (a -> vk -> Ptr VkAllocationCallbacks -> IO ()) ->
-  String ->
-  a ->
-  VkaResource ci vk
-simpleParamVkaResource_ create destroy name = simpleParamVkaResource create destroy name [VK_SUCCESS]
-
-newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO (VkResult, vk)
-newVkWithResult VkaResource{..} createInfo =
-  withPtr createInfo $ \createInfoPtr ->
-  alloca $ \vkPtr -> do
-    create <- vkr'getCreate
-    result <- create createInfoPtr VK_NULL vkPtr & onVkFailureThrow vkr'createName vkr'successResults
-    (result,) <$> peek vkPtr
-
-newVk :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO vk
-newVk = fmap snd .: newVkWithResult
-
-acquireVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire (VkResult, vk)
-acquireVkWithResult r createInfo =
-  newVkWithResult r createInfo
-  `mkAcquire`
-  \(_, vk) -> do
-    destroy <- vkr'getDestroy r
-    destroy vk VK_NULL
-
-acquireVk :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire vk
-acquireVk = fmap snd .: acquireVkWithResult
-
-allocateAcquireVk :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m (ReleaseKey, vk)
-allocateAcquireVk = allocateAcquire .: acquireVk
-
-allocateAcquireVk_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m vk
-allocateAcquireVk_ = allocateAcquire_ .: acquireVk
 
 vulkanInstanceResource :: VkaResource VkInstanceCreateInfo VkInstance
 vulkanInstanceResource = simpleVkaResource_ vkCreateInstance vkDestroyInstance "vkCreateInstance"
@@ -1167,42 +1010,7 @@ initStandardPipelineLayoutCreateInfo =
   set @"pNext" VK_NULL &*
   set @"flags" zeroBits
 
-allocatedMemoryResource :: VkDevice -> VkaResource VkMemoryAllocateInfo VkDeviceMemory
-allocatedMemoryResource = simpleParamVkaResource_ vkAllocateMemory vkFreeMemory "vkAllocateMemory"
-
-initStandardMemoryAllocateInfo :: CreateVkStruct VkMemoryAllocateInfo '["sType", "pNext"] ()
-initStandardMemoryAllocateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO &*
-  set @"pNext" VK_NULL
-
-bufferResource :: VkDevice -> VkaResource VkBufferCreateInfo VkBuffer
-bufferResource = simpleParamVkaResource_ vkCreateBuffer vkDestroyBuffer "vkCreateBuffer"
-
-initStandardBufferCreateInfo :: CreateVkStruct VkBufferCreateInfo '["sType", "pNext"] ()
-initStandardBufferCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
 -- Generalize this and the next function once the CreateVkStruct type is redesigned.
-setSharingQueueFamilyIndices ::
-  (
-    CanWriteField "sharingMode" a,
-    CanWriteField "queueFamilyIndexCount" a,
-    CanWriteField "pQueueFamilyIndices" a,
-    FieldType "sharingMode" a ~ VkSharingMode,
-    FieldType "queueFamilyIndexCount" a ~ Word32,
-    FieldType "pQueueFamilyIndices" a ~ Ptr Word32
-  ) =>
-  [Word32] ->
-  CreateVkStruct a '["sharingMode", "queueFamilyIndexCount", "pQueueFamilyIndices"] ()
-setSharingQueueFamilyIndices qfis =
-  set @"sharingMode" (if null qfis' then VK_SHARING_MODE_EXCLUSIVE else VK_SHARING_MODE_CONCURRENT) &*
-  setListCountAndRef @"queueFamilyIndexCount" @"pQueueFamilyIndices" qfis'
-  where
-    -- If just one QFI is provided, it's the same as providing none; both are exclusive mode,
-    -- and the QFI list is ignored in that case.
-    qfis' = if length qfis > 1 then qfis else []
-
 setImageSharingQueueFamilyIndices ::
   (
     CanWriteField "imageSharingMode" a,
@@ -1221,265 +1029,6 @@ setImageSharingQueueFamilyIndices qfis =
     -- If just one QFI is provided, it's the same as providing none; both are exclusive mode,
     -- and the QFI list is ignored in that case.
     qfis' = if length qfis > 1 then qfis else []
-
-imageResource :: VkDevice -> VkaResource VkImageCreateInfo VkImage
-imageResource = simpleParamVkaResource_ vkCreateImage vkDestroyImage "vkCreateImage"
-
-initStandardImageCreateInfo :: CreateVkStruct VkImageCreateInfo '["sType", "pNext"] ()
-initStandardImageCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-allocateAndBindVulkanMemory ::
-  MonadUnliftIO io =>
-  (VkDevice -> obj -> Ptr VkMemoryRequirements -> IO ()) ->
-  (VkDevice -> obj -> VkDeviceMemory -> VkDeviceSize -> IO ()) ->
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  obj ->
-  QualificationM io (Int, VkMemoryType) ->
-  ResourceT io (Maybe VkDeviceMemory)
-allocateAndBindVulkanMemory getMemoryRequirements bindMemory device pdmp obj qualification =
-  vkaGet_ (getMemoryRequirements device obj) >>= \memReqs ->
-  lift (
-    pickByM qualification .
-    filter (testBit (getField @"memoryTypeBits" memReqs) . fst) .
-    take (fromIntegral $ getField @"memoryTypeCount" pdmp) $
-    getFieldArrayAssocs @"memoryTypes" pdmp
-  ) >>=
-    mapM (\(chosenMemoryTypeIndex, _) -> do
-      memory <-
-        allocateAcquireVk_ (allocatedMemoryResource device) $
-        createVk $
-        initStandardMemoryAllocateInfo &*
-        set @"allocationSize" (getField @"size" memReqs) &*
-        set @"memoryTypeIndex" (fromIntegral chosenMemoryTypeIndex)
-      liftIO $ bindMemory device obj memory 0
-      return memory
-    )
-
-allocateAndBindBufferMemory ::
-  MonadUnliftIO io =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  VkBuffer ->
-  QualificationM io (Int, VkMemoryType) ->
-  ResourceT io (Maybe VkDeviceMemory)
-allocateAndBindBufferMemory = allocateAndBindVulkanMemory vkGetBufferMemoryRequirements vkaBindBufferMemory
-
-vkaBindBufferMemory :: VkDevice -> VkBuffer -> VkDeviceMemory -> VkDeviceSize -> IO ()
-vkaBindBufferMemory device buffer memory memoryOffset =
-  vkBindBufferMemory device buffer memory memoryOffset & onVkFailureThrow_ "vkBindBufferMemory"
-
-allocateAndBindImageMemory ::
-  MonadUnliftIO io =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  VkImage ->
-  QualificationM io (Int, VkMemoryType) ->
-  ResourceT io (Maybe VkDeviceMemory)
-allocateAndBindImageMemory = allocateAndBindVulkanMemory vkGetImageMemoryRequirements vkaBindImageMemory
-
-vkaBindImageMemory :: VkDevice -> VkImage -> VkDeviceMemory -> VkDeviceSize -> IO ()
-vkaBindImageMemory device buffer memory memoryOffset =
-  vkBindImageMemory device buffer memory memoryOffset & onVkFailureThrow_ "vkBindImageMemory"
-
-createBoundBuffer ::
-  (MonadUnliftIO m, MonadThrow m) =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  QualificationM m (Int, VkMemoryType) ->
-  VkBufferCreateInfo ->
-  ResourceT m (VkBuffer, VkDeviceMemory)
-createBoundBuffer device pdmp qualification bufferCreateInfo = runResourceT $ do
-  (bufferReleaseKey, buffer) <- allocateAcquireVk (bufferResource device) bufferCreateInfo
-  memory <-
-    lift $
-    fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the buffer.") $
-    allocateAndBindBufferMemory device pdmp buffer qualification
-  -- To force the buffer to be freed before the memory it's bound to.
-  lift . register_ =<< fromJust <$> unprotect bufferReleaseKey
-  return (buffer, memory)
-
-createStagingBuffer ::
-  (MonadUnliftIO m, MonadThrow m) =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  [Word32] ->
-  VkDeviceSize ->
-  ResourceT m (VkBuffer, VkDeviceMemory)
-createStagingBuffer device pdmp qfis size =
-  createBoundBuffer device pdmp (
-    return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
-    \_ _ -> return EQ
-  ) $
-  createVk $
-  initStandardBufferCreateInfo &*
-  set @"flags" zeroBits &*
-  set @"size" size &*
-  set @"usage" VK_BUFFER_USAGE_TRANSFER_SRC_BIT &*
-  setSharingQueueFamilyIndices qfis
-
-createUniformBuffer ::
-  (MonadUnliftIO m, MonadThrow m) =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  [Word32] ->
-  VkDeviceSize ->
-  ResourceT m (VkBuffer, VkDeviceMemory)
-createUniformBuffer device pdmp qfis size =
-  createBoundBuffer device pdmp (
-    return . allAreSet (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) . getField @"propertyFlags" . snd,
-    \_ _ -> return EQ
-  ) $
-  createVk $
-  initStandardBufferCreateInfo &*
-  set @"flags" zeroBits &*
-  set @"size" size &*
-  set @"usage" VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT &*
-  setSharingQueueFamilyIndices qfis
-
-createUniformBufferForPrimBytes ::
-  forall pb m.
-  (MonadUnliftIO m, MonadThrow m, PrimBytes pb) =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  [Word32] ->
-  ResourceT m (VkBuffer, VkDeviceMemory)
-createUniformBufferForPrimBytes device pdmp qfis = createUniformBuffer device pdmp qfis (bSizeOf @pb undefined)
-
-createFilledBuffer ::
-  (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  VkCommandPool ->
-  VkQueue ->
-  VkBufferUsageFlags ->
-  [Word32] ->
-  VkDeviceSize ->
-  (Ptr Void -> IO ()) ->
-  ResourceT m (VkBuffer, VkDeviceMemory)
-createFilledBuffer device pdmp commandPool queue usageFlags qfis dataSize fillBuffer = runResourceT $ do
-  (stagingBuffer, stagingBufferMemory) <- createStagingBuffer device pdmp [] dataSize
-
-  liftIO $ with (mappedMemory device stagingBufferMemory 0 dataSize) fillBuffer
-
-  (buffer, bufferMemory) <-
-    lift $ createBoundBuffer device pdmp (
-      return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
-      \_ _ -> return EQ
-    ) $
-    createVk $
-    initStandardBufferCreateInfo &*
-    set @"flags" zeroBits &*
-    set @"size" dataSize &*
-    set @"usage" (VK_BUFFER_USAGE_TRANSFER_DST_BIT .|. usageFlags) &*
-    setSharingQueueFamilyIndices qfis
-
-  executeCommands device commandPool queue $ \commandBuffer -> liftIO $
-    vkaCmdCopyBuffer commandBuffer stagingBuffer buffer [createVk $ set @"size" dataSize &* set @"srcOffset" 0 &* set @"dstOffset" 0]
-
-  return (buffer, bufferMemory)
-
-createFilledBufferFromPrimBytes ::
-  (MonadUnliftIO m, MonadThrow m, MonadFail m, Storable pb, PrimBytes pb) =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  VkCommandPool ->
-  VkQueue ->
-  VkBufferUsageFlags ->
-  [Word32] ->
-  pb ->
-  ResourceT m (VkBuffer, VkDeviceMemory)
-createFilledBufferFromPrimBytes device pdmp commandPool queue usageFlags qfis pb =
-  createFilledBuffer device pdmp commandPool queue usageFlags qfis (bSizeOf pb) (flip poke pb . castPtr)
-
-createBoundImage ::
-  (MonadUnliftIO m, MonadThrow m) =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  QualificationM m (Int, VkMemoryType) ->
-  VkImageCreateInfo ->
-  ResourceT m (VkImage, VkDeviceMemory)
-createBoundImage device pdmp qualification imageCreateInfo = runResourceT $ do
-  (imageReleaseKey, image) <- allocateAcquireVk (imageResource device) imageCreateInfo
-  memory <-
-    lift $
-    fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the image.") $
-    allocateAndBindImageMemory device pdmp image qualification
-  -- To force the image to be freed before the memory it's bound to.
-  lift . register_ =<< fromJust <$> unprotect imageReleaseKey
-  return (image, memory)
-
-vkaMapMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> VkMemoryMapFlags -> IO (Ptr Void)
-vkaMapMemory device deviceMemory offset size flags =
-  alloca $ \ptrPtr -> do
-    vkMapMemory device deviceMemory offset size flags ptrPtr & onVkFailureThrow_ "vkMapMemory"
-    peek ptrPtr
-
-mappedMemory :: VkDevice -> VkDeviceMemory -> VkDeviceSize -> VkDeviceSize -> Acquire (Ptr Void)
-mappedMemory device deviceMemory offset size =
-  vkaMapMemory device deviceMemory offset size zeroBits
-  `mkAcquire`
-  const (vkUnmapMemory device deviceMemory)
-
-imageViewResource :: VkDevice -> VkaResource VkImageViewCreateInfo VkImageView
-imageViewResource = simpleParamVkaResource_ vkCreateImageView vkDestroyImageView "vkCreateImageView"
-
-initStandardImageViewCreateInfo :: CreateVkStruct VkImageViewCreateInfo '["sType", "pNext"] ()
-initStandardImageViewCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-samplerResource :: VkDevice -> VkaResource VkSamplerCreateInfo VkSampler
-samplerResource = simpleParamVkaResource_ vkCreateSampler vkDestroySampler "vkCreateSampler"
-
-initStandardSamplerCreateInfo :: CreateVkStruct VkSamplerCreateInfo '["sType", "pNext"] ()
-initStandardSamplerCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (VkaArray VkCommandBuffer)
-allocatedCommandBuffers device allocateInfo =
-  if commandBufferCount > 0 then
-    acquireVkaArray_ commandBufferCount
-      (\arrayPtr ->
-        withPtr allocateInfo $ \allocateInfoPtr ->
-          vkAllocateCommandBuffers device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateCommandBuffers"
-      )
-      (vkFreeCommandBuffers device commandPool commandBufferCount)
-  else
-    throwVkaException "Cannot allocate 0 command buffers."
-
-  where
-    commandBufferCount = getField @"commandBufferCount" allocateInfo
-    commandPool = getField @"commandPool" allocateInfo
-
-initStandardCommandBufferAllocateInfo :: CreateVkStruct VkCommandBufferAllocateInfo '["sType", "pNext"] ()
-initStandardCommandBufferAllocateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO &*
-  set @"pNext" VK_NULL
-
-recordingCommandBuffer :: VkCommandBuffer -> VkCommandBufferBeginInfo -> Acquire ()
-recordingCommandBuffer commandBuffer beginInfo =
-  (
-    withPtr beginInfo $ \beginInfoPtr ->
-      vkBeginCommandBuffer commandBuffer beginInfoPtr & onVkFailureThrow_ "vkBeginCommandBuffer"
-  )
-  `mkAcquire`
-  const (
-    vkEndCommandBuffer commandBuffer & onVkFailureThrow_ "vkEndCommandBuffer"
-  )
-
-initStandardCommandBufferBeginInfo :: CreateVkStruct VkCommandBufferBeginInfo '["sType", "pNext"] ()
-initStandardCommandBufferBeginInfo =
-  set @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO &*
-  set @"pNext" VK_NULL
-
-initPrimaryCommandBufferBeginInfo :: CreateVkStruct VkCommandBufferBeginInfo '["sType", "pNext", "pInheritanceInfo"] ()
-initPrimaryCommandBufferBeginInfo =
-  initStandardCommandBufferBeginInfo &*
-  set @"pInheritanceInfo" VK_NULL
 
 -- Warning: This will free the descriptor sets at the end of the ResourceT scope.  Only use this if the descriptor
 -- pool was created with the VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT flag set.  If you don't have that
@@ -1534,66 +1083,6 @@ initStandardDescriptorSetAllocateInfo :: CreateVkStruct VkDescriptorSetAllocateI
 initStandardDescriptorSetAllocateInfo =
   set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO &*
   set @"pNext" VK_NULL
-
-vkaQueueWaitIdle :: VkQueue -> IO ()
-vkaQueueWaitIdle queue = vkQueueWaitIdle queue & onVkFailureThrow_ "vkQueueWaitIdle"
-
-vkaQueueSubmit :: VkQueue -> VkFence -> [VkSubmitInfo] -> IO ()
-vkaQueueSubmit queue fence submitInfos =
-  withArray submitInfos $ \submitInfosPtr ->
-  vkQueueSubmit queue (lengthNum submitInfos) submitInfosPtr fence & onVkFailureThrow_ "vkQueueSubmit"
-
-initStandardSubmitInfo :: CreateVkStruct VkSubmitInfo '["sType", "pNext"] ()
-initStandardSubmitInfo =
-  set @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO &*
-  set @"pNext" VK_NULL
-
-vkaQueuePresentKHR :: VkQueue -> VkPresentInfoKHR -> IO VkResult
-vkaQueuePresentKHR queue presentInfo =
-  withPtr presentInfo $ \presentInfoPtr ->
-  vkQueuePresentKHR queue presentInfoPtr & onVkFailureThrow "vkQueuePresentKHR" [VK_SUCCESS, VK_SUBOPTIMAL_KHR]
-
-initStandardPresentInfoKHR :: CreateVkStruct VkPresentInfoKHR '["sType", "pNext"] ()
-initStandardPresentInfoKHR =
-  set @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR &*
-  set @"pNext" VK_NULL
-
-setSubmitWaitSemaphoresAndStageFlags ::
-  [(VkSemaphore, VkPipelineStageFlags)] ->
-  CreateVkStruct VkSubmitInfo '["waitSemaphoreCount", "pWaitSemaphores", "pWaitDstStageMask"] ()
-setSubmitWaitSemaphoresAndStageFlags waitSemaphoresAndStageFlags =
-  setListCountAndRef @"waitSemaphoreCount" @"pWaitSemaphores" (fst <$> waitSemaphoresAndStageFlags) &*
-  setListRef @"pWaitDstStageMask" (snd <$> waitSemaphoresAndStageFlags)
-
-fenceResource :: VkDevice -> VkaResource VkFenceCreateInfo VkFence
-fenceResource = simpleParamVkaResource_ vkCreateFence vkDestroyFence "vkCreateFence"
-
-initStandardFenceCreateInfo :: CreateVkStruct VkFenceCreateInfo '["sType", "pNext"] ()
-initStandardFenceCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_FENCE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-setFenceSignaled :: Bool -> CreateVkStruct VkFenceCreateInfo '["flags"] ()
-setFenceSignaled isSignaled = set @"flags" (if isSignaled then VK_FENCE_CREATE_SIGNALED_BIT else zeroBits)
-
-createFence :: MonadIO m => VkDevice -> Bool -> ResourceT m VkFence
-createFence device signaled = allocateAcquireVk_ (fenceResource device) $ createVk $ initStandardFenceCreateInfo &* setFenceSignaled signaled
-
-vkaWaitForFences :: VkDevice -> [VkFence] -> VkBool32 -> Word64 -> IO VkResult
-vkaWaitForFences device fences waitAll timeout =
-  withArray fences $ \fencesPtr ->
-  vkWaitForFences device (lengthNum fences) fencesPtr waitAll timeout & onVkFailureThrow "vkWaitForFences" [VK_SUCCESS, VK_TIMEOUT]
-
-vkaWaitForFence :: VkDevice -> VkFence -> Word64 -> IO VkResult
-vkaWaitForFence device fence timeout = vkaWaitForFences device [fence] VK_TRUE timeout
-
-vkaResetFences :: VkDevice -> [VkFence] -> IO ()
-vkaResetFences device fences =
-  withArray fences $ \fencesPtr ->
-  vkResetFences device (lengthNum fences) fencesPtr & onVkFailureThrow_ "vkResetFences"
-
-vkaResetFence :: VkDevice -> VkFence -> IO ()
-vkaResetFence device fence = vkaResetFences device [fence]
 
 vkaDeviceWaitIdle :: VkDevice -> IO ()
 vkaDeviceWaitIdle device = vkDeviceWaitIdle device & onVkFailureThrow_ "vkDeviceWaitIdle"
@@ -1736,374 +1225,6 @@ initStandardFramebufferCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO &*
   set @"pNext" VK_NULL
 
-executeCommands :: (MonadUnliftIO m, MonadFail m) => VkDevice -> VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
-executeCommands device commandPool submissionQueue fillCommandBuffer = runResourceT $ do
-  [commandBuffer] <-
-    fmap vkaElems $
-    allocateAcquire_ $ allocatedCommandBuffers device $
-    createVk $
-    initStandardCommandBufferAllocateInfo &*
-    set @"commandPool" commandPool &*
-    set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
-    set @"commandBufferCount" 1
-
-  result <-
-    with_ (
-      recordingCommandBuffer commandBuffer $
-      createVk $
-      initPrimaryCommandBufferBeginInfo &*
-      set @"flags" VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
-    )
-    (fillCommandBuffer commandBuffer)
-
-  executionCompleteFence <-
-    allocateAcquireVk_ (fenceResource device) $
-    createVk $
-    initStandardFenceCreateInfo &*
-    setFenceSignaled False
-
-  liftIO $ do
-    vkaQueueSubmit submissionQueue executionCompleteFence
-      [
-        createVk $
-        initStandardSubmitInfo &*
-        setSubmitWaitSemaphoresAndStageFlags [] &*
-        setListCountAndRef @"commandBufferCount" @"pCommandBuffers" [commandBuffer] &*
-        setListCountAndRef @"signalSemaphoreCount" @"pSignalSemaphores" []
-      ]
-    vkaWaitForFence device executionCompleteFence maxBound & void
-
-  return result
-
-vkaCmdPipelineBarrier ::
-  VkCommandBuffer ->
-  VkPipelineStageFlags ->
-  VkPipelineStageFlags ->
-  VkDependencyFlags ->
-  [VkMemoryBarrier] ->
-  [VkBufferMemoryBarrier] ->
-  [VkImageMemoryBarrier] ->
-  IO ()
-vkaCmdPipelineBarrier
-  commandBuffer
-  srcStageMask
-  dstStageMask
-  depFlags
-  memoryBarriers
-  bufferMemoryBarriers
-  imageMemoryBarriers
-  =
-  withArray memoryBarriers $ \memoryBarriersPtr ->
-  withArray bufferMemoryBarriers $ \bufferMemoryBarriersPtr ->
-  withArray imageMemoryBarriers $ \imageMemoryBarriersPtr ->
-  vkCmdPipelineBarrier
-    commandBuffer
-    srcStageMask
-    dstStageMask
-    depFlags
-    (lengthNum memoryBarriers)
-    memoryBarriersPtr
-    (lengthNum bufferMemoryBarriers)
-    bufferMemoryBarriersPtr
-    (lengthNum imageMemoryBarriers)
-    imageMemoryBarriersPtr
-
-initStandardImageMemoryBarrier :: CreateVkStruct VkImageMemoryBarrier '["sType", "pNext"] ()
-initStandardImageMemoryBarrier =
-  set @"sType" VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER &*
-  set @"pNext" VK_NULL
-
-vkaCmdCopyBuffer ::
-  VkCommandBuffer ->
-  VkBuffer ->
-  VkBuffer ->
-  [VkBufferCopy] ->
-  IO ()
-vkaCmdCopyBuffer commandBuffer srcBuffer dstBuffer bufferCopies =
-  withArray bufferCopies $ \bufferCopiesPtr ->
-  vkCmdCopyBuffer commandBuffer srcBuffer dstBuffer (lengthNum bufferCopies) bufferCopiesPtr
-
-vkaCmdCopyBufferToImage ::
-  VkCommandBuffer ->
-  VkBuffer ->
-  VkImage ->
-  VkImageLayout ->
-  [VkBufferImageCopy] ->
-  IO ()
-vkaCmdCopyBufferToImage commandBuffer buffer image imageLayout bufferImageCopies =
-  withArray bufferImageCopies $ \bufferImageCopiesPtr ->
-  vkCmdCopyBufferToImage commandBuffer buffer image imageLayout (lengthNum bufferImageCopies) bufferImageCopiesPtr
-
-vkaCmdBeginRenderPass :: VkCommandBuffer -> VkSubpassContents -> VkRenderPassBeginInfo -> IO ()
-vkaCmdBeginRenderPass commandBuffer contents beginInfo =
-  withPtr beginInfo $ \beginInfoPtr -> vkCmdBeginRenderPass commandBuffer beginInfoPtr contents
-
-initStandardRenderPassBeginInfo :: CreateVkStruct VkRenderPassBeginInfo '["sType", "pNext"] ()
-initStandardRenderPassBeginInfo =
-  set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO &*
-  set @"pNext" VK_NULL
-
-vkaCmdBindVertexBuffers :: VkCommandBuffer -> Word32 -> [(VkBuffer, VkDeviceSize)] -> IO ()
-vkaCmdBindVertexBuffers commandBuffer firstBinding bindings =
-  withArray (fst <$> bindings) $ \buffersPtr ->
-  withArray (snd <$> bindings) $ \offsetsPtr ->
-  vkCmdBindVertexBuffers commandBuffer firstBinding (lengthNum bindings) buffersPtr offsetsPtr
-
-vkaCmdBindDescriptorSets :: VkCommandBuffer -> VkPipelineBindPoint -> VkPipelineLayout -> Word32 -> [VkDescriptorSet] -> [Word32] -> IO ()
-vkaCmdBindDescriptorSets commandBuffer bindPoint pipelineLayout firstSet descriptorSets dynamicOffsets =
-  withArray descriptorSets $ \descriptorSetsPtr ->
-  withArray dynamicOffsets $ \dynamicOffsetsPtr ->
-  vkCmdBindDescriptorSets commandBuffer bindPoint pipelineLayout firstSet (lengthNum descriptorSets) descriptorSetsPtr (lengthNum dynamicOffsets) dynamicOffsetsPtr
-
-depthBearingFormats :: Set VkFormat
-depthBearingFormats =
-  Set.fromList [
-    VK_FORMAT_D16_UNORM,
-    VK_FORMAT_D16_UNORM_S8_UINT,
-    VK_FORMAT_X8_D24_UNORM_PACK32,
-    VK_FORMAT_D24_UNORM_S8_UINT,
-    VK_FORMAT_D32_SFLOAT,
-    VK_FORMAT_D32_SFLOAT_S8_UINT
-  ]
-
-stencilBearingFormats :: Set VkFormat
-stencilBearingFormats =
-  Set.fromList [
-    VK_FORMAT_S8_UINT,
-    VK_FORMAT_D16_UNORM_S8_UINT,
-    VK_FORMAT_D24_UNORM_S8_UINT,
-    VK_FORMAT_D32_SFLOAT_S8_UINT
-  ]
-
-createImageFromKtxTexture ::
-  (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
-  VkDevice ->
-  VkPhysicalDeviceMemoryProperties ->
-  VkCommandPool ->
-  VkQueue ->
-  VkSampleCountFlagBits ->
-  VkImageTiling ->
-  VkImageUsageFlags ->
-  [Word32] ->
-  VkImageLayout ->
-  FilePath ->
-  ResourceT m (VkImage, VkDeviceMemory, VkImageView, VkSampler)
-createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tiling usageFlags qfis initialLayout filePath = runResourceT $ do
-  (h@KTX.Header{..}, stagingBufferRegions, stagingBuffer, stagingBufferMemory) <-
-    KTX.readKtxFile filePath KTX.skipMetadata $ \header () (fromIntegral -> textureDataSize) readTextureDataInto -> do
-      (buffer, bufferMemory) <- lift . lift $ createStagingBuffer device pdmp [] textureDataSize
-      bufferRegions <- with (mappedMemory device bufferMemory 0 textureDataSize) $ readTextureDataInto . castPtr
-      return (header, bufferRegions, buffer, bufferMemory)
-
-  let
-    isCubeMap = KTX.isCubeMap h
-    isArray = KTX.isArray h
-    imageWidth = header'pixelWidth
-    imageHeight = replace 0 1 header'pixelHeight
-    imageDepth = replace 0 1 header'pixelDepth
-    numArrayLayers = replace 0 1 header'numberOfArrayElements
-    numMipLevels = KTX.effectiveNumberOfMipmapLevels h
-    formatNum =
-      fromMaybe (throwVkaException "Unsupported KTX format.") $
-      KTX.getVkFormatFromGlTypeAndFormat header'glType header'glFormat <|>
-      KTX.getVkFormatFromGlInternalFormat header'glInternalFormat
-    pixelSize = (`div` 8) . KTX.vkFormatSize'blockSizeInBits . KTX.getVkFormatSize $ formatNum
-    format = VkFormat formatNum
-    aspectMask :: VkImageAspectFlags =
-      replace zeroBits VK_IMAGE_ASPECT_COLOR_BIT $
-      setIf (Set.member format depthBearingFormats) VK_IMAGE_ASPECT_DEPTH_BIT .|.
-      setIf (Set.member format stencilBearingFormats) VK_IMAGE_ASPECT_STENCIL_BIT
-
-  (image, imageMemory) <-
-    lift $
-    createBoundImage device pdmp (
-      return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
-      \_ _ -> return EQ
-    ) $
-    createVk $
-    initStandardImageCreateInfo &*
-    set @"flags" (
-      setIf isCubeMap VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT .|.
-      setIf isArray VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT
-    ) &*
-    set @"imageType" (
-      case (header'pixelHeight, header'pixelDepth) of
-        (0, 0) -> VK_IMAGE_TYPE_1D
-        (_, 0) -> VK_IMAGE_TYPE_2D
-        _ -> VK_IMAGE_TYPE_3D
-    ) &*
-    set @"format" format &*
-    setVk @"extent" (
-      set @"width" imageWidth &*
-      set @"height" imageHeight &*
-      set @"depth" imageDepth
-    ) &*
-    set @"mipLevels" numMipLevels &*
-    set @"arrayLayers" numArrayLayers &*
-    set @"samples" sampleCountFlagBit &*
-    set @"tiling" tiling &*
-    set @"usage" usageFlags &*
-    setSharingQueueFamilyIndices qfis &*
-    set @"initialLayout" initialLayout
-
-  executeCommands device commandPool queue $ \commandBuffer -> liftIO $ do
-    vkaCmdPipelineBarrier commandBuffer
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-      VK_PIPELINE_STAGE_TRANSFER_BIT
-      zeroBits [] []
-      [
-        createVk $
-        initStandardImageMemoryBarrier &*
-        set @"srcAccessMask" zeroBits &*
-        set @"dstAccessMask" VK_ACCESS_TRANSFER_WRITE_BIT &*
-        set @"oldLayout" VK_IMAGE_LAYOUT_UNDEFINED &*
-        set @"newLayout" VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &*
-        set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
-        set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
-        set @"image" image &*
-        setVk @"subresourceRange" (
-          set @"aspectMask" aspectMask &*
-          set @"baseMipLevel" 0 &*
-          set @"levelCount" numMipLevels &*
-          set @"baseArrayLayer" 0 &*
-          set @"layerCount" numArrayLayers
-        )
-      ]
-
-    vkaCmdCopyBufferToImage commandBuffer stagingBuffer image VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL $
-      case stagingBufferRegions of
-        KTX.SimpleBufferRegions brs ->
-          zip [0..] brs <&> \(mipLevelInt@(fromIntegral -> mipLevel), (size, fromIntegral -> offset)) ->
-            let
-              width = replace 0 1 $ imageWidth `shiftR` mipLevelInt
-              height = replace 0 1 $ imageHeight `shiftR` mipLevelInt
-              depth = replace 0 1 $ imageDepth `shiftR` mipLevelInt
-            in
-              assert (size == fromIntegral (width * height * depth * pixelSize)) $
-              createVk $
-              set @"bufferOffset" offset &*
-              set @"bufferRowLength" 0 &*
-              set @"bufferImageHeight" 0 &*
-              setVk @"imageSubresource" (
-                set @"aspectMask" aspectMask &*
-                set @"mipLevel" mipLevel &*
-                set @"baseArrayLayer" 0 &*
-                set @"layerCount" 1
-              ) &*
-              setVk @"imageOffset" (set @"x" 0 &* set @"y" 0 &* set @"z" 0) &*
-              setVk @"imageExtent" (set @"width" width &* set @"height" height &* set @"depth" depth)
-
-        KTX.NonArrayCubeMapBufferRegions brs -> do
-          undefined
-          {-
-          (mipLevel, assertPred ((6 ==) . length) -> offsets) <- zip [0..] (snd <$> brs)
-          (arrayLayer, offset) <- zip [0..] (fromIntegral <$> offsets)
-          return $
-            createVk $
-            set @"bufferOffset" offset &*
-            set @"bufferRowLength" 0 &*
-            set @"bufferImageHeight" 0 &*
-            setVk @"imageSubresource" (
-              set @"aspectMask" aspectMask &*
-              set @"mipLevel" mipLevel &*
-              set @"baseArrayLayer" arrayLayer &*
-              set @"layerCount" 1
-            ) &*
-            setVk @"imageOffset" (set @"x" 0 &* set @"y" 0 &* set @"z" 0) &*
-            setVk @"imageExtent" (set @"width" 0 &* set @"height" 0 &* set @"depth" 0)
-          -}
-
-    vkaCmdPipelineBarrier commandBuffer
-      VK_PIPELINE_STAGE_TRANSFER_BIT
-      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-      zeroBits [] []
-      [
-        createVk $
-        initStandardImageMemoryBarrier &*
-        set @"srcAccessMask" VK_ACCESS_TRANSFER_WRITE_BIT &*
-        set @"dstAccessMask" VK_ACCESS_SHADER_READ_BIT &*
-        set @"oldLayout" VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &*
-        set @"newLayout" VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &*
-        set @"srcQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
-        set @"dstQueueFamilyIndex" VK_QUEUE_FAMILY_IGNORED &*
-        set @"image" image &*
-        setVk @"subresourceRange" (
-          set @"aspectMask" aspectMask &*
-          set @"baseMipLevel" 0 &*
-          set @"levelCount" numMipLevels &*
-          set @"baseArrayLayer" 0 &*
-          set @"layerCount" numArrayLayers
-        )
-      ]
-
-  imageView <-
-    lift . allocateAcquireVk_ (imageViewResource device) $
-    createVk $
-    initStandardImageViewCreateInfo &*
-    set @"flags" zeroBits &*
-    set @"image" image &*
-    set @"viewType" (
-      case (header'pixelHeight, header'pixelDepth) of
-        (0, 0) -> VK_IMAGE_VIEW_TYPE_1D
-        (_, 0) -> VK_IMAGE_VIEW_TYPE_2D
-        _ -> VK_IMAGE_VIEW_TYPE_3D
-    ) &*
-    set @"format" format &*
-    setVk @"components" (
-      set @"r" VK_COMPONENT_SWIZZLE_IDENTITY &*
-      set @"g" VK_COMPONENT_SWIZZLE_IDENTITY &*
-      set @"b" VK_COMPONENT_SWIZZLE_IDENTITY &*
-      set @"a" VK_COMPONENT_SWIZZLE_IDENTITY
-    ) &*
-    setVk @"subresourceRange" (
-      set @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT &*
-      set @"baseMipLevel" 0 &*
-      set @"levelCount" numMipLevels &*
-      set @"baseArrayLayer" 0 &*
-      set @"layerCount" numArrayLayers
-    )
-
-  sampler <-
-    lift . allocateAcquireVk_ (samplerResource device) $
-    createVk $
-    initStandardSamplerCreateInfo &*
-    set @"magFilter" VK_FILTER_LINEAR &*
-    set @"minFilter" VK_FILTER_LINEAR &*
-    set @"addressModeU" VK_SAMPLER_ADDRESS_MODE_REPEAT &*
-    set @"addressModeV" VK_SAMPLER_ADDRESS_MODE_REPEAT &*
-    set @"addressModeW" VK_SAMPLER_ADDRESS_MODE_REPEAT &*
-    set @"anisotropyEnable" VK_FALSE &*
-    set @"maxAnisotropy" 0 &*
-    set @"borderColor" VK_BORDER_COLOR_INT_OPAQUE_BLACK &*
-    set @"unnormalizedCoordinates" VK_FALSE &*
-    set @"compareEnable" VK_FALSE &*
-    set @"compareOp" VK_COMPARE_OP_ALWAYS &*
-    set @"mipmapMode" VK_SAMPLER_MIPMAP_MODE_LINEAR &*
-    set @"minLod" 0 &*
-    set @"maxLod" (fromIntegral numMipLevels) &*
-    set @"mipLodBias" 0
-
-  return (image, imageMemory, imageView, sampler)
-
-type VkaGetter vk r = Ptr vk -> IO r
-
-vkaGet :: (MonadIO io, Storable vk) => VkaGetter vk r -> io (r, vk)
-vkaGet get =
-  liftIO $
-  alloca $ \ptr -> do
-    result <- get ptr
-    value <- peek ptr
-    return (result, value)
-
-vkaGet_ :: (MonadIO io, Storable vk) => VkaGetter vk r -> io vk
-vkaGet_ = fmap snd . vkaGet
-
-onGetterFailureThrow :: String -> [VkResult] -> VkaGetter vk VkResult -> VkaGetter vk VkResult
-onGetterFailureThrow functionName successResults get ptr = get ptr & onVkFailureThrow functionName successResults
-
-onGetterFailureThrow_ :: String -> VkaGetter vk VkResult -> VkaGetter vk ()
-onGetterFailureThrow_ functionName get ptr = onGetterFailureThrow functionName [VK_SUCCESS] get ptr & void
-
 vkaGetPhysicalDeviceSurfaceSupportKHR :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> VkaGetter VkBool32 ()
 vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface =
   vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface & onGetterFailureThrow_ "vkGetPhysicalDeviceSurfaceSupportKHR"
@@ -2116,25 +1237,6 @@ vkaAcquireNextImageKHR :: VkDevice -> VkSwapchainKHR -> Word64 -> VkSemaphore ->
 vkaAcquireNextImageKHR device swapchain timeout semaphore fence =
   vkAcquireNextImageKHR device swapchain timeout semaphore fence &
   onGetterFailureThrow "vkAcquireNextImageKHR" [VK_SUCCESS, VK_TIMEOUT, VK_NOT_READY, VK_SUBOPTIMAL_KHR]
-
-type VkaArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
-
-vkaGetArray :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (r, VkaArray vk)
-vkaGetArray fillArray =
-  liftIO $
-  alloca $ \countPtr -> do
-    let fillArray' = fillArray countPtr
-    getCountResult <- fillArray' VK_NULL
-    count <- peek countPtr
-    newVkaArray count $ \arrPtr -> if count > 0 then fillArray' arrPtr else return getCountResult
-
-vkaGetArray_ :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (VkaArray vk)
-vkaGetArray_ = fmap snd . vkaGetArray
-
--- When a VkaArrayFiller is used with vkaGetArray, VK_INCOMPLETE will never be returned, since
--- vkaGetArray is checking for available count first. Thus, don't provide it as a success result.
-onArrayFillerFailureThrow :: String -> [VkResult] -> VkaArrayFiller vk VkResult -> VkaArrayFiller vk VkResult
-onArrayFillerFailureThrow functionName successResults fillArray countPtr arrayPtr = fillArray countPtr arrayPtr & onVkFailureThrow functionName successResults
 
 vkaEnumeratePhysicalDevices :: VkInstance -> VkaArrayFiller VkPhysicalDevice VkResult
 vkaEnumeratePhysicalDevices = onArrayFillerFailureThrow "vkEnumeratePhysicalDevices" [VK_SUCCESS] . vkEnumeratePhysicalDevices
@@ -2159,10 +1261,4 @@ pdmpDeviceLocalMemorySize memoryProperties =
   where
     isDeviceLocal = (zeroBits /=) . (VK_MEMORY_HEAP_DEVICE_LOCAL_BIT .&.) . getField @"flags"
     memoryHeapCount = fromIntegral $ getField @"memoryHeapCount" memoryProperties
-
-getFieldArrayAssocs :: forall fname a. CanReadFieldArray fname a => a -> [(Int, FieldType fname a)]
-getFieldArrayAssocs a = [0 .. fieldArrayLength @fname @a] <&> \i -> (i, getFieldArrayUnsafe @fname i a)
-
-getFieldArrayElems :: forall fname a. CanReadFieldArray fname a => a -> [(FieldType fname a)]
-getFieldArrayElems = fmap snd . getFieldArrayAssocs @fname @a
 -- Vulkan helpers<
