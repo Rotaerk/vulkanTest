@@ -64,7 +64,7 @@ import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Marshal.Create.DataFrame
-import Graphics.VulkanAux.VkaIArray
+import Graphics.VulkanAux
 
 import Numeric.DataFrame hiding (sortBy)
 import Numeric.Dimensions
@@ -1439,10 +1439,10 @@ initStandardSamplerCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO &*
   set @"pNext" VK_NULL
 
-allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (VkaIArray VkCommandBuffer)
+allocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (VkaArray VkCommandBuffer)
 allocatedCommandBuffers device allocateInfo =
   if commandBufferCount > 0 then
-    acquireVkaIArray_ commandBufferCount
+    acquireVkaArray_ commandBufferCount
       (\arrayPtr ->
         withPtr allocateInfo $ \allocateInfoPtr ->
           vkAllocateCommandBuffers device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateCommandBuffers"
@@ -1484,10 +1484,10 @@ initPrimaryCommandBufferBeginInfo =
 -- Warning: This will free the descriptor sets at the end of the ResourceT scope.  Only use this if the descriptor
 -- pool was created with the VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT flag set.  If you don't have that
 -- set, use vkaAllocateDescriptorSets instead.
-allocatedDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> Acquire (VkaIArray VkDescriptorSet)
+allocatedDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> Acquire (VkaArray VkDescriptorSet)
 allocatedDescriptorSets device allocateInfo =
   if descriptorSetCount > 0 then
-    acquireVkaIArray_ descriptorSetCount
+    acquireVkaArray_ descriptorSetCount
       (\arrayPtr ->
         withPtr allocateInfo $ \allocateInfoPtr ->
           vkAllocateDescriptorSets device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateDescriptorSets"
@@ -1502,10 +1502,10 @@ allocatedDescriptorSets device allocateInfo =
     descriptorSetCount = getField @"descriptorSetCount" allocateInfo
     descriptorPool = getField @"descriptorPool" allocateInfo
 
-vkaAllocateDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (VkaIArray VkDescriptorSet)
+vkaAllocateDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (VkaArray VkDescriptorSet)
 vkaAllocateDescriptorSets device allocateInfo =
   if descriptorSetCount > 0 then
-    newVkaIArray_ descriptorSetCount $ \arrayPtr ->
+    newVkaArray_ descriptorSetCount $ \arrayPtr ->
       withPtr allocateInfo $ \allocateInfoPtr ->
         vkAllocateDescriptorSets device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateDescriptorSets"
   else
@@ -1634,11 +1634,11 @@ initStandardRenderPassCreateInfo =
   set @"pNext" VK_NULL &*
   set @"flags" zeroBits
 
-vkaCreateGraphicsPipelines :: VkDevice -> VkPipelineCache -> [VkGraphicsPipelineCreateInfo] -> IO (VkaIArray VkPipeline)
+vkaCreateGraphicsPipelines :: VkDevice -> VkPipelineCache -> [VkGraphicsPipelineCreateInfo] -> IO (VkaArray VkPipeline)
 vkaCreateGraphicsPipelines device pipelineCache createInfos@(lengthNum -> count) =
   if count > 0 then
     withArray createInfos $ \createInfosPtr ->
-      newVkaIArray_ count $ \arrayPtr ->
+      newVkaArray_ count $ \arrayPtr ->
         vkCreateGraphicsPipelines device pipelineCache count createInfosPtr VK_NULL arrayPtr & onVkFailureThrow_ "vkCreateGraphicsPipelines"
   else
     throwVkaException "Cannot allocate 0 graphics pipelines."
@@ -2119,16 +2119,16 @@ vkaAcquireNextImageKHR device swapchain timeout semaphore fence =
 
 type VkaArrayFiller vk r = Ptr Word32 -> Ptr vk -> IO r
 
-vkaGetArray :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (r, VkaIArray vk)
+vkaGetArray :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (r, VkaArray vk)
 vkaGetArray fillArray =
   liftIO $
   alloca $ \countPtr -> do
     let fillArray' = fillArray countPtr
     getCountResult <- fillArray' VK_NULL
     count <- peek countPtr
-    newVkaIArray count $ \arrPtr -> if count > 0 then fillArray' arrPtr else return getCountResult
+    newVkaArray count $ \arrPtr -> if count > 0 then fillArray' arrPtr else return getCountResult
 
-vkaGetArray_ :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (VkaIArray vk)
+vkaGetArray_ :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (VkaArray vk)
 vkaGetArray_ = fmap snd . vkaGetArray
 
 -- When a VkaArrayFiller is used with vkaGetArray, VK_INCOMPLETE will never be returned, since
