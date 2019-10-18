@@ -5,7 +5,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
 vkaImageViewResource :: VkDevice -> VkaResource VkImageViewCreateInfo VkImageView
-vkaImageViewResource = simpleParamVkaResource_ vkCreateImageView vkDestroyImageView "vkCreateImageView"
+vkaImageViewResource = vkaSimpleParamResource_ vkCreateImageView vkDestroyImageView "vkCreateImageView"
 
 initStandardImageViewCreateInfo :: CreateVkStruct VkImageViewCreateInfo '["sType", "pNext"] ()
 initStandardImageViewCreateInfo =

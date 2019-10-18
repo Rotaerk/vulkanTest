@@ -18,7 +18,7 @@ import Graphics.VulkanAux.Getter
 import Graphics.VulkanAux.Resource
 
 vkaAllocatedMemoryResource :: VkDevice -> VkaResource VkMemoryAllocateInfo VkDeviceMemory
-vkaAllocatedMemoryResource = simpleParamVkaResource_ vkAllocateMemory vkFreeMemory "vkAllocateMemory"
+vkaAllocatedMemoryResource = vkaSimpleParamResource_ vkAllocateMemory vkFreeMemory "vkAllocateMemory"
 
 initStandardMemoryAllocateInfo :: CreateVkStruct VkMemoryAllocateInfo '["sType", "pNext"] ()
 initStandardMemoryAllocateInfo =
@@ -56,7 +56,7 @@ vkaAllocateAndBindVulkanMemory getMemoryRequirements bindMemory device pdmp obj 
   ) >>=
     mapM (\(chosenMemoryTypeIndex, _) -> do
       memory <-
-        allocateAcquireVk_ (vkaAllocatedMemoryResource device) $
+        vkaAllocateResource_ (vkaAllocatedMemoryResource device) $
         createVk $
         initStandardMemoryAllocateInfo &*
         set @"allocationSize" (getField @"size" memReqs) &*

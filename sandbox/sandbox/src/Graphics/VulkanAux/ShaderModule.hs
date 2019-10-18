@@ -22,7 +22,7 @@ import Graphics.VulkanAux.Resource
 import System.IO
 
 vkaShaderModuleResource :: VkDevice -> VkaResource VkShaderModuleCreateInfo VkShaderModule
-vkaShaderModuleResource = simpleParamVkaResource_ vkCreateShaderModule vkDestroyShaderModule "vkCreateShaderModule"
+vkaShaderModuleResource = vkaSimpleParamResource_ vkCreateShaderModule vkDestroyShaderModule "vkCreateShaderModule"
 
 initStandardShaderModuleCreateInfo :: CreateVkStruct VkShaderModuleCreateInfo '["sType", "pNext", "flags"] ()
 initStandardShaderModuleCreateInfo =
@@ -33,7 +33,7 @@ initStandardShaderModuleCreateInfo =
 vkaCreateShaderModuleFromFile :: MonadUnliftIO m => VkDevice -> FilePath -> ResourceT m VkShaderModule
 vkaCreateShaderModuleFromFile device filePath = runResourceT $ do
   SizedArray{..} <- fillArrayFromSpirvFile filePath
-  lift $ allocateAcquireVk_ (vkaShaderModuleResource device) $
+  lift $ vkaAllocateResource_ (vkaShaderModuleResource device) $
     createVk $
     initStandardShaderModuleCreateInfo &*
     set @"codeSize" (fromIntegral arraySize) &*

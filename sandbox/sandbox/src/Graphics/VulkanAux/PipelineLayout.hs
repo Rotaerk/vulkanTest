@@ -6,7 +6,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
 vkaPipelineLayoutResource :: VkDevice -> VkaResource VkPipelineLayoutCreateInfo VkPipelineLayout
-vkaPipelineLayoutResource = simpleParamVkaResource_ vkCreatePipelineLayout vkDestroyPipelineLayout "vkCreatePipelineLayout"
+vkaPipelineLayoutResource = vkaSimpleParamResource_ vkCreatePipelineLayout vkDestroyPipelineLayout "vkCreatePipelineLayout"
 
 initStandardPipelineLayoutCreateInfo :: CreateVkStruct VkPipelineLayoutCreateInfo '["sType", "pNext", "flags"] ()
 initStandardPipelineLayoutCreateInfo =

@@ -5,7 +5,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
 vkaDescriptorSetLayoutResource :: VkDevice -> VkaResource VkDescriptorSetLayoutCreateInfo VkDescriptorSetLayout
-vkaDescriptorSetLayoutResource = simpleParamVkaResource_ vkCreateDescriptorSetLayout vkDestroyDescriptorSetLayout "vkCreateDescriptorSetLayout"
+vkaDescriptorSetLayoutResource = vkaSimpleParamResource_ vkCreateDescriptorSetLayout vkDestroyDescriptorSetLayout "vkCreateDescriptorSetLayout"
 
 initStandardDescriptorSetLayoutCreateInfo :: CreateVkStruct VkDescriptorSetLayoutCreateInfo '["sType", "pNext"] ()
 initStandardDescriptorSetLayoutCreateInfo =

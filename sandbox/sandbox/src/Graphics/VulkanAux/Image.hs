@@ -14,7 +14,7 @@ import Graphics.VulkanAux.Memory
 import Graphics.VulkanAux.Resource
 
 vkaImageResource :: VkDevice -> VkaResource VkImageCreateInfo VkImage
-vkaImageResource = simpleParamVkaResource_ vkCreateImage vkDestroyImage "vkCreateImage"
+vkaImageResource = vkaSimpleParamResource_ vkCreateImage vkDestroyImage "vkCreateImage"
 
 initStandardImageCreateInfo :: CreateVkStruct VkImageCreateInfo '["sType", "pNext"] ()
 initStandardImageCreateInfo =
@@ -42,7 +42,7 @@ vkaCreateBoundImage ::
   VkImageCreateInfo ->
   ResourceT m (VkImage, VkDeviceMemory)
 vkaCreateBoundImage device pdmp qualification imageCreateInfo = runResourceT $ do
-  (imageReleaseKey, image) <- allocateAcquireVk (vkaImageResource device) imageCreateInfo
+  (imageReleaseKey, image) <- vkaAllocateResource (vkaImageResource device) imageCreateInfo
   memory <-
     lift $
     fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the image.") $

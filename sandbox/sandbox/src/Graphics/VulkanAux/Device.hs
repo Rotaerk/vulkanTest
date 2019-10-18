@@ -8,7 +8,7 @@ import Graphics.VulkanAux.Exception
 import Graphics.VulkanAux.Resource
 
 vkaDeviceResource :: VkPhysicalDevice -> VkaResource VkDeviceCreateInfo VkDevice
-vkaDeviceResource = simpleParamVkaResource_ vkCreateDevice (const vkDestroyDevice) "vkCreateDevice"
+vkaDeviceResource = vkaSimpleParamResource_ vkCreateDevice (const vkDestroyDevice) "vkCreateDevice"
 
 initStandardDeviceCreateInfo :: CreateVkStruct VkDeviceCreateInfo '["sType", "pNext", "flags", "enabledLayerCount", "ppEnabledLayerNames"] ()
 initStandardDeviceCreateInfo =

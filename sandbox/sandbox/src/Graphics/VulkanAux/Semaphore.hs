@@ -7,7 +7,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
 vkaSemaphoreResource :: VkDevice -> VkaResource VkSemaphoreCreateInfo VkSemaphore
-vkaSemaphoreResource = simpleParamVkaResource_ vkCreateSemaphore vkDestroySemaphore "vkCreateSemaphore"
+vkaSemaphoreResource = vkaSimpleParamResource_ vkCreateSemaphore vkDestroySemaphore "vkCreateSemaphore"
 
 initStandardSemaphoreCreateInfo :: CreateVkStruct VkSemaphoreCreateInfo '["sType", "pNext"] ()
 initStandardSemaphoreCreateInfo =
@@ -15,4 +15,4 @@ initStandardSemaphoreCreateInfo =
   set @"pNext" VK_NULL
 
 vkaCreateSemaphore :: MonadIO m => VkDevice -> ResourceT m VkSemaphore
-vkaCreateSemaphore device = allocateAcquireVk_ (vkaSemaphoreResource device) $ createVk initStandardSemaphoreCreateInfo
+vkaCreateSemaphore device = vkaAllocateResource_ (vkaSemaphoreResource device) $ createVk initStandardSemaphoreCreateInfo

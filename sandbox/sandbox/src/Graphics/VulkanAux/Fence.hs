@@ -13,7 +13,7 @@ import Graphics.VulkanAux.Exception
 import Graphics.VulkanAux.Resource
 
 vkaFenceResource :: VkDevice -> VkaResource VkFenceCreateInfo VkFence
-vkaFenceResource = simpleParamVkaResource_ vkCreateFence vkDestroyFence "vkCreateFence"
+vkaFenceResource = vkaSimpleParamResource_ vkCreateFence vkDestroyFence "vkCreateFence"
 
 initStandardFenceCreateInfo :: CreateVkStruct VkFenceCreateInfo '["sType", "pNext"] ()
 initStandardFenceCreateInfo =
@@ -24,7 +24,7 @@ setFenceSignaled :: Bool -> CreateVkStruct VkFenceCreateInfo '["flags"] ()
 setFenceSignaled isSignaled = set @"flags" (if isSignaled then VK_FENCE_CREATE_SIGNALED_BIT else zeroBits)
 
 vkaCreateFence :: MonadIO m => VkDevice -> Bool -> ResourceT m VkFence
-vkaCreateFence device signaled = allocateAcquireVk_ (vkaFenceResource device) $ createVk $ initStandardFenceCreateInfo &* setFenceSignaled signaled
+vkaCreateFence device signaled = vkaAllocateResource_ (vkaFenceResource device) $ createVk $ initStandardFenceCreateInfo &* setFenceSignaled signaled
 
 vkaWaitForFences :: VkDevice -> [VkFence] -> VkBool32 -> Word64 -> IO VkResult
 vkaWaitForFences device fences waitAll timeout =

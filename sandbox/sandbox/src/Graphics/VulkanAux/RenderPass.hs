@@ -6,7 +6,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
 vkaRenderPassResource :: VkDevice -> VkaResource VkRenderPassCreateInfo VkRenderPass
-vkaRenderPassResource = simpleParamVkaResource_ vkCreateRenderPass vkDestroyRenderPass "vkCreateRenderPass"
+vkaRenderPassResource = vkaSimpleParamResource_ vkCreateRenderPass vkDestroyRenderPass "vkCreateRenderPass"
 
 initStandardRenderPassCreateInfo :: CreateVkStruct VkRenderPassCreateInfo '["sType", "pNext", "flags"] ()
 initStandardRenderPassCreateInfo =

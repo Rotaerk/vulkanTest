@@ -22,62 +22,62 @@ data VkaResource ci vk =
     vkr'successResults :: [VkResult]
   }
 
-simpleVkaResource ::
+vkaSimpleResource ::
   (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
   (vk -> Ptr VkAllocationCallbacks -> IO ()) ->
   String ->
   [VkResult] ->
   VkaResource ci vk
-simpleVkaResource create destroy = VkaResource (return create) (return destroy)
+vkaSimpleResource create destroy = VkaResource (return create) (return destroy)
 
-simpleVkaResource_ ::
+vkaSimpleResource_ ::
   (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
   (vk -> Ptr VkAllocationCallbacks -> IO ()) ->
   String ->
   VkaResource ci vk
-simpleVkaResource_ create destroy name = simpleVkaResource create destroy name [VK_SUCCESS]
+vkaSimpleResource_ create destroy name = vkaSimpleResource create destroy name [VK_SUCCESS]
 
-simpleParamVkaResource ::
+vkaSimpleParamResource ::
   (a -> Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
   (a -> vk -> Ptr VkAllocationCallbacks -> IO ()) ->
   String ->
   [VkResult] ->
   a ->
   VkaResource ci vk
-simpleParamVkaResource create destroy name successResults device = simpleVkaResource (create device) (destroy device) name successResults
+vkaSimpleParamResource create destroy name successResults device = vkaSimpleResource (create device) (destroy device) name successResults
 
-simpleParamVkaResource_ ::
+vkaSimpleParamResource_ ::
   (a -> Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult) ->
   (a -> vk -> Ptr VkAllocationCallbacks -> IO ()) ->
   String ->
   a ->
   VkaResource ci vk
-simpleParamVkaResource_ create destroy name = simpleParamVkaResource create destroy name [VK_SUCCESS]
+vkaSimpleParamResource_ create destroy name = vkaSimpleParamResource create destroy name [VK_SUCCESS]
 
-newVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO (VkResult, vk)
-newVkWithResult VkaResource{..} createInfo =
+vkaNewWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO (VkResult, vk)
+vkaNewWithResult VkaResource{..} createInfo =
   withPtr createInfo $ \createInfoPtr ->
   alloca $ \vkPtr -> do
     create <- vkr'getCreate
     result <- create createInfoPtr VK_NULL vkPtr & onVkFailureThrow vkr'createName vkr'successResults
     (result,) <$> peek vkPtr
 
-newVk :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO vk
-newVk = fmap snd .: newVkWithResult
+vkaNew :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO vk
+vkaNew = fmap snd .: vkaNewWithResult
 
-acquireVkWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire (VkResult, vk)
-acquireVkWithResult r createInfo =
-  newVkWithResult r createInfo
+vkaAcquireWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire (VkResult, vk)
+vkaAcquireWithResult r createInfo =
+  vkaNewWithResult r createInfo
   `mkAcquire`
   \(_, vk) -> do
     destroy <- vkr'getDestroy r
     destroy vk VK_NULL
 
-acquireVk :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire vk
-acquireVk = fmap snd .: acquireVkWithResult
+vkaAcquire :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire vk
+vkaAcquire = fmap snd .: vkaAcquireWithResult
 
-allocateAcquireVk :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m (ReleaseKey, vk)
-allocateAcquireVk = allocateAcquire .: acquireVk
+vkaAllocateResource :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m (ReleaseKey, vk)
+vkaAllocateResource = allocateAcquire .: vkaAcquire
 
-allocateAcquireVk_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m vk
-allocateAcquireVk_ = allocateAcquire_ .: acquireVk
+vkaAllocateResource_ :: (Storable vk, VulkanMarshal ci, MonadResource m) => VkaResource ci vk -> ci -> m vk
+vkaAllocateResource_ = allocateAcquire_ .: vkaAcquire

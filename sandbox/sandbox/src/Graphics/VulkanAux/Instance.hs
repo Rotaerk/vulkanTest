@@ -5,7 +5,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
 vkaInstanceResource :: VkaResource VkInstanceCreateInfo VkInstance
-vkaInstanceResource = simpleVkaResource_ vkCreateInstance vkDestroyInstance "vkCreateInstance"
+vkaInstanceResource = vkaSimpleResource_ vkCreateInstance vkDestroyInstance "vkCreateInstance"
 
 initStandardInstanceCreateInfo :: CreateVkStruct VkInstanceCreateInfo '["sType", "pNext"] ()
 initStandardInstanceCreateInfo =

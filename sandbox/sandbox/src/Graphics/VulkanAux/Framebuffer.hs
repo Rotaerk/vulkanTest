@@ -5,7 +5,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
 vkaFramebufferResource :: VkDevice -> VkaResource VkFramebufferCreateInfo VkFramebuffer
-vkaFramebufferResource = simpleParamVkaResource_ vkCreateFramebuffer vkDestroyFramebuffer "vkCreateFramebuffer"
+vkaFramebufferResource = vkaSimpleParamResource_ vkCreateFramebuffer vkDestroyFramebuffer "vkCreateFramebuffer"
 
 initStandardFramebufferCreateInfo :: CreateVkStruct VkFramebufferCreateInfo '["sType", "pNext"] ()
 initStandardFramebufferCreateInfo =

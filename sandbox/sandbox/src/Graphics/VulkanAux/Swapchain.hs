@@ -14,7 +14,7 @@ import Graphics.VulkanAux.Getter
 import Graphics.VulkanAux.Resource
 
 vkaSwapchainResource :: VkDevice -> VkaResource VkSwapchainCreateInfoKHR VkSwapchainKHR
-vkaSwapchainResource = simpleParamVkaResource_ vkCreateSwapchainKHR vkDestroySwapchainKHR "vkCreateSwapchainKHR"
+vkaSwapchainResource = vkaSimpleParamResource_ vkCreateSwapchainKHR vkDestroySwapchainKHR "vkCreateSwapchainKHR"
 
 initStandardSwapchainCreateInfo :: CreateVkStruct VkSwapchainCreateInfoKHR '["sType", "pNext"] ()
 initStandardSwapchainCreateInfo =

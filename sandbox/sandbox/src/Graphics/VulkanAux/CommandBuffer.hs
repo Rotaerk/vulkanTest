@@ -79,7 +79,7 @@ vkaExecuteCommands device commandPool submissionQueue fillCommandBuffer = runRes
     (fillCommandBuffer commandBuffer)
 
   executionCompleteFence <-
-    allocateAcquireVk_ (vkaFenceResource device) $
+    vkaAllocateResource_ (vkaFenceResource device) $
     createVk $
     initStandardFenceCreateInfo &*
     setFenceSignaled False

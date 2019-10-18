@@ -28,7 +28,7 @@ import Graphics.VulkanAux.Resource
 import Numeric.DataFrame
 
 vkaBufferResource :: VkDevice -> VkaResource VkBufferCreateInfo VkBuffer
-vkaBufferResource = simpleParamVkaResource_ vkCreateBuffer vkDestroyBuffer "vkCreateBuffer"
+vkaBufferResource = vkaSimpleParamResource_ vkCreateBuffer vkDestroyBuffer "vkCreateBuffer"
 
 initStandardBufferCreateInfo :: CreateVkStruct VkBufferCreateInfo '["sType", "pNext"] ()
 initStandardBufferCreateInfo =
@@ -53,7 +53,7 @@ vkaCreateBoundBuffer ::
   VkBufferCreateInfo ->
   ResourceT m (VkBuffer, VkDeviceMemory)
 vkaCreateBoundBuffer device pdmp qualification bufferCreateInfo = runResourceT $ do
-  (bufferReleaseKey, buffer) <- allocateAcquireVk (vkaBufferResource device) bufferCreateInfo
+  (bufferReleaseKey, buffer) <- vkaAllocateResource (vkaBufferResource device) bufferCreateInfo
   memory <-
     lift $
     fromMaybeM (throwVkaExceptionM "Failed to find a suitable memory type for the buffer.") $

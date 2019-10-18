@@ -218,7 +218,7 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
       ]
 
   imageView <-
-    lift . allocateAcquireVk_ (vkaImageViewResource device) $
+    lift . vkaAllocateResource_ (vkaImageViewResource device) $
     createVk $
     initStandardImageViewCreateInfo &*
     set @"flags" zeroBits &*
@@ -245,7 +245,7 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
     )
 
   sampler <-
-    lift . allocateAcquireVk_ (vkaSamplerResource device) $
+    lift . vkaAllocateResource_ (vkaSamplerResource device) $
     createVk $
     initStandardSamplerCreateInfo &*
     set @"magFilter" VK_FILTER_LINEAR &*

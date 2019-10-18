@@ -5,7 +5,7 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
 vkaCommandPoolResource :: VkDevice -> VkaResource VkCommandPoolCreateInfo VkCommandPool
-vkaCommandPoolResource = simpleParamVkaResource_ vkCreateCommandPool vkDestroyCommandPool "vkCreateCommandPool"
+vkaCommandPoolResource = vkaSimpleParamResource_ vkCreateCommandPool vkDestroyCommandPool "vkCreateCommandPool"
 
 initStandardCommandPoolCreateInfo :: CreateVkStruct VkCommandPoolCreateInfo '["sType", "pNext"] ()
 initStandardCommandPoolCreateInfo =

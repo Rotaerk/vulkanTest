@@ -85,7 +85,7 @@ resourceMain = do
   let allExtensions = glfwExtensions ++ extensions
 
   vulkanInstance <-
-    allocateAcquireVk_ vkaInstanceResource $
+    vkaAllocateResource_ vkaInstanceResource $
     createVk $
     initStandardInstanceCreateInfo &*
     setVkRef @"pApplicationInfo" (
@@ -178,7 +178,7 @@ resourceMain = do
   ioPutStrLn "Queue family indices selected."
 
   device <-
-    allocateAcquireVk_ (vkaDeviceResource physicalDevice) $
+    vkaAllocateResource_ (vkaDeviceResource physicalDevice) $
     createVk $
     initStandardDeviceCreateInfo &*
     setListCountAndRef @"queueCreateInfoCount" @"pQueueCreateInfos" (
@@ -197,7 +197,7 @@ resourceMain = do
     forM qfis $ \qfi -> liftM2 (,)
       (vkaGet_ $ vkGetDeviceQueue device qfi 0)
       (
-        allocateAcquireVk_ (vkaCommandPoolResource device) $
+        vkaAllocateResource_ (vkaCommandPoolResource device) $
         createVk $
         initStandardCommandPoolCreateInfo &*
         set @"flags" zeroBits &*
@@ -206,7 +206,7 @@ resourceMain = do
   ioPutStrLn "Device queues obtained, and corresponding command pools created."
 
   descriptorSetLayout <-
-    allocateAcquireVk_ (vkaDescriptorSetLayoutResource device) $
+    vkaAllocateResource_ (vkaDescriptorSetLayoutResource device) $
     createVk $
     initStandardDescriptorSetLayoutCreateInfo &*
     set @"flags" zeroBits &*
@@ -228,7 +228,7 @@ resourceMain = do
   ioPutStrLn "Descriptor set layout created."
 
   pipelineLayout <-
-    allocateAcquireVk_ (vkaPipelineLayoutResource device) $
+    vkaAllocateResource_ (vkaPipelineLayoutResource device) $
     createVk $
     initStandardPipelineLayoutCreateInfo &*
     setListCountAndRef @"setLayoutCount" @"pSetLayouts" [descriptorSetLayout] &*
@@ -325,7 +325,7 @@ resourceMain = do
             set @"height" (fromIntegral windowFramebufferHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
 
     swapchain <-
-      allocateAcquireVk_ (vkaSwapchainResource device) $
+      vkaAllocateResource_ (vkaSwapchainResource device) $
       createVk $
       initStandardSwapchainCreateInfo &*
       set @"flags" zeroBits &*
@@ -359,7 +359,7 @@ resourceMain = do
 
     swapchainImageViews <-
       forM (vkaElems swapchainImageArray) $ \image ->
-        allocateAcquireVk_ (vkaImageViewResource device) $
+        vkaAllocateResource_ (vkaImageViewResource device) $
         createVk $
         initStandardImageViewCreateInfo &*
         set @"flags" zeroBits &*
@@ -389,7 +389,7 @@ resourceMain = do
     ioPutStrLn "Uniform buffers created."
 
     descriptorPool <-
-      allocateAcquireVk_ (vkaDescriptorPoolResource device) $
+      vkaAllocateResource_ (vkaDescriptorPoolResource device) $
       createVk $
       initStandardDescriptorPoolCreateInfo &*
       set @"flags" zeroBits &*
@@ -463,7 +463,7 @@ resourceMain = do
     ioPutStrLn $ "Depth format chosen: " ++ show depthFormat ++ "."
 
     renderPass <-
-      allocateAcquireVk_ (vkaRenderPassResource device) $
+      vkaAllocateResource_ (vkaRenderPassResource device) $
       createVk $
       initStandardRenderPassCreateInfo &*
       setListCountAndRef @"attachmentCount" @"pAttachments" (
@@ -723,7 +723,7 @@ resourceMain = do
     ioPutStrLn "Depth image created."
 
     depthImageView <-
-      allocateAcquireVk_ (vkaImageViewResource device) $
+      vkaAllocateResource_ (vkaImageViewResource device) $
       createVk $
       initStandardImageViewCreateInfo &*
       set @"flags" zeroBits &*
@@ -747,7 +747,7 @@ resourceMain = do
 
     swapchainFramebuffers <-
       forM swapchainImageViews $ \swapchainImageView ->
-      allocateAcquireVk_ (vkaFramebufferResource device) $
+      vkaAllocateResource_ (vkaFramebufferResource device) $
       createVk $
       initStandardFramebufferCreateInfo &*
       set @"renderPass" renderPass &*
