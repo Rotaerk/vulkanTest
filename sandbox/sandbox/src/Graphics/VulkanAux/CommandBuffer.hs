@@ -19,7 +19,7 @@ import Graphics.VulkanAux.Resource
 vkaAllocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (VkaArray VkCommandBuffer)
 vkaAllocatedCommandBuffers device allocateInfo =
   if commandBufferCount > 0 then
-    acquireVkaArray_ commandBufferCount
+    vkaAcquireArray_ commandBufferCount
       (\arrayPtr ->
         withPtr allocateInfo $ \allocateInfoPtr ->
           vkAllocateCommandBuffers device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateCommandBuffers"

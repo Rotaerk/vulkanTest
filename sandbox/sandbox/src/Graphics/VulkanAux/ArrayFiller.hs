@@ -19,7 +19,7 @@ vkaGetArray fillArray =
     let fillArray' = fillArray countPtr
     getCountResult <- fillArray' VK_NULL
     count <- peek countPtr
-    newVkaArray count $ \arrPtr -> if count > 0 then fillArray' arrPtr else return getCountResult
+    vkaNewArray count $ \arrPtr -> if count > 0 then fillArray' arrPtr else return getCountResult
 
 vkaGetArray_ :: (MonadIO io, Storable vk) => VkaArrayFiller vk r -> io (VkaArray vk)
 vkaGetArray_ = fmap snd . vkaGetArray

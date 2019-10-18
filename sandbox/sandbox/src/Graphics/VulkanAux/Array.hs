@@ -2,8 +2,8 @@
 
 module Graphics.VulkanAux.Array (
   VkaArray(),
-  newVkaArray, newVkaArray_,
-  acquireVkaArray, acquireVkaArray_,
+  vkaNewArray, vkaNewArray_,
+  vkaAcquireArray, vkaAcquireArray_,
   vkaNumElements,
   vkaElems,
   vkaAssocs
@@ -22,16 +22,16 @@ import System.IO.Unsafe
 
 newtype VkaArray vk = VkaArray { unVkaArray :: StorableArray Word32 vk }
 
-newVkaArray :: Storable vk => Word32 -> (Ptr vk -> IO r) -> IO (r, VkaArray vk)
-newVkaArray count fill = do
+vkaNewArray :: Storable vk => Word32 -> (Ptr vk -> IO r) -> IO (r, VkaArray vk)
+vkaNewArray count fill = do
   sarr <- newArray_ (0, count-1)
   (, VkaArray sarr) <$> withStorableArray sarr fill
 
-newVkaArray_ :: Storable vk => Word32 -> (Ptr vk -> IO ()) -> IO (VkaArray vk)
-newVkaArray_ = fmap snd .: newVkaArray
+vkaNewArray_ :: Storable vk => Word32 -> (Ptr vk -> IO ()) -> IO (VkaArray vk)
+vkaNewArray_ = fmap snd .: vkaNewArray
 
-acquireVkaArray :: Storable vk => Word32 -> (Ptr vk -> IO r) -> (Ptr vk -> IO ()) -> Acquire (r, VkaArray vk)
-acquireVkaArray count fill destroy =
+vkaAcquireArray :: Storable vk => Word32 -> (Ptr vk -> IO r) -> (Ptr vk -> IO ()) -> Acquire (r, VkaArray vk)
+vkaAcquireArray count fill destroy =
   second VkaArray <$>
   do
     sarr <- newArray_ (0, count-1)
@@ -39,8 +39,8 @@ acquireVkaArray count fill destroy =
   `mkAcquire`
   (flip withStorableArray destroy . snd)
 
-acquireVkaArray_ :: Storable vk => Word32 -> (Ptr vk -> IO ()) -> (Ptr vk -> IO ()) -> Acquire (VkaArray vk)
-acquireVkaArray_ = fmap snd .:. acquireVkaArray
+vkaAcquireArray_ :: Storable vk => Word32 -> (Ptr vk -> IO ()) -> (Ptr vk -> IO ()) -> Acquire (VkaArray vk)
+vkaAcquireArray_ = fmap snd .:. vkaAcquireArray
 
 vkaNumElements :: Storable vk => VkaArray vk -> Word32
 vkaNumElements = fromIntegral . unsafePerformIO . getNumElements . unVkaArray

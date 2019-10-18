@@ -17,15 +17,10 @@ import Prelude.Local
 
 import Paths_sandbox
 
-import qualified Codec.Image.Ktx.Read as KTX
-import qualified Codec.Image.Ktx.VkConstants as KTX
-import Control.Applicative
 import Control.Exception (throw)
 import Control.Monad
 import Control.Monad.Extra
-import Control.Monad.Fail
 import Control.Monad.IO.Class
-import Control.Monad.Reader
 import Control.Monad.Trans.Resource.Local
 import Data.Acquire.Local
 import Data.Bits.Local
@@ -35,14 +30,9 @@ import Data.Functor
 import Data.IORef
 import Data.List
 import Data.Maybe
-import Data.Set (Set)
-import qualified Data.Set as Set
 import Data.Tuple.Extra
 import Data.Word
 import Foreign.C.String
-import Foreign.Marshal.Alloc
-import Foreign.Marshal.Array
-import Foreign.Marshal.Array.Sized
 import Foreign.Ptr
 import Foreign.Storable
 
@@ -53,7 +43,6 @@ import Graphics.UI.GLFWAux
 
 import Graphics.Vulkan
 import Graphics.Vulkan.Core_1_0
-import Graphics.Vulkan.Core_1_1
 import Graphics.Vulkan.Ext.VK_EXT_debug_report
 import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
@@ -62,10 +51,8 @@ import Graphics.Vulkan.Marshal.Create.DataFrame
 import Graphics.VulkanAux
 
 import Numeric.DataFrame hiding (sortBy)
-import Numeric.Dimensions
 
 import System.Clock
-import System.IO
 import UnliftIO.Exception
 
 main :: IO ()
@@ -98,7 +85,7 @@ resourceMain = do
   let allExtensions = glfwExtensions ++ extensions
 
   vulkanInstance <-
-    allocateAcquireVk_ vulkanInstanceResource $
+    allocateAcquireVk_ vkaInstanceResource $
     createVk $
     initStandardInstanceCreateInfo &*
     setVkRef @"pApplicationInfo" (
@@ -142,7 +129,7 @@ resourceMain = do
     sortBy (
       mconcat [
         prefer [VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU] `on` getField @"deviceType" . snd3,
-        compare `on` pdmpDeviceLocalMemorySize . thd3
+        compare `on` vkaGetPhysicalDeviceLocalMemorySize . thd3
       ]
     ) <&>
     headOr (throwAppEx "No physical device found")
@@ -191,7 +178,7 @@ resourceMain = do
   ioPutStrLn "Queue family indices selected."
 
   device <-
-    allocateAcquireVk_ (deviceResource physicalDevice) $
+    allocateAcquireVk_ (vkaDeviceResource physicalDevice) $
     createVk $
     initStandardDeviceCreateInfo &*
     setListCountAndRef @"queueCreateInfoCount" @"pQueueCreateInfos" (
@@ -210,7 +197,7 @@ resourceMain = do
     forM qfis $ \qfi -> liftM2 (,)
       (vkaGet_ $ vkGetDeviceQueue device qfi 0)
       (
-        allocateAcquireVk_ (commandPoolResource device) $
+        allocateAcquireVk_ (vkaCommandPoolResource device) $
         createVk $
         initStandardCommandPoolCreateInfo &*
         set @"flags" zeroBits &*
@@ -219,7 +206,7 @@ resourceMain = do
   ioPutStrLn "Device queues obtained, and corresponding command pools created."
 
   descriptorSetLayout <-
-    allocateAcquireVk_ (descriptorSetLayoutResource device) $
+    allocateAcquireVk_ (vkaDescriptorSetLayoutResource device) $
     createVk $
     initStandardDescriptorSetLayoutCreateInfo &*
     set @"flags" zeroBits &*
@@ -241,7 +228,7 @@ resourceMain = do
   ioPutStrLn "Descriptor set layout created."
 
   pipelineLayout <-
-    allocateAcquireVk_ (pipelineLayoutResource device) $
+    allocateAcquireVk_ (vkaPipelineLayoutResource device) $
     createVk $
     initStandardPipelineLayoutCreateInfo &*
     setListCountAndRef @"setLayoutCount" @"pSetLayouts" [descriptorSetLayout] &*
@@ -290,7 +277,7 @@ resourceMain = do
       (packDF @Word32 @6 @'[] 0 2 1 0 3 2)
   ioPutStrLn "Index buffer created."
 
-  frameSyncs <- replicateM maxFramesInFlight $ FrameSync <$> vkaCreateFence device True <*> createSemaphore device <*> createSemaphore device
+  frameSyncs <- replicateM maxFramesInFlight $ FrameSync <$> vkaCreateFence device True <*> vkaCreateSemaphore device <*> vkaCreateSemaphore device
   ioPutStrLn "Frame syncs created."
 
   renderStartTimeRef <- liftIO $ newIORef Nothing
@@ -338,7 +325,7 @@ resourceMain = do
             set @"height" (fromIntegral windowFramebufferHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
 
     swapchain <-
-      allocateAcquireVk_ (swapchainResource device) $
+      allocateAcquireVk_ (vkaSwapchainResource device) $
       createVk $
       initStandardSwapchainCreateInfo &*
       set @"flags" zeroBits &*
@@ -402,7 +389,7 @@ resourceMain = do
     ioPutStrLn "Uniform buffers created."
 
     descriptorPool <-
-      allocateAcquireVk_ (descriptorPoolResource device) $
+      allocateAcquireVk_ (vkaDescriptorPoolResource device) $
       createVk $
       initStandardDescriptorPoolCreateInfo &*
       set @"flags" zeroBits &*
@@ -476,7 +463,7 @@ resourceMain = do
     ioPutStrLn $ "Depth format chosen: " ++ show depthFormat ++ "."
 
     renderPass <-
-      allocateAcquireVk_ (renderPassResource device) $
+      allocateAcquireVk_ (vkaRenderPassResource device) $
       createVk $
       initStandardRenderPassCreateInfo &*
       setListCountAndRef @"attachmentCount" @"pAttachments" (
@@ -534,9 +521,9 @@ resourceMain = do
     ioPutStrLn "Render pass created."
 
     [graphicsPipeline] <- runResourceT $ do
-      vertShaderModule <- createShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.vert.spv")
+      vertShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.vert.spv")
       ioPutStrLn "Vertex shader module created."
-      fragShaderModule <- createShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.frag.spv")
+      fragShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.frag.spv")
       ioPutStrLn "Fragment shader module created."
 
       liftIO $
@@ -684,7 +671,7 @@ resourceMain = do
             set @"basePipelineIndex" (-1)
           ]
         )
-    registerGraphicsPipelineForDestruction_ device graphicsPipeline
+    vkaRegisterGraphicsPipelineForDestruction_ device graphicsPipeline
     ioPutStrLn "Graphics pipeline created."
 
     (depthImage, depthImageMemory) <-
@@ -760,7 +747,7 @@ resourceMain = do
 
     swapchainFramebuffers <-
       forM swapchainImageViews $ \swapchainImageView ->
-      allocateAcquireVk_ (framebufferResource device) $
+      allocateAcquireVk_ (vkaFramebufferResource device) $
       createVk $
       initStandardFramebufferCreateInfo &*
       set @"renderPass" renderPass &*
@@ -936,329 +923,3 @@ data FrameSync =
     frameSync'imageAvailableSemaphore :: VkSemaphore,
     frameSync'renderFinishedSemaphore :: VkSemaphore
   }
-
--- Vulkan helpers>
-vkaRegisterDebugCallback :: MonadUnliftIO io => VkInstance -> VkDebugReportFlagsEXT -> HS_vkDebugReportCallbackEXT -> ResourceT io ()
-vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
-  debugCallbackPtr <- allocate_ (newVkDebugReportCallbackEXT debugCallback) freeHaskellFunPtr
-  void . allocateAcquireVk_ (registeredDebugReportCallbackResource vulkanInstance) $
-    createVk $
-    set @"sType" VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT &*
-    set @"pNext" VK_NULL &*
-    set @"flags" flags &*
-    set @"pfnCallback" debugCallbackPtr
-
-vulkanInstanceResource :: VkaResource VkInstanceCreateInfo VkInstance
-vulkanInstanceResource = simpleVkaResource_ vkCreateInstance vkDestroyInstance "vkCreateInstance"
-
-initStandardInstanceCreateInfo :: CreateVkStruct VkInstanceCreateInfo '["sType", "pNext"] ()
-initStandardInstanceCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-initStandardApplicationInfo :: CreateVkStruct VkApplicationInfo '["sType", "pNext"] ()
-initStandardApplicationInfo =
-  set @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO &*
-  set @"pNext" VK_NULL
-
-registeredDebugReportCallbackResource :: VkInstance -> VkaResource VkDebugReportCallbackCreateInfoEXT VkDebugReportCallbackEXT
-registeredDebugReportCallbackResource vulkanInstance =
-  VkaResource
-    (vkGetInstanceProc @VkCreateDebugReportCallbackEXT vulkanInstance <*> pure vulkanInstance)
-    (vkGetInstanceProc @VkDestroyDebugReportCallbackEXT vulkanInstance <*> pure vulkanInstance)
-    "vkCreateDebugReportCallbackEXT"
-    [VK_SUCCESS]
-
-deviceResource :: VkPhysicalDevice -> VkaResource VkDeviceCreateInfo VkDevice
-deviceResource = simpleParamVkaResource_ vkCreateDevice (const vkDestroyDevice) "vkCreateDevice"
-
-initStandardDeviceCreateInfo :: CreateVkStruct VkDeviceCreateInfo '["sType", "pNext", "flags", "enabledLayerCount", "ppEnabledLayerNames"] ()
-initStandardDeviceCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO &*
-  set @"pNext" VK_NULL &*
-  set @"flags" zeroBits &*
-  set @"enabledLayerCount" 0 &*
-  set @"ppEnabledLayerNames" VK_NULL
-
-initStandardDeviceQueueCreateInfo :: CreateVkStruct VkDeviceQueueCreateInfo '["sType", "pNext"] ()
-initStandardDeviceQueueCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-commandPoolResource :: VkDevice -> VkaResource VkCommandPoolCreateInfo VkCommandPool
-commandPoolResource = simpleParamVkaResource_ vkCreateCommandPool vkDestroyCommandPool "vkCreateCommandPool"
-
-initStandardCommandPoolCreateInfo :: CreateVkStruct VkCommandPoolCreateInfo '["sType", "pNext"] ()
-initStandardCommandPoolCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-descriptorSetLayoutResource :: VkDevice -> VkaResource VkDescriptorSetLayoutCreateInfo VkDescriptorSetLayout
-descriptorSetLayoutResource = simpleParamVkaResource_ vkCreateDescriptorSetLayout vkDestroyDescriptorSetLayout "vkCreateDescriptorSetLayout"
-
-initStandardDescriptorSetLayoutCreateInfo :: CreateVkStruct VkDescriptorSetLayoutCreateInfo '["sType", "pNext"] ()
-initStandardDescriptorSetLayoutCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-pipelineLayoutResource :: VkDevice -> VkaResource VkPipelineLayoutCreateInfo VkPipelineLayout
-pipelineLayoutResource = simpleParamVkaResource_ vkCreatePipelineLayout vkDestroyPipelineLayout "vkCreatePipelineLayout"
-
-initStandardPipelineLayoutCreateInfo :: CreateVkStruct VkPipelineLayoutCreateInfo '["sType", "pNext", "flags"] ()
-initStandardPipelineLayoutCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO &*
-  set @"pNext" VK_NULL &*
-  set @"flags" zeroBits
-
--- Generalize this and the next function once the CreateVkStruct type is redesigned.
-setImageSharingQueueFamilyIndices ::
-  (
-    CanWriteField "imageSharingMode" a,
-    CanWriteField "queueFamilyIndexCount" a,
-    CanWriteField "pQueueFamilyIndices" a,
-    FieldType "imageSharingMode" a ~ VkSharingMode,
-    FieldType "queueFamilyIndexCount" a ~ Word32,
-    FieldType "pQueueFamilyIndices" a ~ Ptr Word32
-  ) =>
-  [Word32] ->
-  CreateVkStruct a '["imageSharingMode", "queueFamilyIndexCount", "pQueueFamilyIndices"] ()
-setImageSharingQueueFamilyIndices qfis =
-  set @"imageSharingMode" (if null qfis' then VK_SHARING_MODE_EXCLUSIVE else VK_SHARING_MODE_CONCURRENT) &*
-  setListCountAndRef @"queueFamilyIndexCount" @"pQueueFamilyIndices" qfis'
-  where
-    -- If just one QFI is provided, it's the same as providing none; both are exclusive mode,
-    -- and the QFI list is ignored in that case.
-    qfis' = if length qfis > 1 then qfis else []
-
--- Warning: This will free the descriptor sets at the end of the ResourceT scope.  Only use this if the descriptor
--- pool was created with the VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT flag set.  If you don't have that
--- set, use vkaAllocateDescriptorSets instead.
-allocatedDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> Acquire (VkaArray VkDescriptorSet)
-allocatedDescriptorSets device allocateInfo =
-  if descriptorSetCount > 0 then
-    acquireVkaArray_ descriptorSetCount
-      (\arrayPtr ->
-        withPtr allocateInfo $ \allocateInfoPtr ->
-          vkAllocateDescriptorSets device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateDescriptorSets"
-      )
-      (\arrayPtr ->
-        vkFreeDescriptorSets device descriptorPool descriptorSetCount arrayPtr & onVkFailureThrow_ "vkFreeDescriptorSets"
-      )
-  else
-    throwVkaException "Cannot allocate 0 descriptor sets."
-
-  where
-    descriptorSetCount = getField @"descriptorSetCount" allocateInfo
-    descriptorPool = getField @"descriptorPool" allocateInfo
-
-vkaAllocateDescriptorSets :: VkDevice -> VkDescriptorSetAllocateInfo -> IO (VkaArray VkDescriptorSet)
-vkaAllocateDescriptorSets device allocateInfo =
-  if descriptorSetCount > 0 then
-    newVkaArray_ descriptorSetCount $ \arrayPtr ->
-      withPtr allocateInfo $ \allocateInfoPtr ->
-        vkAllocateDescriptorSets device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateDescriptorSets"
-  else
-    throwVkaException "Cannot allocate 0 descriptor sets."
-
-  where
-    descriptorSetCount = getField @"descriptorSetCount" allocateInfo
-
-vkaUpdateDescriptorSets :: VkDevice -> [VkWriteDescriptorSet] -> [VkCopyDescriptorSet] -> IO ()
-vkaUpdateDescriptorSets device writes copies =
-  withArray writes $ \writesPtr ->
-  withArray copies $ \copiesPtr ->
-    vkUpdateDescriptorSets device (lengthNum writes) writesPtr (lengthNum copies) copiesPtr
-
-initStandardWriteDescriptorSet :: CreateVkStruct VkWriteDescriptorSet '["sType", "pNext"] ()
-initStandardWriteDescriptorSet =
-  set @"sType" VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET &*
-  set @"pNext" VK_NULL
-
-initStandardCopyDescriptorSet :: CreateVkStruct VkCopyDescriptorSet '["sType", "pNext"] ()
-initStandardCopyDescriptorSet =
-  set @"sType" VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET &*
-  set @"pNext" VK_NULL
-
-initStandardDescriptorSetAllocateInfo :: CreateVkStruct VkDescriptorSetAllocateInfo '["sType", "pNext"] ()
-initStandardDescriptorSetAllocateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO &*
-  set @"pNext" VK_NULL
-
-vkaDeviceWaitIdle :: VkDevice -> IO ()
-vkaDeviceWaitIdle device = vkDeviceWaitIdle device & onVkFailureThrow_ "vkDeviceWaitIdle"
-
-semaphoreResource :: VkDevice -> VkaResource VkSemaphoreCreateInfo VkSemaphore
-semaphoreResource = simpleParamVkaResource_ vkCreateSemaphore vkDestroySemaphore "vkCreateSemaphore"
-
-initStandardSemaphoreCreateInfo :: CreateVkStruct VkSemaphoreCreateInfo '["sType", "pNext"] ()
-initStandardSemaphoreCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-createSemaphore :: MonadIO m => VkDevice -> ResourceT m VkSemaphore
-createSemaphore device = allocateAcquireVk_ (semaphoreResource device) $ createVk initStandardSemaphoreCreateInfo
-
-swapchainResource :: VkDevice -> VkaResource VkSwapchainCreateInfoKHR VkSwapchainKHR
-swapchainResource = simpleParamVkaResource_ vkCreateSwapchainKHR vkDestroySwapchainKHR "vkCreateSwapchainKHR"
-
-initStandardSwapchainCreateInfo :: CreateVkStruct VkSwapchainCreateInfoKHR '["sType", "pNext"] ()
-initStandardSwapchainCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR &*
-  set @"pNext" VK_NULL
-
-descriptorPoolResource :: VkDevice -> VkaResource VkDescriptorPoolCreateInfo VkDescriptorPool
-descriptorPoolResource = simpleParamVkaResource_ vkCreateDescriptorPool vkDestroyDescriptorPool "vkCreateDescriptorPool"
-
-initStandardDescriptorPoolCreateInfo :: CreateVkStruct VkDescriptorPoolCreateInfo '["sType", "pNext"] ()
-initStandardDescriptorPoolCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-renderPassResource :: VkDevice -> VkaResource VkRenderPassCreateInfo VkRenderPass
-renderPassResource = simpleParamVkaResource_ vkCreateRenderPass vkDestroyRenderPass "vkCreateRenderPass"
-
-initStandardRenderPassCreateInfo :: CreateVkStruct VkRenderPassCreateInfo '["sType", "pNext", "flags"] ()
-initStandardRenderPassCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO &*
-  set @"pNext" VK_NULL &*
-  set @"flags" zeroBits
-
-vkaCreateGraphicsPipelines :: VkDevice -> VkPipelineCache -> [VkGraphicsPipelineCreateInfo] -> IO (VkaArray VkPipeline)
-vkaCreateGraphicsPipelines device pipelineCache createInfos@(lengthNum -> count) =
-  if count > 0 then
-    withArray createInfos $ \createInfosPtr ->
-      newVkaArray_ count $ \arrayPtr ->
-        vkCreateGraphicsPipelines device pipelineCache count createInfosPtr VK_NULL arrayPtr & onVkFailureThrow_ "vkCreateGraphicsPipelines"
-  else
-    throwVkaException "Cannot allocate 0 graphics pipelines."
-
-registerGraphicsPipelineForDestruction :: MonadResource m => VkDevice -> VkPipeline -> m ReleaseKey
-registerGraphicsPipelineForDestruction device pipeline = register $ vkDestroyPipeline device pipeline VK_NULL
-
-registerGraphicsPipelineForDestruction_ :: MonadResource m => VkDevice -> VkPipeline -> m ()
-registerGraphicsPipelineForDestruction_ = void .: registerGraphicsPipelineForDestruction
-
-initStandardGraphicsPipelineCreateInfo :: CreateVkStruct VkGraphicsPipelineCreateInfo '["sType", "pNext"] ()
-initStandardGraphicsPipelineCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-shaderModuleResource :: VkDevice -> VkaResource VkShaderModuleCreateInfo VkShaderModule
-shaderModuleResource = simpleParamVkaResource_ vkCreateShaderModule vkDestroyShaderModule "vkCreateShaderModule"
-
-initStandardShaderModuleCreateInfo :: CreateVkStruct VkShaderModuleCreateInfo '["sType", "pNext", "flags"] ()
-initStandardShaderModuleCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO &*
-  set @"pNext" VK_NULL &*
-  set @"flags" zeroBits
-
-createShaderModuleFromFile :: MonadUnliftIO m => VkDevice -> FilePath -> ResourceT m VkShaderModule
-createShaderModuleFromFile device filePath = runResourceT $ do
-  SizedArray{..} <- fillArrayFromSpirvFile filePath
-  lift $ allocateAcquireVk_ (shaderModuleResource device) $
-    createVk $
-    initStandardShaderModuleCreateInfo &*
-    set @"codeSize" (fromIntegral arraySize) &*
-    set @"pCode" (castPtr arrayPtr)
-
-fillArrayFromSpirvFile :: MonadUnliftIO m => FilePath -> ResourceT m (SizedArray Word8)
-fillArrayFromSpirvFile filePath = runResourceT $ do
-  h <- allocate_ (openBinaryFile filePath ReadMode) hClose
-
-  -- Vulkan requires SPIR-V bytecode to have an alignment of 4 bytes.
-  alignedSize <- liftIO $ alignTo 4 . fromIntegral <$> hFileSize h
-  array <- lift $ allocateAcquire_ (acquireSizedArray @Word8 alignedSize)
-
-  let ptr = arrayPtr array
-
-  liftIO $ do
-    bytesRead <- hGetBuf h ptr alignedSize
-    pokeArray @Word8 (plusPtr ptr bytesRead) $ replicate (alignedSize - bytesRead) 0
-
-  return array
-
-initStandardPipelineShaderStageCreateInfo :: CreateVkStruct VkPipelineShaderStageCreateInfo '["sType", "pNext"] ()
-initStandardPipelineShaderStageCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-initStandardPipelineVertexInputStateCreateInfo :: CreateVkStruct VkPipelineVertexInputStateCreateInfo '["sType", "pNext"] ()
-initStandardPipelineVertexInputStateCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-initStandardPipelineInputAssemblyStateCreateInfo :: CreateVkStruct VkPipelineInputAssemblyStateCreateInfo '["sType", "pNext"] ()
-initStandardPipelineInputAssemblyStateCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-initStandardPipelineViewportStateCreateInfo :: CreateVkStruct VkPipelineViewportStateCreateInfo '["sType", "pNext"] ()
-initStandardPipelineViewportStateCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-initStandardPipelineRasterizationStateCreateInfo :: CreateVkStruct VkPipelineRasterizationStateCreateInfo '["sType", "pNext"] ()
-initStandardPipelineRasterizationStateCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-initStandardPipelineMultisampleStateCreateInfo :: CreateVkStruct VkPipelineMultisampleStateCreateInfo '["sType", "pNext"] ()
-initStandardPipelineMultisampleStateCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-initStandardPipelineDepthStencilStateCreateInfo :: CreateVkStruct VkPipelineDepthStencilStateCreateInfo '["sType", "pNext"] ()
-initStandardPipelineDepthStencilStateCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-initStandardPipelineColorBlendStateCreateInfo :: CreateVkStruct VkPipelineColorBlendStateCreateInfo '["sType", "pNext"] ()
-initStandardPipelineColorBlendStateCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-framebufferResource :: VkDevice -> VkaResource VkFramebufferCreateInfo VkFramebuffer
-framebufferResource = simpleParamVkaResource_ vkCreateFramebuffer vkDestroyFramebuffer "vkCreateFramebuffer"
-
-initStandardFramebufferCreateInfo :: CreateVkStruct VkFramebufferCreateInfo '["sType", "pNext"] ()
-initStandardFramebufferCreateInfo =
-  set @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO &*
-  set @"pNext" VK_NULL
-
-vkaGetPhysicalDeviceSurfaceSupportKHR :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> VkaGetter VkBool32 ()
-vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface =
-  vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi surface & onGetterFailureThrow_ "vkGetPhysicalDeviceSurfaceSupportKHR"
-
-vkaGetPhysicalDeviceSurfaceCapabilitiesKHR :: VkPhysicalDevice -> VkSurfaceKHR -> VkaGetter VkSurfaceCapabilitiesKHR ()
-vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface =
-  vkGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice surface & onGetterFailureThrow_ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"
-
-vkaAcquireNextImageKHR :: VkDevice -> VkSwapchainKHR -> Word64 -> VkSemaphore -> VkFence -> VkaGetter Word32 VkResult
-vkaAcquireNextImageKHR device swapchain timeout semaphore fence =
-  vkAcquireNextImageKHR device swapchain timeout semaphore fence &
-  onGetterFailureThrow "vkAcquireNextImageKHR" [VK_SUCCESS, VK_TIMEOUT, VK_NOT_READY, VK_SUBOPTIMAL_KHR]
-
-vkaEnumeratePhysicalDevices :: VkInstance -> VkaArrayFiller VkPhysicalDevice VkResult
-vkaEnumeratePhysicalDevices = onArrayFillerFailureThrow "vkEnumeratePhysicalDevices" [VK_SUCCESS] . vkEnumeratePhysicalDevices
-
-vkaGetPhysicalDeviceSurfaceFormatsKHR :: VkPhysicalDevice -> VkSurfaceKHR -> VkaArrayFiller VkSurfaceFormatKHR VkResult
-vkaGetPhysicalDeviceSurfaceFormatsKHR = onArrayFillerFailureThrow "vkGetPhysicalDeviceSurfaceFormatsKHR" [VK_SUCCESS] .: vkGetPhysicalDeviceSurfaceFormatsKHR
-
-vkaGetPhysicalDeviceSurfacePresentModesKHR :: VkPhysicalDevice -> VkSurfaceKHR -> VkaArrayFiller VkPresentModeKHR VkResult
-vkaGetPhysicalDeviceSurfacePresentModesKHR = onArrayFillerFailureThrow "vkGetPhysicalDeviceSurfacePresentModesKHR" [VK_SUCCESS] .: vkGetPhysicalDeviceSurfacePresentModesKHR
-
-vkaGetSwapchainImagesKHR :: VkDevice -> VkSwapchainKHR -> VkaArrayFiller VkImage VkResult
-vkaGetSwapchainImagesKHR = onArrayFillerFailureThrow "vkGetSwapchainImagesKHR" [VK_SUCCESS] .: vkGetSwapchainImagesKHR
-
-pdmpDeviceLocalMemorySize :: VkPhysicalDeviceMemoryProperties -> VkDeviceSize
-pdmpDeviceLocalMemorySize memoryProperties =
-  iwfoldr @VkMemoryHeap @'[_] @'[] (
-    \(Idx i :* U) (S x) s ->
-      if i < memoryHeapCount && isDeviceLocal x then s + getField @"size" x else s
-  ) 0 .
-  getVec @"memoryHeaps" $
-  memoryProperties
-  where
-    isDeviceLocal = (zeroBits /=) . (VK_MEMORY_HEAP_DEVICE_LOCAL_BIT .&.) . getField @"flags"
-    memoryHeapCount = fromIntegral $ getField @"memoryHeapCount" memoryProperties
--- Vulkan helpers<

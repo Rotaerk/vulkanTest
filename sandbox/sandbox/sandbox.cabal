@@ -33,17 +33,32 @@ executable sandbox
     Graphics.VulkanAux.Buffer
     Graphics.VulkanAux.Command
     Graphics.VulkanAux.CommandBuffer
+    Graphics.VulkanAux.CommandPool
+    Graphics.VulkanAux.DebugReportCallback
+    Graphics.VulkanAux.DescriptorPool
+    Graphics.VulkanAux.DescriptorSet
+    Graphics.VulkanAux.DescriptorSetLayout
+    Graphics.VulkanAux.Device
     Graphics.VulkanAux.Exception
     Graphics.VulkanAux.Fence
+    Graphics.VulkanAux.Framebuffer
     Graphics.VulkanAux.Getter
     Graphics.VulkanAux.GLFW
+    Graphics.VulkanAux.GraphicsPipeline
     Graphics.VulkanAux.Image
     Graphics.VulkanAux.ImageView
+    Graphics.VulkanAux.Instance
     Graphics.VulkanAux.KTX
     Graphics.VulkanAux.Memory
+    Graphics.VulkanAux.PhysicalDevice
+    Graphics.VulkanAux.PipelineLayout
     Graphics.VulkanAux.Queue
+    Graphics.VulkanAux.RenderPass
     Graphics.VulkanAux.Resource
     Graphics.VulkanAux.Sampler
+    Graphics.VulkanAux.Semaphore
+    Graphics.VulkanAux.ShaderModule
+    Graphics.VulkanAux.Swapchain
     Prelude.Local
     Paths_sandbox
   ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches -fno-ignore-asserts
