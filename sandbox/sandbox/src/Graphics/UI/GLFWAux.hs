@@ -10,10 +10,7 @@ import Data.IORef
 import qualified Graphics.UI.GLFW as GLFW
 import System.Clock
   
-data GLFWException =
-  GLFWException {
-    glfwexFunctionName :: String
-  } deriving (Eq, Show, Read)
+data GLFWException = GLFWException { glfwException'functionName :: String } deriving (Eq, Show, Read)
 
 instance Exception GLFWException where
   displayException (GLFWException functionName) = "GLFWException: " ++ functionName ++ " failed."
@@ -21,14 +18,14 @@ instance Exception GLFWException where
 throwGLFWExceptionM :: MonadThrow m => String -> m a
 throwGLFWExceptionM = throwM . GLFWException
 
-initializedGLFW :: Acquire ()
-initializedGLFW =
+acquireInitializedGLFW :: Acquire ()
+acquireInitializedGLFW =
   unlessM GLFW.init (throwGLFWExceptionM "init")
   `mkAcquire`
   const GLFW.terminate
 
-newVulkanGLFWWindow :: Int -> Int -> String -> Acquire GLFW.Window
-newVulkanGLFWWindow width height title =
+acquireVulkanGLFWWindow :: Int -> Int -> String -> Acquire GLFW.Window
+acquireVulkanGLFWWindow width height title =
   do
     GLFW.windowHint $ GLFW.WindowHint'ClientAPI GLFW.ClientAPI'NoAPI
     fromMaybeM (throwGLFWExceptionM "createWindow") (GLFW.createWindow width height title Nothing Nothing)

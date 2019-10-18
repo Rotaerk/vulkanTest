@@ -63,7 +63,7 @@ main =
       putStrLn $ displayException e
   )
   `catch` (
-    \(e :: VkResultException) ->
+    \(e :: VkaResultException) ->
       putStrLn $ displayException e
   )
   `catch` (
@@ -77,7 +77,7 @@ resourceMain = do
     putStr $ "GLFW error callback: " ++ show errorCode ++ " - " ++ errorMessage
   ioPutStrLn "GLFW error callback set."
 
-  allocateAcquire_ initializedGLFW
+  allocateAcquire_ acquireInitializedGLFW
   ioPutStrLn "GLFW initialized."
 
   glfwExtensions <- liftIO GLFW.getRequiredInstanceExtensions
@@ -135,7 +135,7 @@ resourceMain = do
     headOr (throwAppEx "No physical device found")
   ioPutStrLn "Physical device selected."
 
-  window <- allocateAcquire_ $ newVulkanGLFWWindow 800 600 "Vulkan Sandbox"
+  window <- allocateAcquire_ $ acquireVulkanGLFWWindow 800 600 "Vulkan Sandbox"
   ioPutStrLn "Window created."
 
   lastWindowResizeTimeRef <- liftIO $ newIORef Nothing
@@ -557,11 +557,11 @@ resourceMain = do
                 createVk . (set @"binding" 0 &*) <$> [
                   set @"location" 0 &*
                   set @"format" VK_FORMAT_R32G32_SFLOAT &*
-                  set @"offset" (bFieldOffsetOf @"vtxPos" @Vertex undefined),
+                  set @"offset" (bFieldOffsetOf @"vertex'pos" @Vertex undefined),
 
                   set @"location" 1 &*
                   set @"format" VK_FORMAT_R32G32_SFLOAT &*
-                  set @"offset" (bFieldOffsetOf @"vtxTexCoord" @Vertex undefined)
+                  set @"offset" (bFieldOffsetOf @"vertex'texCoord" @Vertex undefined)
                 ]
               )
             ) &*
@@ -897,8 +897,8 @@ throwAppExM message = throwM $ ApplicationException message
 
 data Vertex =
   Vertex {
-    vtxPos :: Vec2f,
-    vtxTexCoord :: Vec2f
+    vertex'pos :: Vec2f,
+    vertex'texCoord :: Vec2f
   } deriving (Eq, Show, Generic)
 
 instance PrimBytes Vertex

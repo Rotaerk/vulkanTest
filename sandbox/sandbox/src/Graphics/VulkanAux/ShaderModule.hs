@@ -36,8 +36,8 @@ vkaCreateShaderModuleFromFile device filePath = runResourceT $ do
   lift $ vkaAllocateResource_ (vkaShaderModuleResource device) $
     createVk $
     initStandardShaderModuleCreateInfo &*
-    set @"codeSize" (fromIntegral arraySize) &*
-    set @"pCode" (castPtr arrayPtr)
+    set @"codeSize" (fromIntegral sizedArray'size) &*
+    set @"pCode" (castPtr sizedArray'ptr)
 
 fillArrayFromSpirvFile :: MonadUnliftIO m => FilePath -> ResourceT m (SizedArray Word8)
 fillArrayFromSpirvFile filePath = runResourceT $ do
@@ -47,7 +47,7 @@ fillArrayFromSpirvFile filePath = runResourceT $ do
   alignedSize <- liftIO $ alignTo 4 . fromIntegral <$> hFileSize h
   array <- lift $ allocateAcquire_ (acquireSizedArray @Word8 alignedSize)
 
-  let ptr = arrayPtr array
+  let ptr = sizedArray'ptr array
 
   liftIO $ do
     bytesRead <- hGetBuf h ptr alignedSize

@@ -6,20 +6,20 @@ import Control.Monad.Catch
 import Data.Function
 import Graphics.Vulkan.Core_1_0
 
-data VkResultException =
-  VkResultException {
+data VkaResultException =
+  VkaResultException {
     vkaResultException'functionName :: String,
     vkaResultException'result :: VkResult
   } deriving (Eq, Show, Read)
 
-instance Exception VkResultException where
-  displayException (VkResultException functionName result) =
+instance Exception VkaResultException where
+  displayException (VkaResultException functionName result) =
     functionName ++ " failed with: " ++ show result
 
 onVkFailureThrow :: String -> [VkResult] -> IO VkResult -> IO VkResult
 onVkFailureThrow functionName successResults vkAction = do
   result <- vkAction
-  unless (result `elem` successResults) $ throwIO (VkResultException functionName result)
+  unless (result `elem` successResults) $ throwIO (VkaResultException functionName result)
   return result
 
 onVkFailureThrow_ :: String -> IO VkResult -> IO ()
@@ -35,4 +35,3 @@ throwVkaException = throw . VkaException
 
 throwVkaExceptionM :: MonadThrow m => String -> m a
 throwVkaExceptionM = throwM . VkaException
-

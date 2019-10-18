@@ -16,10 +16,10 @@ import Graphics.VulkanAux.Exception
 
 data VkaResource ci vk =
   VkaResource {
-    vkr'getCreate :: IO (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult),
-    vkr'getDestroy :: IO (vk -> Ptr VkAllocationCallbacks -> IO ()),
-    vkr'createName :: String,
-    vkr'successResults :: [VkResult]
+    vkaResource'getCreate :: IO (Ptr ci -> Ptr VkAllocationCallbacks -> Ptr vk -> IO VkResult),
+    vkaResource'getDestroy :: IO (vk -> Ptr VkAllocationCallbacks -> IO ()),
+    vkaResource'createName :: String,
+    vkaResource'successResults :: [VkResult]
   }
 
 vkaSimpleResource ::
@@ -58,8 +58,8 @@ vkaNewWithResult :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -
 vkaNewWithResult VkaResource{..} createInfo =
   withPtr createInfo $ \createInfoPtr ->
   alloca $ \vkPtr -> do
-    create <- vkr'getCreate
-    result <- create createInfoPtr VK_NULL vkPtr & onVkFailureThrow vkr'createName vkr'successResults
+    create <- vkaResource'getCreate
+    result <- create createInfoPtr VK_NULL vkPtr & onVkFailureThrow vkaResource'createName vkaResource'successResults
     (result,) <$> peek vkPtr
 
 vkaNew :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> IO vk
@@ -70,7 +70,7 @@ vkaAcquireWithResult r createInfo =
   vkaNewWithResult r createInfo
   `mkAcquire`
   \(_, vk) -> do
-    destroy <- vkr'getDestroy r
+    destroy <- vkaResource'getDestroy r
     destroy vk VK_NULL
 
 vkaAcquire :: (Storable vk, VulkanMarshal ci) => VkaResource ci vk -> ci -> Acquire vk
