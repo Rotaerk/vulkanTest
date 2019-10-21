@@ -15,10 +15,11 @@ main = shakeArgs shakeOptions { shakeFiles = ".shake/" } $ do
     removeFilesAfter ".shake" ["//*"]
 
   "build" ~> cmd "cabal" ["build"]
-  "repl" ~> cmd "cabal" ["repl"]
-  "run" ~> do
-    need ["shaders"]
-    cmd "cabal" ["run"]
+
+  forM executableNames $ \name -> do
+    "run-" ++ name ~> do
+      need ["shaders"]
+      cmd "cabal" ["run", name]
 
   "shaders" ~> do
     need =<< fmap shaderSrcPathToOutPath <$> getDirectoryFiles "shaders" ["*.vert", "*.frag"]
@@ -26,6 +27,13 @@ main = shakeArgs shakeOptions { shakeFiles = ".shake/" } $ do
   shadersOutDir </> "*.spv" %> \outPath@(shaderOutPathToSrcPath -> srcPath) -> do
     need [srcPath]
     cmd "glslangValidator" ["-V", srcPath, "-o", outPath]
+
+executableNames :: [String]
+executableNames =
+  [
+    "sandbox",
+    "triangle"
+  ]
 
 shadersSrcDir :: FilePath
 shadersSrcDir = "shaders"

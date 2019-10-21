@@ -17,9 +17,39 @@ data-dir: data
 data-files:
   shaders/*.spv
 
-executable sandbox
+common common
   hs-source-dirs: src
-  main-is: Main.hs
+  ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches -fno-ignore-asserts
+  default-language: Haskell2010
+  default-extensions:
+    DataKinds,
+    LambdaCase,
+    ScopedTypeVariables,
+    TupleSections,
+    TypeApplications,
+    ViewPatterns
+  build-depends:
+    array,
+    clock,
+    containers,
+    dimensions,
+    easytensor,
+    easytensor-vulkan,
+    exceptions,
+    extra,
+    GLFW-b,
+    ktx-rw,
+    monad-loops,
+    mtl,
+    reflection,
+    resourcet,
+    safe,
+    transformers,
+    typelits-witnesses,
+    unliftio,
+    unliftio-core,
+    vulkan-api,
+    base >=4.12 && <4.13
   other-modules:
     Control.Monad.Trans.Resource.Local
     Data.Acquire.Local
@@ -61,35 +91,12 @@ executable sandbox
     Graphics.VulkanAux.Swapchain
     Prelude.Local
     Paths_sandbox
-  ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches -fno-ignore-asserts
-  build-depends:
-    array,
-    clock,
-    containers,
-    dimensions,
-    easytensor,
-    easytensor-vulkan,
-    exceptions,
-    extra,
-    GLFW-b,
-    ktx-rw,
-    monad-loops,
-    mtl,
-    reflection,
-    resourcet,
-    safe,
-    transformers,
-    typelits-witnesses,
-    unliftio,
-    unliftio-core,
-    vulkan-api,
 
-    base >=4.12 && <4.13
-  default-extensions:
-    DataKinds,
-    LambdaCase,
-    ScopedTypeVariables,
-    TupleSections,
-    TypeApplications,
-    ViewPatterns
-  default-language:    Haskell2010
+executable sandbox
+  import: common
+  main-is: Main.hs
+
+executable triangle
+  import: common
+  hs-source-dirs: example-src/triangle
+  main-is: Main.hs
