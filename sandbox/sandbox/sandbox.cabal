@@ -96,7 +96,10 @@ executable sandbox
   import: common
   main-is: Main.hs
 
-executable triangle
+common example-common
   import: common
-  hs-source-dirs: example-src/triangle
-  main-is: Main.hs
+  hs-source-dirs: example-src
+
+executable triangle
+  import: example-common
+  main-is: Triangle.hs
