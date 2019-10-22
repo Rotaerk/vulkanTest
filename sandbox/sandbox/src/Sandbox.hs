@@ -17,7 +17,7 @@ import Prelude.Local
 
 import Paths_sandbox
 
-import Control.Exception (throw)
+import ApplicationException
 import Control.Monad
 import Control.Monad.Extra
 import Control.Monad.IO.Class
@@ -882,18 +882,6 @@ validationLayers =
 
 maxFramesInFlight :: Int
 maxFramesInFlight = 2
-
-data ApplicationException = ApplicationException String deriving (Eq, Show, Read)
-
-instance Exception ApplicationException where
-  displayException (ApplicationException message) =
-    "Application error: " ++ message
-
-throwAppEx :: String -> a
-throwAppEx message = throw $ ApplicationException message
-
-throwAppExM :: MonadThrow m => String -> m a
-throwAppExM message = throwM $ ApplicationException message
 
 data Vertex =
   Vertex {

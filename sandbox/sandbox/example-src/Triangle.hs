@@ -17,7 +17,7 @@ import Prelude.Local
 
 import Paths_sandbox
 
-import Control.Exception (throw)
+import ApplicationException
 import Control.Monad
 import Control.Monad.Extra
 import Control.Monad.IO.Class
@@ -216,12 +216,6 @@ resourceMain = do
         set @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &*
         set @"descriptorCount" 1 &*
         set @"stageFlags" VK_SHADER_STAGE_VERTEX_BIT &*
-        set @"pImmutableSamplers" VK_NULL,
-
-        set @"binding" 1 &*
-        set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
-        set @"descriptorCount" 1 &*
-        set @"stageFlags" VK_SHADER_STAGE_FRAGMENT_BIT &*
         set @"pImmutableSamplers" VK_NULL
       ]
     )
@@ -235,20 +229,6 @@ resourceMain = do
     setListCountAndRef @"pushConstantRangeCount" @"pPushConstantRanges" []
   ioPutStrLn "Pipeline layout created."
 
-  (textureImage, textureImageMemory, textureImageView, textureSampler) <-
-    createImageFromKtxTexture
-      device
-      physicalDeviceMemoryProperties
-      graphicsCommandPool
-      graphicsQueue
-      VK_SAMPLE_COUNT_1_BIT
-      VK_IMAGE_TILING_OPTIMAL
-      (VK_IMAGE_USAGE_TRANSFER_SRC_BIT .|. VK_IMAGE_USAGE_TRANSFER_DST_BIT .|. VK_IMAGE_USAGE_SAMPLED_BIT)
-      [graphicsQfi]
-      VK_IMAGE_LAYOUT_UNDEFINED
-      "../ktx-rw/ktx-rw/textures/oak_bark.ktx"
-  ioPutStrLn "Loaded KTX texture to an image."
-
   (vertexBuffer, vertexBufferMemory) <-
     vkaCreateFilledBufferFromPrimBytes
       device
@@ -258,11 +238,10 @@ resourceMain = do
       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
       [graphicsQfi]
       (
-        packDF @Vertex @4 @'[]
-          (svertex (vec2 (-0.5) (-0.5)) (vec2 1 0))
-          (svertex (vec2 (0.5) (-0.5)) (vec2 0 0))
-          (svertex (vec2 (0.5) (0.5)) (vec2 0 1))
-          (svertex (vec2 (-0.5) (0.5)) (vec2 1 1))
+        packDF @Vertex @3 @'[]
+          (svertex (vec2 0 (-1)) (vec3 0 0 1))
+          (svertex (vec2 (-1) 1) (vec3 0 1 0))
+          (svertex (vec2 1 1) (vec3 1 0 0))
       )
   ioPutStrLn "Vertex buffer created."
 
@@ -274,7 +253,7 @@ resourceMain = do
       transferQueue
       VK_BUFFER_USAGE_INDEX_BUFFER_BIT
       [graphicsQfi]
-      (packDF @Word32 @6 @'[] 0 2 1 0 3 2)
+      (packDF @Word32 @3 @'[] 0 1 2)
   ioPutStrLn "Index buffer created."
 
   frameSyncs <- replicateM maxFramesInFlight $ FrameSync <$> vkaCreateFence device True <*> vkaCreateSemaphore device <*> vkaCreateSemaphore device
@@ -323,6 +302,8 @@ resourceMain = do
             createVk $
             set @"width" (fromIntegral windowFramebufferWidth & clamp (getField @"width" minImageExtent) (getField @"width" maxImageExtent)) &*
             set @"height" (fromIntegral windowFramebufferHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
+
+      swapchainImageAspectRatio = fromIntegral (getField @"width" swapchainImageExtent) / fromIntegral (getField @"height" swapchainImageExtent)
 
     swapchain <-
       vkaAllocateResource_ (vkaSwapchainResource device) $
@@ -396,8 +377,7 @@ resourceMain = do
       set @"maxSets" swapchainImageCountWord32 &*
       setListCountAndRef @"poolSizeCount" @"pPoolSizes" (
         createVk . (set @"descriptorCount" swapchainImageCountWord32 &*) <$> [
-          set @"type" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-          set @"type" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+          set @"type" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
         ]
       )
     ioPutStrLn "Descriptor pool created."
@@ -427,21 +407,6 @@ resourceMain = do
               set @"range" (bSizeOf @UniformBufferObject undefined)
             ] &*
             set @"pImageInfo" VK_NULL &*
-            set @"pTexelBufferView" VK_NULL,
-
-            initStandardWriteDescriptorSet &*
-            set @"dstSet" descriptorSet &*
-            set @"dstBinding" 1 &*
-            set @"dstArrayElement" 0 &*
-            set @"descriptorType" VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &*
-            set @"descriptorCount" 1 &*
-            set @"pBufferInfo" VK_NULL &*
-            setListRef @"pImageInfo" [
-              createVk $
-              set @"imageLayout" VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &*
-              set @"imageView" textureImageView &*
-              set @"sampler" textureSampler
-            ] &*
             set @"pTexelBufferView" VK_NULL
           ]
         )
@@ -521,9 +486,9 @@ resourceMain = do
     ioPutStrLn "Render pass created."
 
     [graphicsPipeline] <- runResourceT $ do
-      vertShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.vert.spv")
+      vertShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/triangle.vert.spv")
       ioPutStrLn "Vertex shader module created."
-      fragShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.frag.spv")
+      fragShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/triangle.frag.spv")
       ioPutStrLn "Fragment shader module created."
 
       liftIO $
@@ -560,8 +525,8 @@ resourceMain = do
                   set @"offset" (bFieldOffsetOf @"vertex'pos" @Vertex undefined),
 
                   set @"location" 1 &*
-                  set @"format" VK_FORMAT_R32G32_SFLOAT &*
-                  set @"offset" (bFieldOffsetOf @"vertex'texCoord" @Vertex undefined)
+                  set @"format" VK_FORMAT_R32G32B32_SFLOAT &*
+                  set @"offset" (bFieldOffsetOf @"vertex'color" @Vertex undefined)
                 ]
               )
             ) &*
@@ -787,7 +752,7 @@ resourceMain = do
         vkaCmdBindVertexBuffers commandBuffer 0 [(vertexBuffer, 0)]
         vkCmdBindIndexBuffer commandBuffer indexBuffer 0 VK_INDEX_TYPE_UINT32
         vkaCmdBindDescriptorSets commandBuffer VK_PIPELINE_BIND_POINT_GRAPHICS pipelineLayout 0 [descriptorSet] []
-        vkCmdDrawIndexed commandBuffer 6 1 0 0 0 -- 6 is the length of the dataframe used to fill the index buffer earlier.
+        vkCmdDrawIndexed commandBuffer 3 1 0 0 0 -- 3 is the length of the dataframe used to fill the index buffer earlier.
         vkCmdEndRenderPass commandBuffer
     ioPutStrLn "Swapchain command buffers filled."
 
@@ -818,11 +783,17 @@ resourceMain = do
 
             nextImageIndexWord32@(fromIntegral -> nextImageIndex) <- vkaGet_ $ vkaAcquireNextImageKHR device swapchain maxBound frameSync'imageAvailableSemaphore VK_NULL_HANDLE
 
+            secondsOffset <- liftIO $ (0.000000001 *) . fromInteger . toNanoSecs . (subtract renderStartTime) <$> getTime Monotonic
+
             -- Obviously there is no point in updating the UBO to the same value every time, but I'm leaving this here
             -- so that I can later easily transform the rendered image over time.
             with (vkaMappedMemory device (uniformBufferMemories !! nextImageIndex) 0 (bSizeOf @UniformBufferObject undefined)) $ \ptr ->
               poke (castPtr ptr) . S $
-              UniformBufferObject eye eye eye
+              UniformBufferObject {
+                uniformBufferObject'model = rotateZ (0.5 * pi * secondsOffset),
+                uniformBufferObject'view = lookAt (vec3 0 (-1) 0) (vec3 0 0 (-2.5)) 0,
+                uniformBufferObject'proj = perspective 0.1 256 (pi / 3) swapchainImageAspectRatio %* glToVk
+              }
 
             vkaQueueSubmit graphicsQueue frameSync'inFlightFence
               [
@@ -883,29 +854,17 @@ validationLayers =
 maxFramesInFlight :: Int
 maxFramesInFlight = 2
 
-data ApplicationException = ApplicationException String deriving (Eq, Show, Read)
-
-instance Exception ApplicationException where
-  displayException (ApplicationException message) =
-    "Application error: " ++ message
-
-throwAppEx :: String -> a
-throwAppEx message = throw $ ApplicationException message
-
-throwAppExM :: MonadThrow m => String -> m a
-throwAppExM message = throwM $ ApplicationException message
-
 data Vertex =
   Vertex {
     vertex'pos :: Vec2f,
-    vertex'texCoord :: Vec2f
+    vertex'color :: Vec3f
   } deriving (Eq, Show, Generic)
 
 instance PrimBytes Vertex
 
 type SVertex = Scalar Vertex
 
-svertex :: Vec2f -> Vec2f -> SVertex
+svertex :: Vec2f -> Vec3f -> SVertex
 svertex = S .: Vertex
 
 data UniformBufferObject =
@@ -923,3 +882,10 @@ data FrameSync =
     frameSync'imageAvailableSemaphore :: VkSemaphore,
     frameSync'renderFinishedSemaphore :: VkSemaphore
   }
+
+glToVk :: Mat44f
+glToVk = mat44
+  (vec4 1 0    0   0)
+  (vec4 0 (-1) 0   0)
+  (vec4 0 0    0.5 0.5)
+  (vec4 0 0    0   1)

@@ -33,7 +33,7 @@ common common
     clock,
     containers,
     dimensions,
-    easytensor,
+    easytensor ^>= 2.1,
     easytensor-vulkan,
     exceptions,
     extra,
@@ -49,8 +49,9 @@ common common
     unliftio,
     unliftio-core,
     vulkan-api,
-    base >=4.12 && <4.13
+    base ^>=4.12
   other-modules:
+    ApplicationException
     Control.Monad.Trans.Resource.Local
     Data.Acquire.Local
     Data.Bits.Local
@@ -94,7 +95,7 @@ common common
 
 executable sandbox
   import: common
-  main-is: Main.hs
+  main-is: Sandbox.hs
 
 common example-common
   import: common
