@@ -91,7 +91,7 @@ resourceMain = do
     setVkRef @"pApplicationInfo" (
       createVk $
       initStandardApplicationInfo &*
-      setStrRef @"pApplicationName" "Example - Triangle" &*
+      setStrRef @"pApplicationName" "Example - Pipelines" &*
       set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
       setStrRef @"pEngineName" "" &*
       set @"engineVersion" 0 &*

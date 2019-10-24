@@ -104,3 +104,7 @@ common example-common
 executable triangle
   import: example-common
   main-is: Triangle.hs
+
+executable pipelines
+  import: example-common
+  main-is: Pipelines.hs

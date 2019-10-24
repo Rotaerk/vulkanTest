@@ -32,7 +32,8 @@ executableNames :: [String]
 executableNames =
   [
     "sandbox",
-    "triangle"
+    "triangle",
+    "pipelines"
   ]
 
 shadersSrcDir :: FilePath
