@@ -10,6 +10,8 @@ let
     hs.hpack
     vulkan-tools
     glslang
+    binutils-unwrapped
+    gcc9
   ];
   libraries = [
 #    vulkan-headers

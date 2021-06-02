@@ -521,9 +521,9 @@ resourceMain = do
     ioPutStrLn "Render pass created."
 
     [graphicsPipeline] <- runResourceT $ do
-      vertShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.vert.spv")
+      vertShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/sandbox.vert.spv")
       ioPutStrLn "Vertex shader module created."
-      fragShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/shader.frag.spv")
+      fragShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/sandbox.frag.spv")
       ioPutStrLn "Fragment shader module created."
 
       liftIO $

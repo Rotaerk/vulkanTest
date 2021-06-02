@@ -41,7 +41,7 @@ vkaCreateShaderModuleFromFile device filePath = runResourceT $ do
 
 fillArrayFromSpirvFile :: MonadUnliftIO m => FilePath -> ResourceT m (SizedArray Word8)
 fillArrayFromSpirvFile filePath = runResourceT $ do
-  h <- allocate_ (openBinaryFile filePath ReadMode) hClose
+  (_, h) <- allocate (openBinaryFile filePath ReadMode) hClose
 
   -- Vulkan requires SPIR-V bytecode to have an alignment of 4 bytes.
   alignedSize <- liftIO $ alignTo 4 . fromIntegral <$> hFileSize h
