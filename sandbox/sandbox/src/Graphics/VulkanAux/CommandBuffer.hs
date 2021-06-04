@@ -3,7 +3,6 @@
 module Graphics.VulkanAux.CommandBuffer where
 
 import Control.Monad.IO.Class
-import Control.Monad.Fail
 import Control.Monad.Trans.Resource.Local
 import Data.Acquire.Local
 import Data.Function

@@ -12,7 +12,6 @@ import qualified Codec.Image.Ktx.Read as KTX
 import qualified Codec.Image.Ktx.VkConstants as KTX
 import Control.Applicative
 import Control.Exception
-import Control.Monad.Fail
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Resource

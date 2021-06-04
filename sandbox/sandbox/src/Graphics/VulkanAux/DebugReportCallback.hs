@@ -1,7 +1,6 @@
 module Graphics.VulkanAux.DebugReportCallback where
 
 import Control.Monad.Trans.Resource.Local
-import Data.Acquire.Local
 import Data.Functor
 import Foreign.Ptr
 import Graphics.Vulkan

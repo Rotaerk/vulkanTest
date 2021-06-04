@@ -8,7 +8,7 @@ import Control.Monad.Trans.Resource
 import Data.Acquire
 
 allocateAcquire_ :: MonadResource m => Acquire a -> m a
-allocateAcquire_ = (snd <$>) . allocateAcquire
+allocateAcquire_ = fmap snd . allocateAcquire
 
 with_ :: MonadUnliftIO m => Acquire a -> m b -> m b
 with_ a m = with a $ const m

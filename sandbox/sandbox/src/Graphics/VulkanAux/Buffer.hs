@@ -8,7 +8,6 @@ module Graphics.VulkanAux.Buffer where
 import Prelude.Local
 
 import Control.Monad.Extra
-import Control.Monad.Fail
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Resource.Local

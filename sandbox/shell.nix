@@ -3,7 +3,7 @@ with pkgs;
 let
   inherit (lib) makeLibraryPath;
   hs = haskell.packages.ghc884;
-  tools = [
+  packages = [
     (hs.ghcWithPackages (ps: [ps.shake]))
     hs.cabal-install
     hs.ghcid
@@ -12,9 +12,6 @@ let
     glslang
     binutils-unwrapped
     gcc9
-  ];
-  libraries = [
-#    vulkan-headers
     vulkan-loader
     vulkan-validation-layers
     libGL
@@ -27,12 +24,7 @@ let
     xorg.libXrandr
     xorg.libXxf86vm
   ];
-  libraryPath = "${makeLibraryPath libraries}";
 in
-  pkgs.runCommand "shell" {
-    buildInputs = tools ++ libraries;
-    shellHook = ''
-      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${libraryPath}"
-      export LIBRARY_PATH="${libraryPath}"
-    '';
-  } ""
+  pkgs.mkShell {
+    inherit packages;
+  }

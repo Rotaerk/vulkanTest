@@ -876,7 +876,7 @@ validationLayers :: [String]
 validationLayers =
   [
 #ifndef NDEBUG
-    "VK_LAYER_LUNARG_standard_validation"
+    "VK_LAYER_KHRONOS_validation"
 #endif
   ]
 

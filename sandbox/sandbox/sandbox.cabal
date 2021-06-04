@@ -17,6 +17,10 @@ data-dir: data
 data-files:
   shaders/*.spv
 
+flag ndebug
+  Description: Disables debugging.
+  Default: False
+
 common common
   hs-source-dirs: src
   ghc-options: -threaded -Wall -Wno-name-shadowing -Wno-unused-matches -fno-ignore-asserts
@@ -49,7 +53,7 @@ common common
     unliftio,
     unliftio-core,
     vulkan-api,
-    base ^>=4.12
+    base
   other-modules:
     ApplicationException
     Control.Monad.Trans.Resource.Local
@@ -92,6 +96,8 @@ common common
     Graphics.VulkanAux.Swapchain
     Prelude.Local
     Paths_sandbox
+  if flag(ndebug)
+    cpp-options: -DNDEBUG
 
 executable sandbox
   import: common

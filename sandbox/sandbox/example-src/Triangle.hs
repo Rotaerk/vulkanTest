@@ -43,7 +43,9 @@ import Graphics.UI.GLFWAux
 
 import Graphics.Vulkan
 import Graphics.Vulkan.Core_1_0
+#ifndef NDEBUG
 import Graphics.Vulkan.Ext.VK_EXT_debug_report
+#endif
 import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
@@ -847,7 +849,7 @@ validationLayers :: [String]
 validationLayers =
   [
 #ifndef NDEBUG
-    "VK_LAYER_LUNARG_standard_validation"
+    "VK_LAYER_KHRONOS_validation"
 #endif
   ]
 
