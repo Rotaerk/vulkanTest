@@ -25,6 +25,6 @@ let
     xorg.libXxf86vm
   ];
 in
-  pkgs.mkShell {
+  mkShell {
     inherit packages;
   }

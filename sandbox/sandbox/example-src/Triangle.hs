@@ -84,8 +84,6 @@ resourceMain = do
 
   glfwExtensions <- liftIO GLFW.getRequiredInstanceExtensions
 
-  let allExtensions = glfwExtensions ++ extensions
-
   vulkanInstance <-
     vkaAllocateResource_ vkaInstanceResource $
     createVk $
@@ -99,8 +97,22 @@ resourceMain = do
       set @"engineVersion" 0 &*
       set @"apiVersion" VK_API_VERSION_1_1
     ) &*
-    setStrListCountAndRef @"enabledLayerCount" @"ppEnabledLayerNames" validationLayers &*
-    setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" allExtensions
+    setStrListCountAndRef @"enabledLayerCount" @"ppEnabledLayerNames" (
+#ifndef NDEBUG
+      ["VK_LAYER_KHRONOS_validation"]
+#else
+      []
+#endif
+    ) &*
+    setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" (
+      glfwExtensions
+#ifndef NDEBUG
+      ++
+      [
+        VK_EXT_DEBUG_REPORT_EXTENSION_NAME
+      ]
+#endif
+    )
   ioPutStrLn "Vulkan instance created."
 
 #ifndef NDEBUG
@@ -191,7 +203,10 @@ resourceMain = do
         set @"queueFamilyIndex" qfi &*
         setListCountAndRef @"queueCount" @"pQueuePriorities" [1.0]
     ) &*
-    setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" deviceExtensions &*
+    setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames"
+      [
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+      ] &*
     set @"pEnabledFeatures" VK_NULL
   ioPutStrLn "Vulkan device created."
 
@@ -787,8 +802,6 @@ resourceMain = do
 
             secondsOffset <- liftIO $ (0.000000001 *) . fromInteger . toNanoSecs . (subtract renderStartTime) <$> getTime Monotonic
 
-            -- Obviously there is no point in updating the UBO to the same value every time, but I'm leaving this here
-            -- so that I can later easily transform the rendered image over time.
             with (vkaMappedMemory device (uniformBufferMemories !! nextImageIndex) 0 (bSizeOf @UniformBufferObject undefined)) $ \ptr ->
               poke (castPtr ptr) . S $
               UniformBufferObject {
@@ -826,32 +839,7 @@ resourceMain = do
     ioPutStrLn "Cleaning up swapchain-related objects."
     return shouldRebuildSwapchain
 
-  ioPutStrLn "Cleaning up the rest"
-
-extensions :: [CString]
-extensions =
-  [
-  ]
-#ifndef NDEBUG
-  ++
-  [
-    VK_EXT_DEBUG_REPORT_EXTENSION_NAME
-  ]
-#endif
-
-deviceExtensions :: [CString]
-deviceExtensions =
-  [
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME
-  ]
-
-validationLayers :: [String]
-validationLayers =
-  [
-#ifndef NDEBUG
-    "VK_LAYER_KHRONOS_validation"
-#endif
-  ]
+  ioPutStrLn "Cleaning up the rest."
 
 maxFramesInFlight :: Int
 maxFramesInFlight = 2
