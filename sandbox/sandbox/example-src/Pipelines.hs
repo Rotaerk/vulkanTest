@@ -30,7 +30,6 @@ import Data.Functor
 import Data.IORef
 import Data.List
 import Data.Maybe
-import Data.Tuple.Extra
 import Data.Word
 import Foreign.C.String
 import Foreign.Ptr
@@ -48,7 +47,7 @@ import Graphics.Vulkan.Ext.VK_EXT_debug_report
 #endif
 import Graphics.Vulkan.Ext.VK_KHR_surface
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
-import Graphics.Vulkan.Marshal.Create
+import Graphics.Vulkan.Marshal.Create.Local
 import Graphics.Vulkan.Marshal.Create.DataFrame
 import Graphics.VulkanAux
 
@@ -82,37 +81,37 @@ resourceMain = do
   allocateAcquire_ acquireInitializedGLFW
   ioPutStrLn "GLFW initialized."
 
-  glfwExtensions <- liftIO GLFW.getRequiredInstanceExtensions
+  vulkanInstance <- do
+    glfwExtensions <- liftIO GLFW.getRequiredInstanceExtensions
 
-  vulkanInstance <-
     vkaAllocateResource_ vkaInstanceResource $
-    createVk $
-    initStandardInstanceCreateInfo &*
-    setVkRef @"pApplicationInfo" (
       createVk $
-      initStandardApplicationInfo &*
-      setStrRef @"pApplicationName" "Example - Pipelines" &*
-      set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
-      setStrRef @"pEngineName" "" &*
-      set @"engineVersion" 0 &*
-      set @"apiVersion" VK_API_VERSION_1_1
-    ) &*
-    setStrListCountAndRef @"enabledLayerCount" @"ppEnabledLayerNames" (
+      initStandardInstanceCreateInfo &*
+      setVkRef @"pApplicationInfo" (
+        createVk $
+        initStandardApplicationInfo &*
+        setStrRef @"pApplicationName" "Example - Pipelines" &*
+        set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
+        setStrRef @"pEngineName" "" &*
+        set @"engineVersion" 0 &*
+        set @"apiVersion" VK_API_VERSION_1_1
+      ) &*
+      setStrListCountAndRef @"enabledLayerCount" @"ppEnabledLayerNames" (
 #ifndef NDEBUG
-      ["VK_LAYER_KHRONOS_validation"]
+        ["VK_LAYER_KHRONOS_validation"]
 #else
-      []
+        []
 #endif
-    ) &*
-    setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" (
-      glfwExtensions
+      ) &*
+      setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" (
+        glfwExtensions
 #ifndef NDEBUG
-      ++
-      [
-        VK_EXT_DEBUG_REPORT_EXTENSION_NAME
-      ]
+        ++
+        [
+          VK_EXT_DEBUG_REPORT_EXTENSION_NAME
+        ]
 #endif
-    )
+      )
   ioPutStrLn "Vulkan instance created."
 
 #ifndef NDEBUG
@@ -133,17 +132,18 @@ resourceMain = do
 
   physicalDeviceArray <- vkaGetArray_ (vkaEnumeratePhysicalDevices vulkanInstance)
 
-  (physicalDevice, physicalDeviceProperties, physicalDeviceMemoryProperties) <-
+  PhysicalDeviceInfo physicalDevice physicalDeviceProperties physicalDeviceMemoryProperties physicalDeviceFeatures <-
     liftIO $
     forM (vkaElems physicalDeviceArray) (\pd ->
-      liftM2 (pd,,)
+      liftM3 (PhysicalDeviceInfo pd)
         (vkaGet_ . vkGetPhysicalDeviceProperties $ pd)
         (vkaGet_ . vkGetPhysicalDeviceMemoryProperties $ pd)
+        (vkaGet_ . vkGetPhysicalDeviceFeatures $ pd)
     ) <&>
     sortBy (
       mconcat [
-        prefer [VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU] `on` getField @"deviceType" . snd3,
-        compare `on` vkaGetPhysicalDeviceLocalMemorySize . thd3
+        prefer [VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU] `on` getField @"deviceType" . physicalDeviceInfo'properties,
+        compare `on` vkaGetPhysicalDeviceLocalMemorySize . physicalDeviceInfo'memoryProperties
       ]
     ) <&>
     headOr (throwAppEx "No physical device found")
@@ -207,7 +207,11 @@ resourceMain = do
       [
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
       ] &*
-    set @"pEnabledFeatures" VK_NULL
+    setVkRef @"pEnabledFeatures" (
+      createVk $
+      copyField @"fillModeNonSolid" physicalDeviceFeatures &*
+      copyField @"wideLines" physicalDeviceFeatures
+    )
   ioPutStrLn "Vulkan device created."
 
   [(graphicsQueue, graphicsCommandPool), (computeQueue, computeCommandPool), (transferQueue, transferCommandPool), (presentQueue, presentCommandPool)] <-
@@ -280,10 +284,12 @@ resourceMain = do
 
   doWhileM $ runResourceT $ do
     (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
+    ioPutStrLn "Window framebuffer size obtained."
 
     surfaceCapabilities <- vkaGet_ $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
     surfaceFormatArray <- vkaGetArray_ $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
     surfacePresentModeArray <- vkaGetArray_ $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
+    ioPutStrLn "Surface info obtained."
 
     let
       swapchainImageFormat = VK_FORMAT_B8G8R8A8_UNORM
@@ -321,6 +327,7 @@ resourceMain = do
             set @"height" (fromIntegral windowFramebufferHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
 
       swapchainImageAspectRatio = fromIntegral (getField @"width" swapchainImageExtent) / fromIntegral (getField @"height" swapchainImageExtent)
+    ioPutStrLn "Swapchain parameters determined."
 
     swapchain <-
       vkaAllocateResource_ (vkaSwapchainResource device) $
@@ -879,3 +886,11 @@ glToVk = mat44
   (vec4 0 (-1) 0   0)
   (vec4 0 0    0.5 0.5)
   (vec4 0 0    0   1)
+
+data PhysicalDeviceInfo =
+  PhysicalDeviceInfo {
+    physicalDeviceInfo'physicalDevice :: VkPhysicalDevice,
+    physicalDeviceInfo'properties :: VkPhysicalDeviceProperties,
+    physicalDeviceInfo'memoryProperties :: VkPhysicalDeviceMemoryProperties,
+    physicalDeviceInfo'features :: VkPhysicalDeviceFeatures
+  }

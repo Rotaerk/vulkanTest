@@ -62,6 +62,7 @@ common common
     Foreign.Marshal.Array.Sized
     Graphics.UI.GLFWAux
     Graphics.Vulkan.Marshal.Local
+    Graphics.Vulkan.Marshal.Create.Local
     Graphics.VulkanAux
     Graphics.VulkanAux.Array
     Graphics.VulkanAux.ArrayFiller
