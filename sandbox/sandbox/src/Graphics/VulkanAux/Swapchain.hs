@@ -3,9 +3,8 @@
 
 module Graphics.VulkanAux.Swapchain where
 
-import Prelude.Local
-
 import Data.Function
+import Data.Reflection
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Graphics.Vulkan.Marshal.Create
@@ -13,8 +12,8 @@ import Graphics.VulkanAux.ArrayFiller
 import Graphics.VulkanAux.Getter
 import Graphics.VulkanAux.Resource
 
-vkaSwapchainResource :: VkDevice -> VkaResource VkSwapchainCreateInfoKHR VkSwapchainKHR
-vkaSwapchainResource = vkaSimpleParamResource_ vkCreateSwapchainKHR vkDestroySwapchainKHR "vkCreateSwapchainKHR"
+vkaSwapchainResource :: Given VkDevice => VkaResource VkSwapchainCreateInfoKHR VkSwapchainKHR
+vkaSwapchainResource = vkaSimpleParamResource_ vkCreateSwapchainKHR vkDestroySwapchainKHR "vkCreateSwapchainKHR" given
 
 initStandardSwapchainCreateInfo :: CreateVkStruct VkSwapchainCreateInfoKHR '["sType", "pNext"] ()
 initStandardSwapchainCreateInfo =
@@ -41,11 +40,10 @@ setImageSharingQueueFamilyIndices qfis =
     -- and the QFI list is ignored in that case.
     qfis' = if length qfis > 1 then qfis else []
 
-vkaAcquireNextImageKHR :: VkDevice -> VkSwapchainKHR -> Word64 -> VkSemaphore -> VkFence -> VkaGetter Word32 VkResult
-vkaAcquireNextImageKHR device swapchain timeout semaphore fence =
-  vkAcquireNextImageKHR device swapchain timeout semaphore fence &
+vkaAcquireNextImageKHR :: Given VkDevice => VkSwapchainKHR -> Word64 -> VkSemaphore -> VkFence -> VkaGetter Word32 VkResult
+vkaAcquireNextImageKHR swapchain timeout semaphore fence =
+  vkAcquireNextImageKHR given swapchain timeout semaphore fence &
   onGetterFailureThrow "vkAcquireNextImageKHR" [VK_SUCCESS, VK_TIMEOUT, VK_NOT_READY, VK_SUBOPTIMAL_KHR]
 
-vkaGetSwapchainImagesKHR :: VkDevice -> VkSwapchainKHR -> VkaArrayFiller VkImage VkResult
-vkaGetSwapchainImagesKHR = onArrayFillerFailureThrow "vkGetSwapchainImagesKHR" [VK_SUCCESS] .: vkGetSwapchainImagesKHR
-
+vkaGetSwapchainImagesKHR :: Given VkDevice => VkSwapchainKHR -> VkaArrayFiller VkImage VkResult
+vkaGetSwapchainImagesKHR = onArrayFillerFailureThrow "vkGetSwapchainImagesKHR" [VK_SUCCESS] . vkGetSwapchainImagesKHR given

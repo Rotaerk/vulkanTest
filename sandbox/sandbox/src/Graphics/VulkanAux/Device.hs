@@ -1,7 +1,9 @@
 module Graphics.VulkanAux.Device where
 
+import Control.Monad.IO.Class
 import Data.Bits.Local
 import Data.Function
+import Data.Reflection
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Exception
@@ -23,5 +25,5 @@ initStandardDeviceQueueCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO &*
   set @"pNext" VK_NULL
 
-vkaDeviceWaitIdle :: VkDevice -> IO ()
-vkaDeviceWaitIdle device = vkDeviceWaitIdle device & onVkFailureThrow_ "vkDeviceWaitIdle"
+vkaDeviceWaitIdle :: (MonadIO io, Given VkDevice) => io ()
+vkaDeviceWaitIdle = liftIO $ vkDeviceWaitIdle given & onVkFailureThrow_ "vkDeviceWaitIdle"

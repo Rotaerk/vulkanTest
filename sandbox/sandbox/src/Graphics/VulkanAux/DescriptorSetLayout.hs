@@ -1,11 +1,12 @@
 module Graphics.VulkanAux.DescriptorSetLayout where
 
+import Data.Reflection
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
-vkaDescriptorSetLayoutResource :: VkDevice -> VkaResource VkDescriptorSetLayoutCreateInfo VkDescriptorSetLayout
-vkaDescriptorSetLayoutResource = vkaSimpleParamResource_ vkCreateDescriptorSetLayout vkDestroyDescriptorSetLayout "vkCreateDescriptorSetLayout"
+vkaDescriptorSetLayoutResource :: Given VkDevice => VkaResource VkDescriptorSetLayoutCreateInfo VkDescriptorSetLayout
+vkaDescriptorSetLayoutResource = vkaSimpleParamResource_ vkCreateDescriptorSetLayout vkDestroyDescriptorSetLayout "vkCreateDescriptorSetLayout" given
 
 initStandardDescriptorSetLayoutCreateInfo :: CreateVkStruct VkDescriptorSetLayoutCreateInfo '["sType", "pNext"] ()
 initStandardDescriptorSetLayoutCreateInfo =

@@ -13,6 +13,7 @@ import Control.Monad.Trans.Class
 import Control.Monad.Trans.Resource.Local
 import Data.Acquire.Local
 import Data.Bits.Local
+import Data.Reflection
 import Foreign.Marshal.Array
 import Foreign.Marshal.Array.Sized
 import Foreign.Ptr
@@ -21,8 +22,8 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 import System.IO
 
-vkaShaderModuleResource :: VkDevice -> VkaResource VkShaderModuleCreateInfo VkShaderModule
-vkaShaderModuleResource = vkaSimpleParamResource_ vkCreateShaderModule vkDestroyShaderModule "vkCreateShaderModule"
+vkaShaderModuleResource :: Given VkDevice => VkaResource VkShaderModuleCreateInfo VkShaderModule
+vkaShaderModuleResource = vkaSimpleParamResource_ vkCreateShaderModule vkDestroyShaderModule "vkCreateShaderModule" given
 
 initStandardShaderModuleCreateInfo :: CreateVkStruct VkShaderModuleCreateInfo '["sType", "pNext", "flags"] ()
 initStandardShaderModuleCreateInfo =
@@ -30,10 +31,10 @@ initStandardShaderModuleCreateInfo =
   set @"pNext" VK_NULL &*
   set @"flags" zeroBits
 
-vkaCreateShaderModuleFromFile :: MonadUnliftIO m => VkDevice -> FilePath -> ResourceT m VkShaderModule
-vkaCreateShaderModuleFromFile device filePath = runResourceT $ do
+vkaCreateShaderModuleFromFile :: (MonadUnliftIO m, Given VkDevice) => FilePath -> ResourceT m VkShaderModule
+vkaCreateShaderModuleFromFile filePath = runResourceT $ do
   SizedArray{..} <- fillArrayFromSpirvFile filePath
-  lift $ vkaAllocateResource_ (vkaShaderModuleResource device) $
+  lift $ vkaAllocateResource_ vkaShaderModuleResource $
     createVk $
     initStandardShaderModuleCreateInfo &*
     set @"codeSize" (fromIntegral sizedArray'size) &*

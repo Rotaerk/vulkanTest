@@ -5,26 +5,27 @@ import Prelude.Local
 import Control.Monad.Trans.Resource.Local
 import Data.Function
 import Data.Functor
+import Data.Reflection
 import Foreign.Marshal.Array
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Array
 import Graphics.VulkanAux.Exception
 
-vkaCreateGraphicsPipelines :: VkDevice -> VkPipelineCache -> [VkGraphicsPipelineCreateInfo] -> IO (VkaArray VkPipeline)
-vkaCreateGraphicsPipelines device pipelineCache createInfos@(lengthNum -> count) =
+vkaCreateGraphicsPipelines :: Given VkDevice => VkPipelineCache -> [VkGraphicsPipelineCreateInfo] -> IO (VkaArray VkPipeline)
+vkaCreateGraphicsPipelines pipelineCache createInfos@(lengthNum -> count) =
   if count > 0 then
     withArray createInfos $ \createInfosPtr ->
       vkaNewArray_ count $ \arrayPtr ->
-        vkCreateGraphicsPipelines device pipelineCache count createInfosPtr VK_NULL arrayPtr & onVkFailureThrow_ "vkCreateGraphicsPipelines"
+        vkCreateGraphicsPipelines given pipelineCache count createInfosPtr VK_NULL arrayPtr & onVkFailureThrow_ "vkCreateGraphicsPipelines"
   else
     throwVkaException "Cannot allocate 0 graphics pipelines."
 
-vkaRegisterGraphicsPipelineForDestruction :: MonadResource m => VkDevice -> VkPipeline -> m ReleaseKey
-vkaRegisterGraphicsPipelineForDestruction device pipeline = register $ vkDestroyPipeline device pipeline VK_NULL
+vkaRegisterGraphicsPipelineForDestruction :: (MonadResource m, Given VkDevice) => VkPipeline -> m ReleaseKey
+vkaRegisterGraphicsPipelineForDestruction pipeline = register $ vkDestroyPipeline given pipeline VK_NULL
 
-vkaRegisterGraphicsPipelineForDestruction_ :: MonadResource m => VkDevice -> VkPipeline -> m ()
-vkaRegisterGraphicsPipelineForDestruction_ = void .: vkaRegisterGraphicsPipelineForDestruction
+vkaRegisterGraphicsPipelineForDestruction_ :: (MonadResource m, Given VkDevice) => VkPipeline -> m ()
+vkaRegisterGraphicsPipelineForDestruction_ = void . vkaRegisterGraphicsPipelineForDestruction
 
 initStandardGraphicsPipelineCreateInfo :: CreateVkStruct VkGraphicsPipelineCreateInfo '["sType", "pNext"] ()
 initStandardGraphicsPipelineCreateInfo =

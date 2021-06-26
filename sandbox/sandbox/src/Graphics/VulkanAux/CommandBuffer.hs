@@ -7,6 +7,7 @@ import Control.Monad.Trans.Resource.Local
 import Data.Acquire.Local
 import Data.Function
 import Data.Functor
+import Data.Reflection
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Array
@@ -15,15 +16,15 @@ import Graphics.VulkanAux.Fence
 import Graphics.VulkanAux.Queue
 import Graphics.VulkanAux.Resource
 
-vkaAllocatedCommandBuffers :: VkDevice -> VkCommandBufferAllocateInfo -> Acquire (VkaArray VkCommandBuffer)
-vkaAllocatedCommandBuffers device allocateInfo =
+vkaAllocatedCommandBuffers :: Given VkDevice => VkCommandBufferAllocateInfo -> Acquire (VkaArray VkCommandBuffer)
+vkaAllocatedCommandBuffers allocateInfo =
   if commandBufferCount > 0 then
     vkaAcquireArray_ commandBufferCount
       (\arrayPtr ->
         withPtr allocateInfo $ \allocateInfoPtr ->
-          vkAllocateCommandBuffers device allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateCommandBuffers"
+          vkAllocateCommandBuffers given allocateInfoPtr arrayPtr & onVkFailureThrow_ "vkAllocateCommandBuffers"
       )
-      (vkFreeCommandBuffers device commandPool commandBufferCount)
+      (vkFreeCommandBuffers given commandPool commandBufferCount)
   else
     throwVkaException "Cannot allocate 0 command buffers."
 
@@ -57,11 +58,11 @@ initPrimaryCommandBufferBeginInfo =
   initStandardCommandBufferBeginInfo &*
   set @"pInheritanceInfo" VK_NULL
 
-vkaExecuteCommands :: (MonadUnliftIO m, MonadFail m) => VkDevice -> VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
-vkaExecuteCommands device commandPool submissionQueue fillCommandBuffer = runResourceT $ do
+vkaExecuteCommands :: (MonadUnliftIO m, MonadFail m, Given VkDevice) => VkCommandPool -> VkQueue -> (forall n. MonadIO n => VkCommandBuffer -> n a) -> m a
+vkaExecuteCommands commandPool submissionQueue fillCommandBuffer = runResourceT $ do
   [commandBuffer] <-
     fmap vkaElems $
-    allocateAcquire_ $ vkaAllocatedCommandBuffers device $
+    allocateAcquire_ $ vkaAllocatedCommandBuffers $
     createVk $
     initStandardCommandBufferAllocateInfo &*
     set @"commandPool" commandPool &*
@@ -78,7 +79,7 @@ vkaExecuteCommands device commandPool submissionQueue fillCommandBuffer = runRes
     (fillCommandBuffer commandBuffer)
 
   executionCompleteFence <-
-    vkaAllocateResource_ (vkaFenceResource device) $
+    vkaAllocateResource_ vkaFenceResource $
     createVk $
     initStandardFenceCreateInfo &*
     setFenceSignaled False
@@ -92,6 +93,6 @@ vkaExecuteCommands device commandPool submissionQueue fillCommandBuffer = runRes
         setListCountAndRef @"commandBufferCount" @"pCommandBuffers" [commandBuffer] &*
         setListCountAndRef @"signalSemaphoreCount" @"pSignalSemaphores" []
       ]
-    vkaWaitForFence device executionCompleteFence maxBound & void
+    vkaWaitForFence executionCompleteFence maxBound & void
 
   return result

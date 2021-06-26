@@ -30,7 +30,7 @@ import Data.Functor
 import Data.IORef
 import Data.List
 import Data.Maybe
-import Data.Tuple.Extra
+import Data.Reflection
 import Data.Word
 import Foreign.C.String
 import Foreign.Ptr
@@ -119,17 +119,18 @@ resourceMain = do
 
   physicalDeviceArray <- vkaGetArray_ (vkaEnumeratePhysicalDevices vulkanInstance)
 
-  (physicalDevice, physicalDeviceProperties, physicalDeviceMemoryProperties) <-
+  physicalDeviceInfo@(PhysicalDeviceInfo physicalDevice physicalDeviceProperties physicalDeviceMemoryProperties physicalDeviceFeatures) <-
     liftIO $
     forM (vkaElems physicalDeviceArray) (\pd ->
-      liftM2 (pd,,)
+      liftM3 (PhysicalDeviceInfo pd)
         (vkaGet_ . vkGetPhysicalDeviceProperties $ pd)
         (vkaGet_ . vkGetPhysicalDeviceMemoryProperties $ pd)
+        (vkaGet_ . vkGetPhysicalDeviceFeatures $ pd)
     ) <&>
     sortBy (
       mconcat [
-        prefer [VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU] `on` getField @"deviceType" . snd3,
-        compare `on` vkaGetPhysicalDeviceLocalMemorySize . thd3
+        prefer [VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU] `on` getField @"deviceType" . physicalDeviceInfo'properties,
+        compare `on` vkaGetPhysicalDeviceLocalMemorySize . physicalDeviceInfo'memoryProperties
       ]
     ) <&>
     headOr (throwAppEx "No physical device found")
@@ -193,11 +194,15 @@ resourceMain = do
     set @"pEnabledFeatures" VK_NULL
   ioPutStrLn "Vulkan device created."
 
+  give device $ rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef physicalDeviceInfo window windowSurface
+
+rest :: Given VkDevice => [Word32] -> Word32 -> Word32 -> IORef (Maybe TimeSpec) -> PhysicalDeviceInfo -> GLFW.Window -> VkSurfaceKHR -> ResourceT IO ()
+rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef (PhysicalDeviceInfo physicalDevice physicalDeviceProperties physicalDeviceMemoryProperties physicalDeviceFeatures) window windowSurface = do
   [(graphicsQueue, graphicsCommandPool), (computeQueue, computeCommandPool), (transferQueue, transferCommandPool), (presentQueue, presentCommandPool)] <-
     forM qfis $ \qfi -> liftM2 (,)
-      (vkaGet_ $ vkGetDeviceQueue device qfi 0)
+      (vkaGetDeviceQueue qfi 0)
       (
-        vkaAllocateResource_ (vkaCommandPoolResource device) $
+        vkaAllocateResource_ (vkaCommandPoolResource) $
         createVk $
         initStandardCommandPoolCreateInfo &*
         set @"flags" zeroBits &*
@@ -206,7 +211,7 @@ resourceMain = do
   ioPutStrLn "Device queues obtained, and corresponding command pools created."
 
   descriptorSetLayout <-
-    vkaAllocateResource_ (vkaDescriptorSetLayoutResource device) $
+    vkaAllocateResource_ vkaDescriptorSetLayoutResource $
     createVk $
     initStandardDescriptorSetLayoutCreateInfo &*
     set @"flags" zeroBits &*
@@ -228,7 +233,7 @@ resourceMain = do
   ioPutStrLn "Descriptor set layout created."
 
   pipelineLayout <-
-    vkaAllocateResource_ (vkaPipelineLayoutResource device) $
+    vkaAllocateResource_ vkaPipelineLayoutResource $
     createVk $
     initStandardPipelineLayoutCreateInfo &*
     setListCountAndRef @"setLayoutCount" @"pSetLayouts" [descriptorSetLayout] &*
@@ -237,7 +242,6 @@ resourceMain = do
 
   (textureImage, textureImageMemory, textureImageView, textureSampler) <-
     createImageFromKtxTexture
-      device
       physicalDeviceMemoryProperties
       graphicsCommandPool
       graphicsQueue
@@ -251,7 +255,6 @@ resourceMain = do
 
   (vertexBuffer, vertexBufferMemory) <-
     vkaCreateFilledBufferFromPrimBytes
-      device
       physicalDeviceMemoryProperties
       transferCommandPool
       transferQueue
@@ -268,7 +271,6 @@ resourceMain = do
 
   (indexBuffer, indexBufferMemory) <-
     vkaCreateFilledBufferFromPrimBytes
-      device
       physicalDeviceMemoryProperties
       transferCommandPool
       transferQueue
@@ -277,7 +279,7 @@ resourceMain = do
       (packDF @Word32 @6 @'[] 0 2 1 0 3 2)
   ioPutStrLn "Index buffer created."
 
-  frameSyncs <- replicateM maxFramesInFlight $ FrameSync <$> vkaCreateFence device True <*> vkaCreateSemaphore device <*> vkaCreateSemaphore device
+  frameSyncs <- replicateM maxFramesInFlight $ FrameSync <$> vkaCreateFence True <*> vkaCreateSemaphore <*> vkaCreateSemaphore
   ioPutStrLn "Frame syncs created."
 
   renderStartTimeRef <- liftIO $ newIORef Nothing
@@ -325,7 +327,7 @@ resourceMain = do
             set @"height" (fromIntegral windowFramebufferHeight & clamp (getField @"height" minImageExtent) (getField @"height" maxImageExtent))
 
     swapchain <-
-      vkaAllocateResource_ (vkaSwapchainResource device) $
+      vkaAllocateResource_ vkaSwapchainResource $
       createVk $
       initStandardSwapchainCreateInfo &*
       set @"flags" zeroBits &*
@@ -355,11 +357,11 @@ resourceMain = do
       set @"oldSwapchain" VK_NULL
     ioPutStrLn "Swapchain created."
 
-    swapchainImageArray <- vkaGetArray_ $ vkaGetSwapchainImagesKHR device swapchain
+    swapchainImageArray <- vkaGetArray_ $ vkaGetSwapchainImagesKHR swapchain
 
     swapchainImageViews <-
       forM (vkaElems swapchainImageArray) $ \image ->
-        vkaAllocateResource_ (vkaImageViewResource device) $
+        vkaAllocateResource_ vkaImageViewResource $
         createVk $
         initStandardImageViewCreateInfo &*
         set @"flags" zeroBits &*
@@ -385,11 +387,11 @@ resourceMain = do
 
     (uniformBuffers, uniformBufferMemories) <-
       fmap unzip . replicateM swapchainImageCount $
-      vkaCreateUniformBufferForPrimBytes @UniformBufferObject device physicalDeviceMemoryProperties []
+      vkaCreateUniformBufferForPrimBytes @UniformBufferObject physicalDeviceMemoryProperties []
     ioPutStrLn "Uniform buffers created."
 
     descriptorPool <-
-      vkaAllocateResource_ (vkaDescriptorPoolResource device) $
+      vkaAllocateResource_ vkaDescriptorPoolResource $
       createVk $
       initStandardDescriptorPoolCreateInfo &*
       set @"flags" zeroBits &*
@@ -403,14 +405,14 @@ resourceMain = do
     ioPutStrLn "Descriptor pool created."
 
     descriptorSets <-
-      liftIO . fmap vkaElems . vkaAllocateDescriptorSets device . createVk $
+      liftIO . fmap vkaElems . vkaAllocateDescriptorSets . createVk $
       initStandardDescriptorSetAllocateInfo &*
       set @"descriptorPool" descriptorPool &*
       setListCountAndRef @"descriptorSetCount" @"pSetLayouts" (replicate swapchainImageCount descriptorSetLayout)
     ioPutStrLn "Descriptor sets allocated."
 
     liftIO $
-      vkaUpdateDescriptorSets device
+      vkaUpdateDescriptorSets
         (
           zip uniformBuffers descriptorSets >>= \(uniformBuffer, descriptorSet) ->
           createVk <$> [
@@ -463,7 +465,7 @@ resourceMain = do
     ioPutStrLn $ "Depth format chosen: " ++ show depthFormat ++ "."
 
     renderPass <-
-      vkaAllocateResource_ (vkaRenderPassResource device) $
+      vkaAllocateResource_ vkaRenderPassResource $
       createVk $
       initStandardRenderPassCreateInfo &*
       setListCountAndRef @"attachmentCount" @"pAttachments" (
@@ -521,13 +523,13 @@ resourceMain = do
     ioPutStrLn "Render pass created."
 
     [graphicsPipeline] <- runResourceT $ do
-      vertShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/sandbox.vert.spv")
+      vertShaderModule <- vkaCreateShaderModuleFromFile =<< liftIO (getDataFileName "shaders/sandbox.vert.spv")
       ioPutStrLn "Vertex shader module created."
-      fragShaderModule <- vkaCreateShaderModuleFromFile device =<< liftIO (getDataFileName "shaders/sandbox.frag.spv")
+      fragShaderModule <- vkaCreateShaderModuleFromFile =<< liftIO (getDataFileName "shaders/sandbox.frag.spv")
       ioPutStrLn "Fragment shader module created."
 
       liftIO $
-        vkaElems <$> vkaCreateGraphicsPipelines device VK_NULL_HANDLE (
+        vkaElems <$> vkaCreateGraphicsPipelines VK_NULL_HANDLE (
           createVk . (initStandardGraphicsPipelineCreateInfo &*) <$> [
             setListCountAndRef @"stageCount" @"pStages" (
               createVk . (
@@ -671,11 +673,11 @@ resourceMain = do
             set @"basePipelineIndex" (-1)
           ]
         )
-    vkaRegisterGraphicsPipelineForDestruction_ device graphicsPipeline
+    vkaRegisterGraphicsPipelineForDestruction_ graphicsPipeline
     ioPutStrLn "Graphics pipeline created."
 
     (depthImage, depthImageMemory) <-
-      vkaCreateBoundImage device physicalDeviceMemoryProperties (
+      vkaCreateBoundImage physicalDeviceMemoryProperties (
         return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
         \_ _ -> return EQ
       ) $
@@ -697,7 +699,7 @@ resourceMain = do
       setSharingQueueFamilyIndices [graphicsQfi] &*
       set @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED
 
-    vkaExecuteCommands device graphicsCommandPool graphicsQueue $ \commandBuffer -> liftIO $ do
+    vkaExecuteCommands graphicsCommandPool graphicsQueue $ \commandBuffer -> liftIO $ do
       vkaCmdPipelineBarrier commandBuffer
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
@@ -723,7 +725,7 @@ resourceMain = do
     ioPutStrLn "Depth image created."
 
     depthImageView <-
-      vkaAllocateResource_ (vkaImageViewResource device) $
+      vkaAllocateResource_ vkaImageViewResource $
       createVk $
       initStandardImageViewCreateInfo &*
       set @"flags" zeroBits &*
@@ -747,7 +749,7 @@ resourceMain = do
 
     swapchainFramebuffers <-
       forM swapchainImageViews $ \swapchainImageView ->
-      vkaAllocateResource_ (vkaFramebufferResource device) $
+      vkaAllocateResource_ vkaFramebufferResource $
       createVk $
       initStandardFramebufferCreateInfo &*
       set @"renderPass" renderPass &*
@@ -758,7 +760,7 @@ resourceMain = do
     ioPutStrLn "Swapchain framebuffers created."
 
     swapchainCommandBuffers <-
-      fmap vkaElems . allocateAcquire_ . vkaAllocatedCommandBuffers device . createVk $
+      fmap vkaElems . allocateAcquire_ . vkaAllocatedCommandBuffers . createVk $
       initStandardCommandBufferAllocateInfo &*
       set @"commandPool" graphicsCommandPool &*
       set @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY &*
@@ -813,14 +815,14 @@ resourceMain = do
             (guard . (VK_ERROR_OUT_OF_DATE_KHR ==) . vkaResultException'result)
             (const $ return $ Just True)
           $ do
-            vkaWaitForFence device frameSync'inFlightFence maxBound & void
-            vkaResetFence device frameSync'inFlightFence
+            vkaWaitForFence frameSync'inFlightFence maxBound & void
+            vkaResetFence frameSync'inFlightFence
 
-            nextImageIndexWord32@(fromIntegral -> nextImageIndex) <- vkaGet_ $ vkaAcquireNextImageKHR device swapchain maxBound frameSync'imageAvailableSemaphore VK_NULL_HANDLE
+            nextImageIndexWord32@(fromIntegral -> nextImageIndex) <- vkaGet_ $ vkaAcquireNextImageKHR swapchain maxBound frameSync'imageAvailableSemaphore VK_NULL_HANDLE
 
             -- Obviously there is no point in updating the UBO to the same value every time, but I'm leaving this here
             -- so that I can later easily transform the rendered image over time.
-            with (vkaMappedMemory device (uniformBufferMemories !! nextImageIndex) 0 (bSizeOf @UniformBufferObject undefined)) $ \ptr ->
+            with (vkaMappedMemory (uniformBufferMemories !! nextImageIndex) 0 (bSizeOf @UniformBufferObject undefined)) $ \ptr ->
               poke (castPtr ptr) . S $
               UniformBufferObject eye eye eye
 
@@ -848,7 +850,7 @@ resourceMain = do
               _ -> return Nothing
 
     ioPutStrLn "Render loop ended.  Waiting for device to idle."
-    liftIO $ vkaDeviceWaitIdle device
+    vkaDeviceWaitIdle
 
     ioPutStrLn "Cleaning up swapchain-related objects."
     return shouldRebuildSwapchain
@@ -910,4 +912,12 @@ data FrameSync =
     frameSync'inFlightFence :: VkFence,
     frameSync'imageAvailableSemaphore :: VkSemaphore,
     frameSync'renderFinishedSemaphore :: VkSemaphore
+  }
+
+data PhysicalDeviceInfo =
+  PhysicalDeviceInfo {
+    physicalDeviceInfo'physicalDevice :: VkPhysicalDevice,
+    physicalDeviceInfo'properties :: VkPhysicalDeviceProperties,
+    physicalDeviceInfo'memoryProperties :: VkPhysicalDeviceMemoryProperties,
+    physicalDeviceInfo'features :: VkPhysicalDeviceFeatures
   }

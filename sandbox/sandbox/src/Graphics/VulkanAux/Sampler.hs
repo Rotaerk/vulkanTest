@@ -1,11 +1,12 @@
 module Graphics.VulkanAux.Sampler where
 
+import Data.Reflection
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
-vkaSamplerResource :: VkDevice -> VkaResource VkSamplerCreateInfo VkSampler
-vkaSamplerResource = vkaSimpleParamResource_ vkCreateSampler vkDestroySampler "vkCreateSampler"
+vkaSamplerResource :: Given VkDevice => VkaResource VkSamplerCreateInfo VkSampler
+vkaSamplerResource = vkaSimpleParamResource_ vkCreateSampler vkDestroySampler "vkCreateSampler" given
 
 initStandardSamplerCreateInfo :: CreateVkStruct VkSamplerCreateInfo '["sType", "pNext"] ()
 initStandardSamplerCreateInfo =

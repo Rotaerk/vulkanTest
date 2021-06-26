@@ -19,6 +19,7 @@ import Data.Acquire.Local
 import Data.Bits.Local
 import Data.Functor
 import Data.Maybe
+import Data.Reflection
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Foreign.Ptr
@@ -56,8 +57,7 @@ stencilBearingFormats =
   ]
 
 createImageFromKtxTexture ::
-  (MonadUnliftIO m, MonadThrow m, MonadFail m) =>
-  VkDevice ->
+  (MonadUnliftIO m, MonadThrow m, MonadFail m, Given VkDevice) =>
   VkPhysicalDeviceMemoryProperties ->
   VkCommandPool ->
   VkQueue ->
@@ -68,11 +68,11 @@ createImageFromKtxTexture ::
   VkImageLayout ->
   FilePath ->
   ResourceT m (VkImage, VkDeviceMemory, VkImageView, VkSampler)
-createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tiling usageFlags qfis initialLayout filePath = runResourceT $ do
+createImageFromKtxTexture pdmp commandPool queue sampleCountFlagBit tiling usageFlags qfis initialLayout filePath = runResourceT $ do
   (h@KTX.Header{..}, stagingBufferRegions, stagingBuffer, stagingBufferMemory) <-
     KTX.readKtxFile filePath KTX.skipMetadata $ \header () (fromIntegral -> textureDataSize) readTextureDataInto -> do
-      (buffer, bufferMemory) <- lift . lift $ vkaCreateStagingBuffer device pdmp [] textureDataSize
-      bufferRegions <- with (vkaMappedMemory device bufferMemory 0 textureDataSize) $ readTextureDataInto . castPtr
+      (buffer, bufferMemory) <- lift . lift $ vkaCreateStagingBuffer pdmp [] textureDataSize
+      bufferRegions <- with (vkaMappedMemory bufferMemory 0 textureDataSize) $ readTextureDataInto . castPtr
       return (header, bufferRegions, buffer, bufferMemory)
 
   let
@@ -96,7 +96,7 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
 
   (image, imageMemory) <-
     lift $
-    vkaCreateBoundImage device pdmp (
+    vkaCreateBoundImage pdmp (
       return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
       \_ _ -> return EQ
     ) $
@@ -126,7 +126,7 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
     setSharingQueueFamilyIndices qfis &*
     set @"initialLayout" initialLayout
 
-  vkaExecuteCommands device commandPool queue $ \commandBuffer -> liftIO $ do
+  vkaExecuteCommands commandPool queue $ \commandBuffer -> liftIO $ do
     vkaCmdPipelineBarrier commandBuffer
       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
       VK_PIPELINE_STAGE_TRANSFER_BIT
@@ -217,7 +217,7 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
       ]
 
   imageView <-
-    lift . vkaAllocateResource_ (vkaImageViewResource device) $
+    lift . vkaAllocateResource_ vkaImageViewResource $
     createVk $
     initStandardImageViewCreateInfo &*
     set @"flags" zeroBits &*
@@ -244,7 +244,7 @@ createImageFromKtxTexture device pdmp commandPool queue sampleCountFlagBit tilin
     )
 
   sampler <-
-    lift . vkaAllocateResource_ (vkaSamplerResource device) $
+    lift . vkaAllocateResource_ vkaSamplerResource $
     createVk $
     initStandardSamplerCreateInfo &*
     set @"magFilter" VK_FILTER_LINEAR &*

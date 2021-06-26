@@ -1,12 +1,13 @@
 module Graphics.VulkanAux.RenderPass where
 
 import Data.Bits.Local
+import Data.Reflection
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
-vkaRenderPassResource :: VkDevice -> VkaResource VkRenderPassCreateInfo VkRenderPass
-vkaRenderPassResource = vkaSimpleParamResource_ vkCreateRenderPass vkDestroyRenderPass "vkCreateRenderPass"
+vkaRenderPassResource :: Given VkDevice => VkaResource VkRenderPassCreateInfo VkRenderPass
+vkaRenderPassResource = vkaSimpleParamResource_ vkCreateRenderPass vkDestroyRenderPass "vkCreateRenderPass" given
 
 initStandardRenderPassCreateInfo :: CreateVkStruct VkRenderPassCreateInfo '["sType", "pNext", "flags"] ()
 initStandardRenderPassCreateInfo =

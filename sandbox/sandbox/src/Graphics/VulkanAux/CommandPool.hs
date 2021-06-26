@@ -1,11 +1,12 @@
 module Graphics.VulkanAux.CommandPool where
 
+import Data.Reflection
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
-vkaCommandPoolResource :: VkDevice -> VkaResource VkCommandPoolCreateInfo VkCommandPool
-vkaCommandPoolResource = vkaSimpleParamResource_ vkCreateCommandPool vkDestroyCommandPool "vkCreateCommandPool"
+vkaCommandPoolResource :: Given VkDevice => VkaResource VkCommandPoolCreateInfo VkCommandPool
+vkaCommandPoolResource = vkaSimpleParamResource_ vkCreateCommandPool vkDestroyCommandPool "vkCreateCommandPool" given
 
 initStandardCommandPoolCreateInfo :: CreateVkStruct VkCommandPoolCreateInfo '["sType", "pNext"] ()
 initStandardCommandPoolCreateInfo =

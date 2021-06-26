@@ -1,12 +1,13 @@
 module Graphics.VulkanAux.PipelineLayout where
 
 import Data.Bits.Local
+import Data.Reflection
 import Graphics.Vulkan.Core_1_0
 import Graphics.Vulkan.Marshal.Create
 import Graphics.VulkanAux.Resource
 
-vkaPipelineLayoutResource :: VkDevice -> VkaResource VkPipelineLayoutCreateInfo VkPipelineLayout
-vkaPipelineLayoutResource = vkaSimpleParamResource_ vkCreatePipelineLayout vkDestroyPipelineLayout "vkCreatePipelineLayout"
+vkaPipelineLayoutResource :: Given VkDevice => VkaResource VkPipelineLayoutCreateInfo VkPipelineLayout
+vkaPipelineLayoutResource = vkaSimpleParamResource_ vkCreatePipelineLayout vkDestroyPipelineLayout "vkCreatePipelineLayout" given
 
 initStandardPipelineLayoutCreateInfo :: CreateVkStruct VkPipelineLayoutCreateInfo '["sType", "pNext", "flags"] ()
 initStandardPipelineLayoutCreateInfo =
