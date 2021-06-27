@@ -9,7 +9,12 @@ import Graphics.Vulkan.Marshal.Create
 import Graphics.Vulkan.Ext.VK_EXT_debug_report
 import Graphics.VulkanAux.Resource
 
-vkaRegisterDebugCallback :: MonadUnliftIO io => VkInstance -> VkDebugReportFlagsEXT -> HS_vkDebugReportCallbackEXT -> ResourceT io ()
+vkaRegisterDebugCallback ::
+  MonadResource m =>
+  VkInstance ->
+  VkDebugReportFlagsEXT ->
+  HS_vkDebugReportCallbackEXT ->
+  m ()
 vkaRegisterDebugCallback vulkanInstance flags debugCallback = do
   (_, debugCallbackPtr) <- allocate (newVkDebugReportCallbackEXT debugCallback) freeHaskellFunPtr
   void . vkaAllocateResource_ (vkaRegisteredDebugReportCallbackResource vulkanInstance) $

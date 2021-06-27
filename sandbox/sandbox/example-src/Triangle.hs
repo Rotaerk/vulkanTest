@@ -29,6 +29,8 @@ import Data.Function
 import Data.Functor
 import Data.IORef
 import Data.List
+import Data.Map (Map)
+import qualified Data.Map as Map
 import Data.Maybe
 import Data.Reflection
 import Data.Word
@@ -57,101 +59,15 @@ import Numeric.DataFrame hiding (sortBy)
 import System.Clock
 import UnliftIO.Exception
 
+import VulkanExample
+
 main :: IO ()
-main =
-  runResourceT resourceMain
-  `catch` (
-    \(e :: ApplicationException) ->
-      putStrLn $ displayException e
-  )
-  `catch` (
-    \(e :: VkaResultException) ->
-      putStrLn $ displayException e
-  )
-  `catch` (
-    \(e :: GLFWException) ->
-      putStrLn $ displayException e
-  )
+main = vulkanExampleMain "Triangle" [] [] Nothing $ \PhysicalDevice{..} window windowSurface queuesByType -> do
 
-resourceMain :: ResourceT IO ()
-resourceMain = do
-  liftIO . GLFW.setErrorCallback . Just $ \errorCode errorMessage ->
-    putStr $ "GLFW error callback: " ++ show errorCode ++ " - " ++ errorMessage
-  ioPutStrLn "GLFW error callback set."
-
-  allocateAcquire_ acquireInitializedGLFW
-  ioPutStrLn "GLFW initialized."
-
-  vulkanInstance <- do
-    glfwExtensions <- liftIO GLFW.getRequiredInstanceExtensions
-
-    vkaAllocateResource_ vkaInstanceResource $
-      createVk $
-      initStandardInstanceCreateInfo &*
-      setVkRef @"pApplicationInfo" (
-        createVk $
-        initStandardApplicationInfo &*
-        setStrRef @"pApplicationName" "Example - Triangle" &*
-        set @"applicationVersion" (_VK_MAKE_VERSION 1 0 0) &*
-        setStrRef @"pEngineName" "" &*
-        set @"engineVersion" 0 &*
-        set @"apiVersion" VK_API_VERSION_1_1
-      ) &*
-      setStrListCountAndRef @"enabledLayerCount" @"ppEnabledLayerNames" (
-#ifndef NDEBUG
-        ["VK_LAYER_KHRONOS_validation"]
-#else
-        []
-#endif
-      ) &*
-      setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames" (
-        glfwExtensions
-#ifndef NDEBUG
-        ++
-        [
-          VK_EXT_DEBUG_REPORT_EXTENSION_NAME
-        ]
-#endif
-      )
-  ioPutStrLn "Vulkan instance created."
-
-#ifndef NDEBUG
-  vkaRegisterDebugCallback vulkanInstance
-    (
-      VK_DEBUG_REPORT_ERROR_BIT_EXT .|.
-      VK_DEBUG_REPORT_WARNING_BIT_EXT .|.
-      VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT .|.
-      VK_DEBUG_REPORT_INFORMATION_BIT_EXT .|.
-      VK_DEBUG_REPORT_DEBUG_BIT_EXT
-    ) $
-    \flags objectType object location messageCode layerPrefixPtr messagePtr userDataPtr -> do
-      message <- peekCString messagePtr
-      putStrLn $ "Validation layer: " ++ message
-      return VK_FALSE
-  ioPutStrLn "Vulkan debug callback registered."
-#endif
-
-  physicalDeviceArray <- vkaGetArray_ (vkaEnumeratePhysicalDevices vulkanInstance)
-
-  physicalDeviceInfo@(PhysicalDeviceInfo physicalDevice physicalDeviceProperties physicalDeviceMemoryProperties physicalDeviceFeatures) <-
-    liftIO $
-    forM (vkaElems physicalDeviceArray) (\pd ->
-      liftM3 (PhysicalDeviceInfo pd)
-        (vkaGet_ . vkGetPhysicalDeviceProperties $ pd)
-        (vkaGet_ . vkGetPhysicalDeviceMemoryProperties $ pd)
-        (vkaGet_ . vkGetPhysicalDeviceFeatures $ pd)
-    ) <&>
-    sortBy (
-      mconcat [
-        prefer [VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU] `on` getField @"deviceType" . physicalDeviceInfo'properties,
-        compare `on` vkaGetPhysicalDeviceLocalMemorySize . physicalDeviceInfo'memoryProperties
-      ]
-    ) <&>
-    headOr (throwAppEx "No physical device found")
-  ioPutStrLn "Physical device selected."
-
-  window <- allocateAcquire_ $ acquireVulkanGLFWWindow 800 600 "Vulkan Sandbox"
-  ioPutStrLn "Window created."
+  let
+    Queue graphicsQueue (QueueFamily graphicsQfi _) graphicsCommandPool = queuesByType Map.! GraphicsQueueType
+    Queue transferQueue _ transferCommandPool = queuesByType Map.! TransferQueueType
+    Queue presentQueue (QueueFamily presentQfi _) presentCommandPool = queuesByType Map.! PresentQueueType
 
   lastWindowResizeTimeRef <- liftIO $ newIORef Nothing
 
@@ -159,77 +75,6 @@ resourceMain = do
     time <- getTime Monotonic
     writeIORef lastWindowResizeTimeRef $ Just time
   ioPutStrLn "Window framebuffer size callback registered."
-
-  windowSurface <- allocateAcquire_ $ newVulkanGLFWWindowSurface vulkanInstance window
-  ioPutStrLn "Window surface created."
-
-  physicalDeviceQueueFamilyPropertiesArray <- vkaGetArray_ (vkGetPhysicalDeviceQueueFamilyProperties physicalDevice)
-
-  qfis@[graphicsQfi, computeQfi, transferQfi, presentQfi] <-
-    minimumBy (compare `on` length . nub) . fmap (fmap fst) <$> selectionsFromM (vkaAssocs physicalDeviceQueueFamilyPropertiesArray) [
-      (
-        return . someAreSet VK_QUEUE_GRAPHICS_BIT . getField @"queueFlags" . snd,
-        preferWhereM [
-          return . noneAreSet VK_QUEUE_COMPUTE_BIT . getField @"queueFlags" . snd
-        ]
-      ),
-      (
-        return . someAreSet VK_QUEUE_COMPUTE_BIT . getField @"queueFlags" . snd,
-        preferWhereM [
-          return . noneAreSet VK_QUEUE_GRAPHICS_BIT . getField @"queueFlags" . snd
-        ]
-      ),
-      (
-        return . someAreSet (VK_QUEUE_GRAPHICS_BIT .|. VK_QUEUE_COMPUTE_BIT .|. VK_QUEUE_TRANSFER_BIT) . getField @"queueFlags" . snd,
-        preferWhereM [
-          return . noneAreSet (VK_QUEUE_GRAPHICS_BIT .|. VK_QUEUE_COMPUTE_BIT) . getField @"queueFlags" . snd
-        ]
-      ),
-      (
-        \(qfi, _) -> (VK_TRUE ==) <$> vkaGet_ (vkaGetPhysicalDeviceSurfaceSupportKHR physicalDevice qfi windowSurface),
-        \_ _ -> return EQ
-      )
-    ]
-  ioPutStrLn "Queue family indices selected."
-
-  device <-
-    vkaAllocateResource_ (vkaDeviceResource physicalDevice) $
-    createVk $
-    initStandardDeviceCreateInfo &*
-    setListCountAndRef @"queueCreateInfoCount" @"pQueueCreateInfos" (
-      nub qfis <&> \qfi ->
-        createVk $
-        initStandardDeviceQueueCreateInfo &*
-        set @"flags" zeroBits &*
-        set @"queueFamilyIndex" qfi &*
-        setListCountAndRef @"queueCount" @"pQueuePriorities" [1.0]
-    ) &*
-    setListCountAndRef @"enabledExtensionCount" @"ppEnabledExtensionNames"
-      [
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME
-      ] &*
-    setVkRef @"pEnabledFeatures" (
-      createVk $
-      copyField @"fillModeNonSolid" physicalDeviceFeatures &*
-      copyField @"wideLines" physicalDeviceFeatures
-    )
-  ioPutStrLn "Vulkan device created."
-
-  give device $ rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef physicalDeviceInfo window windowSurface
-
-rest :: Given VkDevice => [Word32] -> Word32 -> Word32 -> IORef (Maybe TimeSpec) -> PhysicalDeviceInfo -> GLFW.Window -> VkSurfaceKHR -> ResourceT IO ()
-rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef (PhysicalDeviceInfo physicalDevice physicalDeviceProperties physicalDeviceMemoryProperties physicalDeviceFeatures) window windowSurface = do
-  [(graphicsQueue, graphicsCommandPool), (computeQueue, computeCommandPool), (transferQueue, transferCommandPool), (presentQueue, presentCommandPool)] <-
-    forM qfis $ \qfi -> liftM2 (,)
-      (vkaGetDeviceQueue qfi 0)
-      (
-        vkaAllocateResource_ vkaCommandPoolResource $
-        createVk $
-        initStandardCommandPoolCreateInfo &*
-        set @"flags" zeroBits &*
-        set @"queueFamilyIndex" qfi
-      )
-  ioPutStrLn "Device queues obtained, and corresponding command pools created."
 
   descriptorSetLayout <-
     vkaAllocateResource_ vkaDescriptorSetLayoutResource $
@@ -257,7 +102,7 @@ rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef (PhysicalDeviceInfo phy
 
   (vertexBuffer, vertexBufferMemory) <-
     vkaCreateFilledBufferFromPrimBytes
-      physicalDeviceMemoryProperties
+      physicalDevice'memoryProperties
       transferCommandPool
       transferQueue
       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
@@ -272,7 +117,7 @@ rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef (PhysicalDeviceInfo phy
 
   (indexBuffer, indexBufferMemory) <-
     vkaCreateFilledBufferFromPrimBytes
-      physicalDeviceMemoryProperties
+      physicalDevice'memoryProperties
       transferCommandPool
       transferQueue
       VK_BUFFER_USAGE_INDEX_BUFFER_BIT
@@ -289,9 +134,9 @@ rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef (PhysicalDeviceInfo phy
     (windowFramebufferWidth, windowFramebufferHeight) <- liftIO $ GLFW.getFramebufferSize window
     ioPutStrLn "Window framebuffer size obtained."
 
-    surfaceCapabilities <- vkaGet_ $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice windowSurface
-    surfaceFormatArray <- vkaGetArray_ $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice windowSurface
-    surfacePresentModeArray <- vkaGetArray_ $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice windowSurface
+    surfaceCapabilities <- vkaGet_ $ vkaGetPhysicalDeviceSurfaceCapabilitiesKHR physicalDevice'object windowSurface
+    surfaceFormatArray <- vkaGetArray_ $ vkaGetPhysicalDeviceSurfaceFormatsKHR physicalDevice'object windowSurface
+    surfacePresentModeArray <- vkaGetArray_ $ vkaGetPhysicalDeviceSurfacePresentModesKHR physicalDevice'object windowSurface
     ioPutStrLn "Surface info obtained."
 
     let
@@ -393,7 +238,7 @@ rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef (PhysicalDeviceInfo phy
 
     (uniformBuffers, uniformBufferMemories) <-
       fmap unzip . replicateM swapchainImageCount $
-      vkaCreateUniformBufferForPrimBytes @UniformBufferObject physicalDeviceMemoryProperties []
+      vkaCreateUniformBufferForPrimBytes @UniformBufferObject physicalDevice'memoryProperties []
     ioPutStrLn "Uniform buffers created."
 
     descriptorPool <-
@@ -449,7 +294,7 @@ rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef (PhysicalDeviceInfo phy
       [VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D24_UNORM_S8_UINT] &
       findM (
         fmap (allAreSet VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT . getField @"optimalTilingFeatures") .
-        vkaGet_ . vkGetPhysicalDeviceFormatProperties physicalDevice
+        vkaGet_ . vkGetPhysicalDeviceFormatProperties physicalDevice'object
       ) &
       fromMaybeM (throwAppEx "No 24-bit depth formats support being used by a depth attachment on this device.")
     ioPutStrLn $ "Depth format chosen: " ++ show depthFormat ++ "."
@@ -667,7 +512,7 @@ rest qfis graphicsQfi presentQfi lastWindowResizeTimeRef (PhysicalDeviceInfo phy
     ioPutStrLn "Graphics pipeline created."
 
     (depthImage, depthImageMemory) <-
-      vkaCreateBoundImage physicalDeviceMemoryProperties (
+      vkaCreateBoundImage physicalDevice'memoryProperties (
         return . allAreSet VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT . getField @"propertyFlags" . snd,
         \_ _ -> return EQ
       ) $

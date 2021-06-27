@@ -110,6 +110,8 @@ executable sandbox
 common example-common
   import: common
   hs-source-dirs: example-src
+  other-modules:
+    VulkanExample
 
 executable triangle
   import: example-common

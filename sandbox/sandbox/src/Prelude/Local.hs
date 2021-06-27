@@ -11,6 +11,7 @@ import Control.Monad.Loops
 import Data.Bool
 import Data.Function
 import Data.Functor
+import Data.List
 import Safe.Foldable
   
 (.:) :: (c -> d) -> (a -> b -> c) -> a -> b -> d
@@ -203,3 +204,15 @@ lengthNum :: (Foldable t, Num n) => t a -> n
 lengthNum = fromIntegral . length
 {-# INLINE lengthNum #-}
 
+groupValuesByKeyWith :: (k -> k -> Ordering) -> (a -> k) -> (a -> v) -> [a] -> [(k, [v])]
+groupValuesByKeyWith compareKeys getKey getValue =
+  fmap buildGroup . groupBy (keysEqual `on` getKey) . sortBy (compareKeys `on` getKey)
+  where
+    keysEqual = (EQ ==) .: compareKeys
+    buildGroup as = (getKey (head as), fmap getValue as)
+
+groupValuesByKey :: Ord k => (a -> k) -> (a -> v) -> [a] -> [(k, [v])]
+groupValuesByKey = groupValuesByKeyWith compare
+
+groupByKey :: Ord k => (a -> k) -> [a] -> [(k, [a])]
+groupByKey getKey = groupValuesByKey getKey id
