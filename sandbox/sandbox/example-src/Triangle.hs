@@ -156,7 +156,9 @@ main = vulkanExampleMain "Triangle" [] [] Nothing $ \PhysicalDevice{..} window w
       -- FIFO mode is always supported, but mailbox mode is preferred if available
       -- because it's lower latency.  We don't want immediate mode, because we have
       -- no need to present so quickly that there is tearing.
-      swapchainPresentMode = fromMaybe VK_PRESENT_MODE_FIFO_KHR $ find (== VK_PRESENT_MODE_MAILBOX_KHR) (vkaElems surfacePresentModeArray)
+      swapchainPresentMode =
+        find (== VK_PRESENT_MODE_MAILBOX_KHR) (vkaElems surfacePresentModeArray) &
+        fromMaybe VK_PRESENT_MODE_FIFO_KHR
 
       swapchainImageExtent =
         -- Reminder: If currentExtent is (maxBound, maxBound), the surface extent is
@@ -647,8 +649,11 @@ main = vulkanExampleMain "Triangle" [] [] Nothing $ \PhysicalDevice{..} window w
           return $ Just False
         WindowReady ->
           handleJust
-            (guard . (VK_ERROR_OUT_OF_DATE_KHR ==) . vkaResultException'result)
-            (const $ return $ Just True)
+            (guarded $ (VK_ERROR_OUT_OF_DATE_KHR ==) . vkaResultException'result)
+            (\ex -> do
+              ioPutStrLn $ "Out of date error: " ++ vkaResultException'functionName ex
+              return $ Just True
+            )
           $ do
             vkaWaitForFence frameSync'inFlightFence maxBound & void
             vkaResetFence frameSync'inFlightFence
@@ -685,8 +690,15 @@ main = vulkanExampleMain "Triangle" [] [] Nothing $ \PhysicalDevice{..} window w
                 set @"pResults" VK_NULL
 
             case queuePresentResult of
-              VK_SUBOPTIMAL_KHR -> return $ Just True
+              VK_SUBOPTIMAL_KHR -> do
+                ioPutStrLn "Suboptimal present result!"
+                return $ Just True
               _ -> return Nothing
+
+    ioPutStrLn "Awaiting queues."
+    forM_ [("Transfer", transferQueue), ("Present", presentQueue), ("Graphics", graphicsQueue)] $ \(name, q) -> do
+      ioPutStrLn $ "Awaiting queue: " ++ name
+      liftIO $ vkaQueueWaitIdle q
 
     ioPutStrLn "Render loop ended.  Waiting for device to idle."
     vkaDeviceWaitIdle
@@ -697,7 +709,7 @@ main = vulkanExampleMain "Triangle" [] [] Nothing $ \PhysicalDevice{..} window w
   ioPutStrLn "Cleaning up the rest."
 
 maxFramesInFlight :: Int
-maxFramesInFlight = 2
+maxFramesInFlight = 1
 
 data Vertex =
   Vertex {
@@ -734,11 +746,3 @@ glToVk = mat44
   (vec4 0 (-1) 0   0)
   (vec4 0 0    0.5 0.5)
   (vec4 0 0    0   1)
-
-data PhysicalDeviceInfo =
-  PhysicalDeviceInfo {
-    physicalDeviceInfo'physicalDevice :: VkPhysicalDevice,
-    physicalDeviceInfo'properties :: VkPhysicalDeviceProperties,
-    physicalDeviceInfo'memoryProperties :: VkPhysicalDeviceMemoryProperties,
-    physicalDeviceInfo'features :: VkPhysicalDeviceFeatures
-  }

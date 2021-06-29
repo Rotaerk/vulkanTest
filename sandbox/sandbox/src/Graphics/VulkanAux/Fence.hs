@@ -24,21 +24,21 @@ initStandardFenceCreateInfo =
 setFenceSignaled :: Bool -> CreateVkStruct VkFenceCreateInfo '["flags"] ()
 setFenceSignaled isSignaled = set @"flags" (if isSignaled then VK_FENCE_CREATE_SIGNALED_BIT else zeroBits)
 
-vkaCreateFence :: (MonadIO m, Given VkDevice) => Bool -> ResourceT m VkFence
+vkaCreateFence :: (MonadResource m, Given VkDevice) => Bool -> m VkFence
 vkaCreateFence signaled = vkaAllocateResource_ vkaFenceResource $ createVk $ initStandardFenceCreateInfo &* setFenceSignaled signaled
 
-vkaWaitForFences :: Given VkDevice => [VkFence] -> VkBool32 -> Word64 -> IO VkResult
+vkaWaitForFences :: (MonadIO m, Given VkDevice) => [VkFence] -> VkBool32 -> Word64 -> m VkResult
 vkaWaitForFences fences waitAll timeout =
-  withArray fences $ \fencesPtr ->
+  liftIO $ withArray fences $ \fencesPtr ->
   vkWaitForFences given (lengthNum fences) fencesPtr waitAll timeout & onVkFailureThrow "vkWaitForFences" [VK_SUCCESS, VK_TIMEOUT]
 
-vkaWaitForFence :: Given VkDevice => VkFence -> Word64 -> IO VkResult
-vkaWaitForFence fence timeout = vkaWaitForFences [fence] VK_TRUE timeout
+vkaWaitForFence :: (MonadIO m, Given VkDevice) => VkFence -> Word64 -> m VkResult
+vkaWaitForFence fence timeout = liftIO $ vkaWaitForFences [fence] VK_TRUE timeout
 
-vkaResetFences :: Given VkDevice => [VkFence] -> IO ()
+vkaResetFences :: (MonadIO m, Given VkDevice) => [VkFence] -> m ()
 vkaResetFences fences =
-  withArray fences $ \fencesPtr ->
+  liftIO $ withArray fences $ \fencesPtr ->
   vkResetFences given (lengthNum fences) fencesPtr & onVkFailureThrow_ "vkResetFences"
 
-vkaResetFence :: Given VkDevice => VkFence -> IO ()
+vkaResetFence :: (MonadIO m, Given VkDevice) => VkFence -> m ()
 vkaResetFence fence = vkaResetFences [fence]

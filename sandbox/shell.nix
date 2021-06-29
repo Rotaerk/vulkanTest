@@ -9,6 +9,7 @@ let
     hs.ghcid
     hs.hpack
     vulkan-tools
+    vulkan-tools-lunarg
     glslang
     binutils-unwrapped
     gcc9

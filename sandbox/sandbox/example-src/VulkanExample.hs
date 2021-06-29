@@ -112,7 +112,7 @@ initGlfwAndVulkan exampleName extensions = do
       ) &*
       setStrListCountAndRef @"enabledLayerCount" @"ppEnabledLayerNames" (
 #ifndef NDEBUG
-        ["VK_LAYER_KHRONOS_validation"]
+        ["VK_LAYER_KHRONOS_validation", "VK_LAYER_LUNARG_api_dump"]
 #else
         []
 #endif
@@ -127,6 +127,7 @@ initGlfwAndVulkan exampleName extensions = do
 #endif
       )
   ioPutStrLn "Vulkan instance created."
+
 
 #ifndef NDEBUG
   vkaRegisterDebugCallback vkInstance

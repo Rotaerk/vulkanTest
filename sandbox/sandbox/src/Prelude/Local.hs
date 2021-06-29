@@ -4,6 +4,7 @@
 
 module Prelude.Local where
 
+import Control.Applicative
 import Control.Exception
 import Control.Monad
 import Control.Monad.IO.Class
@@ -216,3 +217,6 @@ groupValuesByKey = groupValuesByKeyWith compare
 
 groupByKey :: Ord k => (a -> k) -> [a] -> [(k, [a])]
 groupByKey getKey = groupValuesByKey getKey id
+
+guarded :: Alternative f => (a -> Bool) -> a -> f a
+guarded p a = bool empty (pure a) (p a)

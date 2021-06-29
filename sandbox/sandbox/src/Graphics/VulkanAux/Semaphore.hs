@@ -15,5 +15,12 @@ initStandardSemaphoreCreateInfo =
   set @"sType" VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO &*
   set @"pNext" VK_NULL
 
-vkaCreateSemaphore :: (MonadIO m, Given VkDevice) => ResourceT m VkSemaphore
+vkaCreateSemaphore :: (MonadResource m, Given VkDevice) => m VkSemaphore
 vkaCreateSemaphore = vkaAllocateResource_ vkaSemaphoreResource $ createVk initStandardSemaphoreCreateInfo
+
+{-
+vkaSignalSemaphore :: (MonadResource m, Given VkDevice) => VkSemaphoreSignalInfo -> m ()
+vkaSignalSemaphore signalInfo =
+  withPtr signalInfo $ \signalInfoPtr ->
+  vkSignalSemaphore given signalInfoPtr & onVkFailureThrow_ "vkSignalSemaphore"
+-}
